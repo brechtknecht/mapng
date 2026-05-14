@@ -23,6 +23,10 @@ export const useMainStore = defineStore('main', () => {
   const isLoading = ref(false);
   const loadingStatus = ref("Initializing...");
   const previewMode = ref(false);
+  // Debug view tab — mutually exclusive with previewMode. Renders junction
+  // geometry analysis as a separate THREE.js scene for visual inspection
+  // before BeamNG export.
+  const debugMode = ref(false);
   const surroundingTilePositions = ref([]);
 
   // --- Batch Job State ---
@@ -122,6 +126,7 @@ export const useMainStore = defineStore('main', () => {
     isLoading,
     loadingStatus,
     previewMode,
+    debugMode,
     surroundingTilePositions,
     batchGridCols,
     batchGridRows,

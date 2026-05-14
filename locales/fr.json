@@ -30,7 +30,8 @@
   },
   "view": {
     "map2d": "Carte 2D",
-    "preview3d": "Aperçu 3D"
+    "preview3d": "Aperçu 3D",
+    "debug": "Débogage"
   },
   "mobile": {
     "desktopRequired": "Ordinateur requis",

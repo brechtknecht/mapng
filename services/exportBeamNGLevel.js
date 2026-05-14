@@ -9,6 +9,8 @@ import { prepareCroppedTerrainData } from './cropTerrain.js';
 import { applyBuildingFoundations } from './buildingFoundations.js';
 import { ColladaExporter } from './ColladaExporter.js';
 import { buildRoadNetwork } from './roadNetwork.js';
+import { analyzeJunctions, clipPolylineEnds } from './junctionGeometry.js';
+import { buildJunctionMeshGroup } from './junctionMesh.js';
 import {
   getBeamNGFlavorById,
   getGlobalEnvironmentMap,
@@ -512,6 +514,65 @@ async function generateOSMObjectsDAE(terrainData, worldSize) {
   // Pass base00 directly so it becomes the top-level node in <visual_scene>,
   // matching the reference flag asset structure.
   const result = new ColladaExporter().parse(base00, undefined, { version: '1.4.1', upAxis: 'Z_UP' });
+  if (!result?.data) return null;
+  return result.data;
+}
+
+/**
+ * Generate a Collada (.dae) for road junction fill meshes.
+ *
+ * Each junction's CCW world-space polygon (from analyzeJunctions) is
+ * triangulated by buildJunctionMeshGroup and merged into a single mesh
+ * named `road_junctions` bound to the `m_asphalt_new_01` material — same
+ * material the MeshRoads use, so the surface texture matches.
+ *
+ * Junctions are already in BeamNG world space (Z-up, meters), so unlike
+ * generateOSMObjectsDAE we do NOT apply the scene→world transform.
+ *
+ * Returns the DAE bytes, or null if there's nothing to mesh.
+ */
+function generateJunctionsDAE(junctions) {
+  if (!Array.isArray(junctions) || junctions.length === 0) return null;
+
+  // Depth must equal the MeshRoad slab depth so junction side walls butt
+  // cleanly against MeshRoad end caps with no z-step / no gap.
+  const junctionGroup = buildJunctionMeshGroup(junctions, { depth: MESH_ROAD_SURFACE_LIFT });
+  if (!junctionGroup) return null;
+
+  // Clone the visual geometry into a collision mesh named "Colmesh-1".
+  // BeamNG identifies collision geometry by <geometry id> starting with
+  // "Col" — without this, the TSStatic renders visually but has no physical
+  // collision (cars drive straight through the junction patch). Same pattern
+  // used for OSM building collision in generateOSMObjectsDAE.
+  let collisionMesh = null;
+  junctionGroup.traverse((child) => {
+    if (child.isMesh && !collisionMesh) {
+      const collisionGeom = child.geometry.clone();
+      collisionGeom.name = 'Colmesh-1';
+      collisionMesh = new THREE.Mesh(
+        collisionGeom,
+        new THREE.MeshBasicMaterial({ name: 'osm_object', color: 0xffffff }),
+      );
+      collisionMesh.name = 'Colmesh-1';
+    }
+  });
+
+  // Wrap in the same hierarchy generateOSMObjectsDAE uses
+  // (base00 > start01 > meshes) — BeamNG requires base00 at the top of
+  // <visual_scene>, and feeding a THREE.Scene would add an extra unnamed node.
+  const base00 = new THREE.Group();
+  base00.name = 'base00';
+  const start01 = new THREE.Group();
+  start01.name = 'start01';
+  start01.add(junctionGroup);
+  if (collisionMesh) start01.add(collisionMesh);
+  base00.add(start01);
+  base00.updateMatrixWorld(true);
+
+  const result = new ColladaExporter().parse(base00, undefined, {
+    version: '1.4.1',
+    upAxis: 'Z_UP',
+  });
   if (!result?.data) return null;
   return result.data;
 }
@@ -2036,50 +2097,147 @@ function generateRoadArchitectSession(terrainData, squareSize, levelName) {
 /**
  * Convert OSM road features to BeamNG MeshRoad 3D geometry objects.
  *
+ * Iterates road-network segments (split at intersections) instead of raw OSM
+ * ways, so each MeshRoad terminates at intersection nodes. This is the
+ * foundation for per-segment junction clip-back (see junctionGeometry.js).
+ *
  * Each road segment becomes a MeshRoad with m_asphalt_new_01 on the top, side,
  * and bottom surfaces. Node format is [x, y, z, fullWidth, depth, nx, ny, nz].
- * Roads that were split by clipping or chunking share an incremented counter
- * so each object gets a unique name.
+ * Segments that were further split by terrain-margin clipping or chunking each
+ * become their own MeshRoad object with an incremented counter for uniqueness.
  *
- * Returns an empty array when no OSM data is available or useMeshRoads is false.
+ * Returns an empty array when no OSM data is available.
  */
+const MESH_ROAD_SURFACE_LIFT = 0.5;
+
+/**
+ * Compute the shared mesh-road analysis: road network, per-segment world
+ * geometry + half-width, junction polygons, per-segment clip-back distances.
+ *
+ * Exposed so the in-app debug view can render the exact same analysis the
+ * export uses, without performing a full BeamNG export. Single source of
+ * truth — any fix to junction math here lands in both code paths at once.
+ *
+ * Returns `null` if there's no OSM road data to analyze.
+ *
+ * @param {object} terrainData
+ * @param {number} [squareSize]  Defaults to `computeSquareSize(terrainData)`.
+ * @returns {null | {
+ *   roadNetwork: object,
+ *   segmentInfo: Map<string, {worldGeometry: number[][], halfWidth: number}>,
+ *   junctions: object[],
+ *   segmentClips: Map<string, {startClipBack: number, endClipBack: number}>,
+ *   squareSize: number,
+ *   surfaceLift: number,
+ * }}
+ */
+export function buildMeshRoadAnalysis(terrainData, squareSize) {
+  if (!terrainData?.osmFeatures?.length) return null;
+  const effectiveSquareSize = Number.isFinite(squareSize)
+    ? squareSize
+    : computeSquareSize(terrainData);
+
+  const roadNetwork = buildRoadNetwork(terrainData.osmFeatures.filter((feature) => {
+    if (feature?.type !== 'road' || !feature.geometry?.length) return false;
+    const highway = feature.tags?.highway;
+    return !!highway && !ROAD_SKIP.has(highway);
+  }));
+
+  // Pre-compute world-space geometry and half-width for every network segment.
+  // The junction analyzer needs both up front to compute tangents, bisectors,
+  // and clip-back distances in metric world space. Z is already lifted by
+  // MESH_ROAD_SURFACE_LIFT so junction polygon Z values match the MeshRoad
+  // top surface (avoids a 0.5 m vertical seam at the junction edge).
+  const segmentInfo = new Map();
+  for (const seg of roadNetwork.segments) {
+    const worldGeom = seg.geometry.map((pt) => {
+      const [wx, wy, wz] = geoToWorld(pt.lat, pt.lng, terrainData, effectiveSquareSize, 0.1);
+      return [wx, wy, wz + MESH_ROAD_SURFACE_LIFT];
+    });
+    const style = HIGHWAY_STYLE[seg.highway] ?? DEFAULT_ROAD_STYLE;
+    const isOneWay = isOneWayRoad(seg.tags || {});
+    const halfWidth = estimateRoadHalfWidth(seg.tags || {}, seg.highway, isOneWay, style.width);
+    segmentInfo.set(seg.id, { worldGeometry: worldGeom, halfWidth });
+  }
+
+  const { junctions, segmentClips } = analyzeJunctions(roadNetwork, segmentInfo);
+  return {
+    roadNetwork,
+    segmentInfo,
+    junctions,
+    segmentClips,
+    squareSize: effectiveSquareSize,
+    surfaceLift: MESH_ROAD_SURFACE_LIFT,
+  };
+}
+
 function generateMeshRoads(terrainData, squareSize) {
-  if (!terrainData.osmFeatures?.length) return [];
+  const analysis = buildMeshRoadAnalysis(terrainData, squareSize);
+  if (!analysis) return { meshRoads: [], junctions: [] };
+  const { roadNetwork, segmentInfo, junctions, segmentClips } = analysis;
 
   const meshRoads = [];
   let roadIndex = 0;
 
-  for (const feature of terrainData.osmFeatures) {
-    if (feature.type !== 'road' || !feature.geometry?.length) continue;
+  for (const segmentFeature of roadNetwork.segments) {
+    const info = segmentInfo.get(segmentFeature.id);
+    if (!info) continue;
+    const fullWidth = info.halfWidth * 2;
 
-    const highway = feature.tags?.highway;
-    if (!highway || ROAD_SKIP.has(highway)) continue;
+    const originalStart = segmentFeature.geometry[0];
+    const originalEnd = segmentFeature.geometry[segmentFeature.geometry.length - 1];
+    const clip = segmentClips.get(segmentFeature.id) || { startClipBack: 0, endClipBack: 0 };
 
-    const style = HIGHWAY_STYLE[highway] ?? DEFAULT_ROAD_STYLE;
-    const isOneWay = isOneWayRoad(feature.tags || {});
-    const halfWidth = estimateRoadHalfWidth(feature.tags || {}, highway, isOneWay, style.width);
-    const fullWidth = halfWidth * 2;
-
-    const clippedSegments = clipGeometryToMargin(feature.geometry, terrainData.bounds)
+    const clippedSegments = clipGeometryToMargin(segmentFeature.geometry, terrainData.bounds)
       .flatMap(s => chunkPolyline(s));
 
-    for (const segment of clippedSegments) {
+    for (let i = 0; i < clippedSegments.length; i++) {
+      const segment = clippedSegments[i];
+      // Only the first and last pieces can still touch the original segment
+      // endpoints (terrain-clipping may have removed start/end). Match by
+      // exact lat/lng — anything else was created by interpolation at the
+      // terrain boundary and doesn't anchor to a junction.
+      const touchesStart =
+        i === 0 && sameLatLng(segment[0], originalStart) && clip.startClipBack > 0;
+      const touchesEnd =
+        i === clippedSegments.length - 1 &&
+        sameLatLng(segment[segment.length - 1], originalEnd) &&
+        clip.endClipBack > 0;
+
       const rawNodes = [];
       for (const pt of segment) {
         const [wx, wy, wz] = geoToWorld(pt.lat, pt.lng, terrainData, squareSize, 0.1);
         // MeshRoad node: [x, y, z, fullWidth, depth, normalX, normalY, normalZ]
         rawNodes.push([
-          Math.round(wx * 1000) / 1000,
-          Math.round(wy * 1000) / 1000,
-          Math.round((wz + 0.5) * 1000) / 1000,
+          wx,
+          wy,
+          wz + MESH_ROAD_SURFACE_LIFT,
           fullWidth,
           4,
           0, 0, 1,
         ]);
       }
 
+      // Trim the spline back from junctions so it stops at the bisector edge
+      // instead of overlapping into the intersection. Applied in world meters,
+      // before decimation, so the trim is exact.
+      const trimmed =
+        touchesStart || touchesEnd
+          ? clipPolylineEnds(
+              rawNodes,
+              touchesStart ? clip.startClipBack : 0,
+              touchesEnd ? clip.endClipBack : 0,
+            )
+          : rawNodes;
+      if (trimmed.length < 2) continue;
+
       // Reuse decimation but strip/re-add the extra fields (decimateNodes works on [x,y,z,w])
-      const stripped = rawNodes.map(n => [n[0], n[1], n[2], n[3]]);
+      const stripped = trimmed.map((n) => [
+        Math.round(n[0] * 1000) / 1000,
+        Math.round(n[1] * 1000) / 1000,
+        Math.round(n[2] * 1000) / 1000,
+        n[3],
+      ]);
       const decimated = decimateNodes(stripped);
       if (decimated.length < 2) continue;
 
@@ -2101,7 +2259,11 @@ function generateMeshRoads(terrainData, squareSize) {
     }
   }
 
-  return meshRoads;
+  return { meshRoads, junctions };
+}
+
+function sameLatLng(a, b) {
+  return a && b && a.lat === b.lat && a.lng === b.lng;
 }
 
 /**
@@ -3929,9 +4091,9 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     ? roadArchitectSession.data.junctions.length
     : 0;
 
-  const meshRoads = roadType === 'mesh'
+  const { meshRoads, junctions: meshRoadJunctions } = roadType === 'mesh'
     ? generateMeshRoads(exportTerrainData, squareSize)
-    : [];
+    : { meshRoads: [], junctions: [] };
 
   const decalRoads = roadType === 'decal'
     ? generateDecalRoads(exportTerrainData, squareSize)
@@ -3997,6 +4159,14 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     beginStep('Skipping 3D OSM object export (disabled)…', 65);
     await yield_();
   }
+
+  // MeshRoad junctions: triangulate the bisector-clipped polygons computed by
+  // generateMeshRoads into a single Collada mesh that fills the gaps where
+  // each MeshRoad terminates. Only generated when the user picked the mesh
+  // road export type AND there are junctions to mesh.
+  const junctionsDaeBlob = meshRoadJunctions.length > 0
+    ? generateJunctionsDAE(meshRoadJunctions)
+    : null;
 
   beginStep(`Building water objects (sea level + inland ${includeWater ? 'enabled' : 'disabled'})…`, 71);
   await yield_();
@@ -4309,11 +4479,12 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
 
   // ── art/shapes/ (OSM 3D objects and/or terrain backdrop) ──────────────────
   // Only written when at least one DAE file is present.
-  if (osmDaeBlob || backdropDaeBlob || forestFiles.length > 0 || groundCoverObjects.length > 0 || mapngFlagFiles.length > 0) {
+  if (osmDaeBlob || backdropDaeBlob || junctionsDaeBlob || forestFiles.length > 0 || groundCoverObjects.length > 0 || mapngFlagFiles.length > 0) {
     zip.folder(`${base}/art/shapes`);
     if (mapngFlagFiles.length > 0) zip.folder(`${base}/art/shapes/mapng`);
 
     if (osmDaeBlob) zip.file(`${base}/art/shapes/osm_objects.dae`, osmDaeBlob);
+    if (junctionsDaeBlob) zip.file(`${base}/art/shapes/road_junctions.dae`, junctionsDaeBlob);
     if (backdropDaeBlob) zip.file(`${base}/art/shapes/terrain_backdrop.dae`, backdropDaeBlob);
     for (const asset of mapngFlagFiles) {
       const relativePath = asset.path.startsWith('mapng/') ? asset.path.slice('mapng/'.length) : asset.path;
@@ -4586,6 +4757,26 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       persistentId: generatePersistentId(),
       position: [0, 0, 0],
       shapeName: `levels/${levelName}/art/shapes/osm_objects.dae`,
+      collisionType: 'Collision Mesh',
+      decalType: 'Collision Mesh',
+      prebuildCollisionData: 0,
+      useInstanceRenderData: true,
+    });
+  }
+
+  if (junctionsDaeBlob) {
+    // road_junctions.dae fills the bisector-clipped gaps between MeshRoads.
+    // collisionType: 'Collision Mesh' is required — the junction patch sits
+    // at the MeshRoad top-surface elevation (terrain Z + 0.5), so the terrain
+    // collision underneath is at the wrong height; without mesh collision the
+    // car would fall through the junction onto the terrain below.
+    otherItems.push({
+      __parent: 'Other',
+      class: 'TSStatic',
+      name: 'road_junctions',
+      persistentId: generatePersistentId(),
+      position: [0, 0, 0],
+      shapeName: `levels/${levelName}/art/shapes/road_junctions.dae`,
       collisionType: 'Collision Mesh',
       decalType: 'Collision Mesh',
       prebuildCollisionData: 0,

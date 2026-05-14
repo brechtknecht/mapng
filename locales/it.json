@@ -30,7 +30,8 @@
   },
   "view": {
     "map2d": "Mappa 2D",
-    "preview3d": "Anteprima 3D"
+    "preview3d": "Anteprima 3D",
+    "debug": "Debug"
   },
   "mobile": {
     "desktopRequired": "Desktop Richiesto",

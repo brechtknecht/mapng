@@ -78,15 +78,17 @@
     <main class="flex-1 relative flex flex-col h-full bg-gray-100 dark:bg-gray-950">
       <ViewTabs
         :preview-mode="previewMode"
+        :debug-mode="debugMode"
         :can-preview="!!terrainData"
         @switch-2d="switchTo2D"
-        @switch-3d="previewMode = true"
+        @switch-3d="switchTo3D"
+        @switch-debug="switchToDebug"
       />
 
       <!-- Views -->
       <div class="flex-1 relative w-full h-full">
         <!-- Map View -->
-        <div :class="['absolute inset-0 transition-all duration-500', previewMode ? 'opacity-0 invisible' : 'opacity-100 visible']">
+        <div :class="['absolute inset-0 transition-all duration-500', (previewMode || debugMode) ? 'opacity-0 invisible' : 'opacity-100 visible']">
           <MapSelector 
             :center="center" 
             :zoom="zoom" 
@@ -108,7 +110,7 @@
         <div :class="['absolute inset-0 transition-all duration-500 bg-black', previewMode ? 'opacity-100 visible' : 'opacity-0 invisible pointer-events-none']">
           <Suspense>
             <template #default>
-              <Preview3D 
+              <Preview3D
                 v-if="terrainData && previewMode"
                 :terrain-data="terrainData"
               />
@@ -120,6 +122,14 @@
               </div>
             </template>
           </Suspense>
+        </div>
+
+        <!-- Debug View -->
+        <div :class="['absolute inset-0 transition-all duration-500 bg-[#0a0a14]', debugMode ? 'opacity-100 visible' : 'opacity-0 invisible pointer-events-none']">
+          <DebugView
+            v-if="terrainData && debugMode"
+            :terrain-data="terrainData"
+          />
         </div>
         
         <!-- Loading Overlay -->
@@ -199,6 +209,7 @@ import BatchControlPanel from './components/panels/BatchControlPanel.vue';
 import BatchProgressModal from './components/modals/BatchProgressModal.vue';
 import MapSelector from './components/map/MapSelector.vue';
 import Preview3D from './components/three/Preview3D.vue';
+import DebugView from './components/debug/DebugView.vue';
 import AppSidebar from './components/layout/AppSidebar.vue';
 import ViewTabs from './components/ui/ViewTabs.vue';
 import { fetchTerrainData, addOSMToTerrain, loadTerrainFromTif, parseTifFile, loadTerrainFromLaz, parseLazFile } from './services/terrain';
@@ -234,6 +245,7 @@ const {
   isLoading,
   loadingStatus,
   previewMode,
+  debugMode,
   surroundingTilePositions,
   batchGridCols,
   batchGridRows,
@@ -767,8 +779,19 @@ const cancelGeneration = () => {
 
 const switchTo2D = () => {
   previewMode.value = false;
+  debugMode.value = false;
   // Do not clear terrainData here, so users can switch back and forth
   // without losing their generated exports.
+};
+
+const switchTo3D = () => {
+  previewMode.value = true;
+  debugMode.value = false;
+};
+
+const switchToDebug = () => {
+  previewMode.value = false;
+  debugMode.value = true;
 };
 
 // ─── Batch Job Handlers ─────────────────────────────────────────────

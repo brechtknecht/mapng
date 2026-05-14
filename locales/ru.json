@@ -30,7 +30,8 @@
   },
   "view": {
     "map2d": "2D-карта",
-    "preview3d": "3D-предпросмотр"
+    "preview3d": "3D-предпросмотр",
+    "debug": "Отладка"
   },
   "mobile": {
     "desktopRequired": "Требуется компьютер",

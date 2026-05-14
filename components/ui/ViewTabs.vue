@@ -4,7 +4,7 @@
       size="sm"
       variant="ghost"
       class="view-tab"
-      :class="!previewMode ? 'view-tab--active' : 'view-tab--inactive'"
+      :class="is2D ? 'view-tab--active' : 'view-tab--inactive'"
       @click="$emit('switch-2d')"
     >
       <Globe :size="16" />
@@ -21,6 +21,17 @@
       <Layers :size="16" />
       {{ t('view.preview3d') }}
     </BaseButton>
+    <BaseButton
+      size="sm"
+      variant="ghost"
+      class="view-tab"
+      :class="debugMode ? 'view-tab--active view-tab--debug-active' : 'view-tab--inactive'"
+      :disabled="!canPreview"
+      @click="$emit('switch-debug')"
+    >
+      <Bug :size="16" />
+      {{ t('view.debug') }}
+    </BaseButton>
   </div>
 </template>
 
@@ -31,6 +42,10 @@
 
 .view-tab--active {
   @apply bg-[#1d2d44] text-white shadow-sm;
+}
+
+.view-tab--debug-active {
+  @apply bg-[#b91c1c] text-white shadow-sm;
 }
 
 .view-tab--inactive {
@@ -45,6 +60,10 @@
   @apply bg-[#1d2d44] text-white;
 }
 
+.view-tab--debug-active:hover {
+  @apply bg-[#b91c1c] text-white;
+}
+
 .view-tab--inactive:hover {
   @apply bg-transparent text-gray-800 dark:text-white;
 }
@@ -52,15 +71,19 @@
 
 <script setup>
 import { useI18n } from 'vue-i18n';
+import { computed } from 'vue';
 import BaseButton from '../base/BaseButton.vue';
-import { Globe, Layers } from 'lucide-vue-next';
+import { Globe, Layers, Bug } from 'lucide-vue-next';
 
 const { t } = useI18n({ useScope: 'global' });
 
-defineProps({
+const props = defineProps({
   previewMode: { type: Boolean, default: false },
+  debugMode: { type: Boolean, default: false },
   canPreview: { type: Boolean, default: false },
 });
 
-defineEmits(['switch-2d', 'switch-3d']);
+const is2D = computed(() => !props.previewMode && !props.debugMode);
+
+defineEmits(['switch-2d', 'switch-3d', 'switch-debug']);
 </script>

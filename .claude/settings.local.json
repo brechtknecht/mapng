@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:documentation.beamng.com)",
+      "Bash(cd /c/Users/felix/dev/mapng && grep -r \"analyzeJunctions\\\\|junctionGeometry\" --include=\"*.js\" --include=\"*.vue\" | head -20)",
+      "PowerShell($a = Test-Path 'node_modules\\\\three\\\\examples\\\\jsm\\\\controls\\\\OrbitControls.js'; $b = Test-Path 'node_modules\\\\three\\\\addons\\\\controls\\\\OrbitControls.js'; \"examples: $a, addons: $b\")"
+    ]
+  }
+}
