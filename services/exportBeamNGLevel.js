@@ -990,7 +990,8 @@ function pruneShortEndEdges(nodes, minLen) {
  */
 function smoothSharpKinks(nodes, thresholdDeg, offsetDist) {
   if (!Array.isArray(nodes) || nodes.length < 3) return nodes;
-  const thresholdCos = Math.cos((thresholdDeg * Math.PI) / 180);
+  const thresholdCosWide = Math.cos((thresholdDeg * Math.PI) / 180);
+  const thresholdCosTight = Math.cos((KINK_SMOOTH_THRESHOLD_TIGHT_DEG * Math.PI) / 180);
   const out = [nodes[0]];
   for (let i = 1; i < nodes.length - 1; i++) {
     const prev = nodes[i - 1];
@@ -1004,9 +1005,26 @@ function smoothSharpKinks(nodes, thresholdDeg, offsetDist) {
     const len1 = Math.hypot(vx1, vy1);
     if (len0 < 0.2 || len1 < 0.2) { out.push(curr); continue; }
     const cosAng = (vx0 * vx1 + vy0 * vy1) / (len0 * len1);
-    if (cosAng >= thresholdCos) { out.push(curr); continue; }
-    // Sharp kink — cap the offset so the chamfer nodes can't pass each
-    // other's neighbors (would create self-intersection).
+
+    // Pick threshold based on whether we're in a "short edge" region.
+    // Short-edge regions get a tighter threshold because the spline
+    // curvature there is much higher per unit angle change.
+    const isShortRegion = len0 < KINK_SHORT_EDGE_M || len1 < KINK_SHORT_EDGE_M;
+    const effectiveCos = isShortRegion ? thresholdCosTight : thresholdCosWide;
+
+    if (cosAng >= effectiveCos) { out.push(curr); continue; }
+
+    if (isShortRegion) {
+      // Short-edge region: DROP the kink node entirely. Chamfering doesn't
+      // help because the chamfer offset would be comparable to the already-
+      // short adjacent edges — we'd just shift the spline curvature problem
+      // to two new nodes instead of one. Dropping it straightens the
+      // affected stretch slightly, which is what users perceive as "fixing
+      // the corkscrew at the end of the road".
+      continue;
+    }
+
+    // Long-edge region with sharp turn: chamfer into two gentler turns.
     const offset = Math.min(offsetDist, len0 * 0.4, len1 * 0.4);
     const aFactor = (len0 - offset) / len0;
     const bFactor = offset / len1;
@@ -1025,6 +1043,116 @@ function smoothSharpKinks(nodes, thresholdDeg, offsetDist) {
   }
   out.push(nodes[nodes.length - 1]);
   return out;
+}
+
+/**
+ * Mutates `nodes` to fix imbalanced end edges that would cause a Catmull-Rom-
+ * style spline overshoot (the "corkscrew at the cap" symptom).
+ *
+ * The root pattern: a long penultimate edge sets a large tangent magnitude at
+ * the joining node, but the short last edge can't span that tangent — the
+ * spline overshoots its own polyline to satisfy both control constraints.
+ * Even a modest angle change at the joining node amplifies this dramatically.
+ *
+ * Detection criteria (last-edge side, mirrored for first-edge):
+ *   1. lastEdgeLen < ratio × penultimateEdgeLen
+ *   2. angle change at the joining node > kinkThresholdDeg
+ *
+ * If both hold, the joining node (nodes[N-2] resp. nodes[1]) is dropped. The
+ * polyline gains a longer end edge with no kink. Iterated until stable.
+ */
+function balanceEndEdges(nodes, ratio, kinkThresholdDeg) {
+  if (!Array.isArray(nodes) || nodes.length < 3) return;
+  const kinkCos = Math.cos((kinkThresholdDeg * Math.PI) / 180);
+
+  // Last-edge side: drop nodes[N-2] until stable.
+  while (nodes.length >= 3) {
+    const N = nodes.length;
+    const lastVx = nodes[N - 1][0] - nodes[N - 2][0];
+    const lastVy = nodes[N - 1][1] - nodes[N - 2][1];
+    const lastLen = Math.hypot(lastVx, lastVy);
+    const prevVx = nodes[N - 2][0] - nodes[N - 3][0];
+    const prevVy = nodes[N - 2][1] - nodes[N - 3][1];
+    const prevLen = Math.hypot(prevVx, prevVy);
+    if (lastLen < 1e-3 || prevLen < 1e-3) break;
+    if (lastLen >= prevLen * ratio) break;
+    const cosAng = (lastVx * prevVx + lastVy * prevVy) / (lastLen * prevLen);
+    if (cosAng >= kinkCos) break;
+    nodes.splice(N - 2, 1);
+  }
+
+  // First-edge side: drop nodes[1] until stable.
+  while (nodes.length >= 3) {
+    const firstVx = nodes[1][0] - nodes[0][0];
+    const firstVy = nodes[1][1] - nodes[0][1];
+    const firstLen = Math.hypot(firstVx, firstVy);
+    const secondVx = nodes[2][0] - nodes[1][0];
+    const secondVy = nodes[2][1] - nodes[1][1];
+    const secondLen = Math.hypot(secondVx, secondVy);
+    if (firstLen < 1e-3 || secondLen < 1e-3) break;
+    if (firstLen >= secondLen * ratio) break;
+    const cosAng = (firstVx * secondVx + firstVy * secondVy) / (firstLen * secondLen);
+    if (cosAng >= kinkCos) break;
+    nodes.splice(1, 1);
+  }
+}
+
+/**
+ * Replace the polyline with uniformly-spaced samples along its XY arc length.
+ *
+ * The output has the same start, end, and overall path shape, but every
+ * interior node sits exactly `targetSpacing` meters from its neighbors. This
+ * eliminates the dominant cause of MeshRoad spline corkscrewing in BeamNG:
+ * a Catmull-Rom-style spline's tangent magnitude at each node scales with
+ * the surrounding edge lengths, so a polyline with mixed long/short edges
+ * produces wildly different tangent magnitudes that the spline tries to
+ * satisfy by overshooting between adjacent nodes. Uniform spacing → uniform
+ * tangents → smooth spline everywhere, not just at the ends.
+ *
+ * Interpolates all node fields linearly (XYZ, width, …), so width tapers and
+ * elevation slopes are preserved across the resampling.
+ *
+ * Short polylines (< 1.5× targetSpacing) are returned as just the two
+ * endpoints — adding interior nodes there would either duplicate the start
+ * or compress them into the start.
+ */
+function uniformResamplePolyline(nodes, targetSpacing) {
+  if (!Array.isArray(nodes) || nodes.length < 2) return nodes;
+  const cum = [0];
+  for (let i = 1; i < nodes.length; i++) {
+    const dx = nodes[i][0] - nodes[i - 1][0];
+    const dy = nodes[i][1] - nodes[i - 1][1];
+    cum.push(cum[i - 1] + Math.hypot(dx, dy));
+  }
+  const totalLen = cum[cum.length - 1];
+  if (totalLen < targetSpacing * 1.5) {
+    return [[...nodes[0]], [...nodes[nodes.length - 1]]];
+  }
+  const numSegments = Math.max(2, Math.round(totalLen / targetSpacing));
+  const actualSpacing = totalLen / numSegments;
+  const out = [];
+  for (let i = 0; i <= numSegments; i++) {
+    out.push(sampleAtArcLength(nodes, cum, i * actualSpacing));
+  }
+  return out;
+}
+
+function sampleAtArcLength(nodes, cum, target) {
+  if (target <= 0) return [...nodes[0]];
+  const totalLen = cum[cum.length - 1];
+  if (target >= totalLen) return [...nodes[nodes.length - 1]];
+  for (let i = 1; i < cum.length; i++) {
+    if (cum[i] >= target) {
+      const span = cum[i] - cum[i - 1];
+      const t = span > 1e-9 ? (target - cum[i - 1]) / span : 0;
+      const result = new Array(nodes[i].length);
+      for (let f = 0; f < nodes[i].length; f++) {
+        result[f] = nodes[i - 1][f] + (nodes[i][f] - nodes[i - 1][f]) * t;
+      }
+      return result;
+    }
+  }
+  return [...nodes[nodes.length - 1]];
 }
 
 /**
@@ -2245,10 +2373,27 @@ const MIN_MESH_ROAD_LENGTH = 3.0;
 
 /**
  * Polyline turn angle (degrees, deviation from straight) above which we
- * smooth the kink. 75° catches all 90°+ city-corner turns while leaving
- * gentle curves untouched.
+ * smooth the kink in "normal" edge-length regions. 75° catches all 90°+
+ * city-corner turns while leaving gentle curves untouched.
  */
 const KINK_SMOOTH_THRESHOLD_DEG = 75;
+
+/**
+ * Same idea but for regions where at least one adjacent edge is short.
+ * Short edges + even moderate rotation produce a corkscrewing spline cap
+ * in BeamNG (the spline curvature scales inversely with edge length), so we
+ * apply a much tighter threshold there. 30° is empirically restrictive
+ * enough to catch the cases users see as "twisted at the end" without
+ * flagging normal curves.
+ */
+const KINK_SMOOTH_THRESHOLD_TIGHT_DEG = 30;
+
+/**
+ * "Short" edge in meters — below this, we use the tight threshold. 4m is
+ * one MIN_NODE_SPACING_M; below that decimation usually would've collapsed
+ * the segment but interpolated endpoints from clipPolylineEnds survive.
+ */
+const KINK_SHORT_EDGE_M = 4.0;
 
 /**
  * Distance (meters) the chamfer nodes are placed back from a sharp kink,
@@ -2256,6 +2401,36 @@ const KINK_SMOOTH_THRESHOLD_DEG = 75;
  * length so we never overshoot the prev/next node.
  */
 const KINK_SMOOTH_OFFSET_M = 2.0;
+
+/**
+ * The last/first edge must be at least this fraction of its adjacent edge.
+ * Otherwise the imbalanced spacing creates Catmull-Rom tangent overshoot at
+ * the cap ("Bezier handles much longer than the edge they bound"). 0.4 is
+ * empirically the cutoff below which spline corkscrew appears.
+ */
+const END_EDGE_RATIO_THRESHOLD = 0.4;
+
+/**
+ * When end-edge ratio is bad, drop the joining node if there's at least this
+ * much angle change at it. Set low because the imbalance amplifies any kink:
+ * a 20° kink between a 20m and 5m edge produces visible overshoot.
+ */
+const END_EDGE_KINK_DEG = 15;
+
+/**
+ * Target spacing (meters) for uniform polyline resampling. After all the
+ * targeted clean-up passes (kink smoothing, end balancing, etc.), the
+ * polyline is resampled so every node is this far from its neighbors.
+ *
+ * Uniformly-spaced control points produce well-behaved cubic splines: the
+ * Catmull-Rom tangent at each node has magnitude proportional to the
+ * surrounding edge length, so equal edges = equal tangents = no overshoot.
+ *
+ * 4m matches MIN_NODE_SPACING_M; it's small enough to capture road curvature
+ * faithfully but large enough that BeamNG doesn't get drowned in nodes on
+ * long straight roads.
+ */
+const MESH_ROAD_RESAMPLE_SPACING_M = 4.0;
 
 /**
  * Compute the shared mesh-road analysis: road network, per-segment world
@@ -2407,6 +2582,15 @@ export function generateMeshRoads(terrainData, squareSize) {
       pruneShortEndEdges(decimated, MIN_NODE_SPACING_M / 2);
       if (decimated.length < 2) continue;
 
+      // Catmull-Rom tangent-overshoot defense: if the last/first edge is much
+      // shorter than its adjacent edge AND there's a kink at the joining
+      // node, drop the joining node. Without this, BeamNG's MeshRoad spline
+      // produces a visible corkscrew at the cap even when no single angle
+      // exceeds smoothSharpKinks' threshold — the imbalanced edge lengths
+      // amplify mild kinks into severe spline overshoot.
+      balanceEndEdges(decimated, END_EDGE_RATIO_THRESHOLD, END_EDGE_KINK_DEG);
+      if (decimated.length < 2) continue;
+
       // After pruning, drop the whole road if what's left is too short to be
       // a real road. Catches the degenerate case where prune couldn't help
       // (e.g., only 2 nodes that happen to be sub-meter apart). Threshold is
@@ -2422,8 +2606,17 @@ export function generateMeshRoads(terrainData, squareSize) {
       const smoothed = smoothSharpKinks(decimated, KINK_SMOOTH_THRESHOLD_DEG, KINK_SMOOTH_OFFSET_M);
       if (smoothed.length < 2) continue;
 
+      // FINAL PASS: resample the entire polyline to uniform spacing. All
+      // previous passes (decimate, prune, balance, smooth) work on specific
+      // patterns; this one enforces a global property — every consecutive
+      // pair of nodes is the same distance apart. Catmull-Rom tangents are
+      // then uniform along the whole spline, and overshoot/corkscrew is
+      // structurally impossible regardless of any remaining local anomalies.
+      const resampled = uniformResamplePolyline(smoothed, MESH_ROAD_RESAMPLE_SPACING_M);
+      if (resampled.length < 2) continue;
+
       // Reattach depth and normal after decimation
-      const nodes = smoothed.map(n => [n[0], n[1], n[2], n[3], 0.5, 0, 0, 1]);
+      const nodes = resampled.map(n => [n[0], n[1], n[2], n[3], 0.5, 0, 0, 1]);
 
       meshRoads.push({
         class: 'MeshRoad',

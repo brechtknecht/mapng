@@ -77,43 +77,42 @@ export function buildJunctionMeshGroup(junctions, options = {}) {
     const N = polygon.length;
 
     // ── Fan center (shared by top and bottom fans) ────────────────────────
-    // Prefer the original junction node position when available: it's
-    // guaranteed to be inside the polygon (the polygon was built radially
-    // outward from this point), so the centroid fan never produces inverted
-    // or overlapping triangles. Fall back to the vertex average for safety.
+    // XY: prefer the original junction node position (guaranteed to be
+    // INSIDE the polygon, because the polygon was built radially outward
+    // from it — so the centroid fan never produces inverted triangles).
+    // Z: ALWAYS use the average of polygon vertex Zs, never junction.position[2].
+    // The polygon corners have per-corner Z from junctionGeometry.zAtClipBack
+    // — they match each road's actual surface slope. If we used the junction
+    // node's terrain Z here, the fan center would float above or below the
+    // slanted polygon plane, visibly kinking sloped junctions.
     let cx;
     let cy;
-    let cz;
-    if (Array.isArray(junction.position) && junction.position.length >= 3) {
+    if (Array.isArray(junction.position) && junction.position.length >= 2) {
       cx = junction.position[0];
       cy = junction.position[1];
-      cz = junction.position[2];
     } else {
       cx = 0;
       cy = 0;
-      cz = 0;
-      for (const v of polygon) {
-        cx += v[0];
-        cy += v[1];
-        cz += v[2];
-      }
+      for (const v of polygon) { cx += v[0]; cy += v[1]; }
       cx /= N;
       cy /= N;
-      cz /= N;
     }
-    const topZ = cz;
-    const botZ = cz - depth;
+    let cz = 0;
+    for (const v of polygon) cz += v[2];
+    cz /= N;
 
     // ── Top face: centroid + N perimeter vertices, fan triangulation ────
+    // Each polygon vertex keeps its own per-corner Z so the top face
+    // visibly slopes through the junction matching the surrounding roads.
     const topCentroidIdx = baseIndex;
-    positions.push(cx, cy, topZ);
+    positions.push(cx, cy, cz);
     uvs.push(cx / ASPHALT_TILE_SIZE_M, cy / ASPHALT_TILE_SIZE_M);
     normals.push(0, 0, 1);
     baseIndex += 1;
 
     const topRingStart = baseIndex;
     for (const v of polygon) {
-      positions.push(v[0], v[1], topZ);
+      positions.push(v[0], v[1], v[2]);
       uvs.push(v[0] / ASPHALT_TILE_SIZE_M, v[1] / ASPHALT_TILE_SIZE_M);
       normals.push(0, 0, 1);
     }
@@ -126,15 +125,17 @@ export function buildJunctionMeshGroup(junctions, options = {}) {
     }
 
     // ── Bottom face: centroid + N perimeter vertices, fan, reversed winding
+    // Bottom mirrors top by exactly `depth` meters below — preserves the
+    // slope of the top face so the prism is a proper extrusion, not a wedge.
     const botCentroidIdx = baseIndex;
-    positions.push(cx, cy, botZ);
+    positions.push(cx, cy, cz - depth);
     uvs.push(cx / ASPHALT_TILE_SIZE_M, cy / ASPHALT_TILE_SIZE_M);
     normals.push(0, 0, -1);
     baseIndex += 1;
 
     const botRingStart = baseIndex;
     for (const v of polygon) {
-      positions.push(v[0], v[1], botZ);
+      positions.push(v[0], v[1], v[2] - depth);
       uvs.push(v[0] / ASPHALT_TILE_SIZE_M, v[1] / ASPHALT_TILE_SIZE_M);
       normals.push(0, 0, -1);
     }
@@ -175,20 +176,28 @@ export function buildJunctionMeshGroup(junctions, options = {}) {
       const vBot = depth / ASPHALT_TILE_SIZE_M;
 
       const base = baseIndex;
+      // Per-corner Z: each pair (top, bot) follows its polygon vertex's own
+      // surface elevation. The wall becomes a trapezoid (not a rectangle)
+      // when adjacent corners have different Zs — which is exactly what we
+      // want on sloped junctions.
+      const v0TopZ = v0[2];
+      const v1TopZ = v1[2];
+      const v0BotZ = v0[2] - depth;
+      const v1BotZ = v1[2] - depth;
       // 0: top-left (v0, top)
-      positions.push(v0[0], v0[1], topZ);
+      positions.push(v0[0], v0[1], v0TopZ);
       uvs.push(u0, vTop);
       normals.push(nx, ny, 0);
       // 1: top-right (v1, top)
-      positions.push(v1[0], v1[1], topZ);
+      positions.push(v1[0], v1[1], v1TopZ);
       uvs.push(u1, vTop);
       normals.push(nx, ny, 0);
       // 2: bottom-right (v1, bot)
-      positions.push(v1[0], v1[1], botZ);
+      positions.push(v1[0], v1[1], v1BotZ);
       uvs.push(u1, vBot);
       normals.push(nx, ny, 0);
       // 3: bottom-left (v0, bot)
-      positions.push(v0[0], v0[1], botZ);
+      positions.push(v0[0], v0[1], v0BotZ);
       uvs.push(u0, vBot);
       normals.push(nx, ny, 0);
       baseIndex += 4;
