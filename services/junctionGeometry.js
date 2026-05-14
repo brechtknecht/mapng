@@ -65,9 +65,15 @@ const MAX_CLIPBACK_RATIO = 0.4;
  * single super-junction. OSM commonly represents one real-world intersection
  * as several closely-spaced nodes (short connector segments between adjacent
  * intersection nodes); without merging, each spawns its own prism and they
- * stack as visible concentric rings.
+ * stack as visible concentric rings — and worse, their collision volumes
+ * overlap, which the physics engine resolves by ejecting cars with extreme
+ * force (instakill on contact).
+ *
+ * Tuned generously (15m) because even widely-spaced OSM nodes often model
+ * one real intersection — a missed merge causes much worse problems than an
+ * over-merge.
  */
-const JUNCTION_MERGE_RADIUS_M = 8.0;
+const JUNCTION_MERGE_RADIUS_M = 15.0;
 
 /**
  * Analyze all junctions in a built road network and return per-junction polygons
@@ -164,15 +170,23 @@ export function analyzeJunctions(roadNetwork, segmentInfo) {
       const leftN = [-out[1], out[0]];
       const rightN = [out[1], -out[0]];
 
+      // Z must match where the MeshRoad's perpendicular cut will actually
+      // land. Using nodePos[2] (terrain Z at the OSM intersection node) is
+      // wrong: the MeshRoad's clipped endpoint is `d` meters *along* the
+      // road from that node, on different terrain. On any sloped ground the
+      // two Z values diverge and create a vertical step at the seam — the
+      // physics engine treats that step as a wall and ejects cars.
+      const cornerZ = zAtClipBack(seg.worldGeometry, seg.end, d);
+
       const rightCorner = [
         nodePos[0] + rightN[0] * w + out[0] * d,
         nodePos[1] + rightN[1] * w + out[1] * d,
-        nodePos[2],
+        cornerZ,
       ];
       const leftCorner = [
         nodePos[0] + leftN[0] * w + out[0] * d,
         nodePos[1] + leftN[1] * w + out[1] * d,
-        nodePos[2],
+        cornerZ,
       ];
 
       polygon.push(rightCorner);
@@ -500,6 +514,46 @@ function polylineLength(geometry) {
     total += Math.hypot(dx, dy);
   }
   return total;
+}
+
+/**
+ * Interpolated Z along a polyline at a given arc-length distance, measured
+ * from the indicated end ("start" → walk forward from index 0; "end" → walk
+ * backward from the last index). Uses 2D arc length (XY only) to match how
+ * `clipPolylineEnds` computes its trim distances — so the Z returned here is
+ * exactly the Z of the MeshRoad's clipped endpoint at the same arc-length.
+ */
+function zAtClipBack(geometry, endName, distance) {
+  if (!Array.isArray(geometry) || geometry.length < 2) return 0;
+  if (!Number.isFinite(distance) || distance <= 0) {
+    return endName === 'start' ? geometry[0][2] : geometry[geometry.length - 1][2];
+  }
+  if (endName === 'start') {
+    let cum = 0;
+    for (let i = 0; i < geometry.length - 1; i++) {
+      const dx = geometry[i + 1][0] - geometry[i][0];
+      const dy = geometry[i + 1][1] - geometry[i][1];
+      const segLen = Math.hypot(dx, dy);
+      if (cum + segLen >= distance) {
+        const t = segLen > 1e-9 ? (distance - cum) / segLen : 0;
+        return geometry[i][2] + (geometry[i + 1][2] - geometry[i][2]) * t;
+      }
+      cum += segLen;
+    }
+    return geometry[geometry.length - 1][2];
+  }
+  let cum = 0;
+  for (let i = geometry.length - 1; i > 0; i--) {
+    const dx = geometry[i - 1][0] - geometry[i][0];
+    const dy = geometry[i - 1][1] - geometry[i][1];
+    const segLen = Math.hypot(dx, dy);
+    if (cum + segLen >= distance) {
+      const t = segLen > 1e-9 ? (distance - cum) / segLen : 0;
+      return geometry[i][2] + (geometry[i - 1][2] - geometry[i][2]) * t;
+    }
+    cum += segLen;
+  }
+  return geometry[0][2];
 }
 
 /**

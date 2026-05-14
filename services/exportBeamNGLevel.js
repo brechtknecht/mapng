@@ -11,6 +11,7 @@ import { ColladaExporter } from './ColladaExporter.js';
 import { buildRoadNetwork } from './roadNetwork.js';
 import { analyzeJunctions, clipPolylineEnds } from './junctionGeometry.js';
 import { buildJunctionMeshGroup } from './junctionMesh.js';
+import { scanAllMeshRoads } from './meshRoadAnomalies.js';
 import {
   getBeamNGFlavorById,
   getGlobalEnvironmentMap,
@@ -926,6 +927,117 @@ function decimateNodes(nodes) {
   }
   out.push(nodes[nodes.length - 1]);
   return out;
+}
+
+/**
+ * Mutates `nodes` in place to remove a too-short first or last edge.
+ *
+ * decimateNodes always preserves the first and last entries (so a road
+ * reaches its endpoints exactly), but when an endpoint was produced by
+ * arc-length interpolation (e.g. clipPolylineEnds), it can land within a
+ * fraction of a meter of the next/prev original node. That short final edge
+ * makes BeamNG's MeshRoad spline interpolator produce a sharp curvature
+ * spike — a tiny but solid wall at the cap.
+ *
+ * Fix: if the first edge or last edge is shorter than `minLen`, drop the
+ * INTERIOR neighbor of that endpoint (not the endpoint itself — we want the
+ * road to still end where it was clipped to). Iterates because after a drop
+ * the next interior node may also be too close; we keep removing interior
+ * neighbors until the edge meets the threshold or only the two endpoints
+ * remain. This preserves the road's extent while eliminating the sliver.
+ */
+function pruneShortEndEdges(nodes, minLen) {
+  if (!Array.isArray(nodes)) return;
+  const minLenSq = minLen * minLen;
+  // Iteratively shorten the last edge by dropping its interior neighbor.
+  while (nodes.length >= 3) {
+    const i = nodes.length - 1;
+    const dx = nodes[i][0] - nodes[i - 1][0];
+    const dy = nodes[i][1] - nodes[i - 1][1];
+    if (dx * dx + dy * dy < minLenSq) {
+      nodes.splice(i - 1, 1);
+    } else {
+      break;
+    }
+  }
+  // Same for the first edge.
+  while (nodes.length >= 3) {
+    const dx = nodes[1][0] - nodes[0][0];
+    const dy = nodes[1][1] - nodes[0][1];
+    if (dx * dx + dy * dy < minLenSq) {
+      nodes.splice(1, 1);
+    } else {
+      break;
+    }
+  }
+}
+
+/**
+ * Replace each sharp turn (>thresholdDeg deviation from straight) in the
+ * polyline with two chamfer nodes — one offset back along the incoming
+ * edge, one offset forward along the outgoing edge. The original kink
+ * node is removed. Result: a 90° corner becomes two ~45° turns separated
+ * by a short corner-cut edge.
+ *
+ * Why this matters: BeamNG's MeshRoad spline interpolator (cubic) overshoots
+ * sharp control points. A 90° turn at node 1 produces a spline that bulges
+ * 1-2m past the polyline before curving to reach node 2. That bulge leaks
+ * into adjacent junction prism collision volumes → coplanar collision → the
+ * physics engine ejects cars with extreme force (instakill). Smoothing the
+ * polyline beforehand keeps the spline within the road's intended footprint.
+ *
+ * Returns a NEW array; does not mutate the input.
+ */
+function smoothSharpKinks(nodes, thresholdDeg, offsetDist) {
+  if (!Array.isArray(nodes) || nodes.length < 3) return nodes;
+  const thresholdCos = Math.cos((thresholdDeg * Math.PI) / 180);
+  const out = [nodes[0]];
+  for (let i = 1; i < nodes.length - 1; i++) {
+    const prev = nodes[i - 1];
+    const curr = nodes[i];
+    const next = nodes[i + 1];
+    const vx0 = curr[0] - prev[0];
+    const vy0 = curr[1] - prev[1];
+    const vx1 = next[0] - curr[0];
+    const vy1 = next[1] - curr[1];
+    const len0 = Math.hypot(vx0, vy0);
+    const len1 = Math.hypot(vx1, vy1);
+    if (len0 < 0.2 || len1 < 0.2) { out.push(curr); continue; }
+    const cosAng = (vx0 * vx1 + vy0 * vy1) / (len0 * len1);
+    if (cosAng >= thresholdCos) { out.push(curr); continue; }
+    // Sharp kink — cap the offset so the chamfer nodes can't pass each
+    // other's neighbors (would create self-intersection).
+    const offset = Math.min(offsetDist, len0 * 0.4, len1 * 0.4);
+    const aFactor = (len0 - offset) / len0;
+    const bFactor = offset / len1;
+    out.push([
+      prev[0] + vx0 * aFactor,
+      prev[1] + vy0 * aFactor,
+      prev[2] + (curr[2] - prev[2]) * aFactor,
+      curr[3],
+    ]);
+    out.push([
+      curr[0] + vx1 * bFactor,
+      curr[1] + vy1 * bFactor,
+      curr[2] + (next[2] - curr[2]) * bFactor,
+      curr[3],
+    ]);
+  }
+  out.push(nodes[nodes.length - 1]);
+  return out;
+}
+
+/**
+ * Total XY arc length of a node array (first two fields = x, y).
+ */
+function polylineXYLength(nodes) {
+  let total = 0;
+  for (let i = 1; i < nodes.length; i++) {
+    const dx = nodes[i][0] - nodes[i - 1][0];
+    const dy = nodes[i][1] - nodes[i - 1][1];
+    total += Math.hypot(dx, dy);
+  }
+  return total;
 }
 
 const GLOBAL_DECAL_MATERIALS = {
@@ -2111,6 +2223,41 @@ function generateRoadArchitectSession(terrainData, squareSize, levelName) {
 const MESH_ROAD_SURFACE_LIFT = 0.5;
 
 /**
+ * MeshRoad extends this many meters INTO the junction prism's footprint
+ * rather than terminating exactly at the polygon edge. Prevents coplanar
+ * collision surfaces between the MeshRoad's perpendicular end-cap and the
+ * junction prism's adjacent side wall — coplanar surfaces are the most
+ * common cause of "car instakills on contact" in BeamNG.
+ *
+ * 5cm is small enough to be visually invisible at normal viewing distance
+ * but large enough that the physics engine clearly resolves the road's
+ * collision volume as embedded inside the junction's, not sharing a face.
+ */
+const JUNCTION_COLLISION_OVERLAP = 0.05;
+
+/**
+ * Total XY length below which we drop a MeshRoad entirely. Below this
+ * threshold the slab is too small to drive on AND the spline cap collapses
+ * to a near-point, producing erratic physics. Real-world road segments are
+ * always longer than this.
+ */
+const MIN_MESH_ROAD_LENGTH = 3.0;
+
+/**
+ * Polyline turn angle (degrees, deviation from straight) above which we
+ * smooth the kink. 75° catches all 90°+ city-corner turns while leaving
+ * gentle curves untouched.
+ */
+const KINK_SMOOTH_THRESHOLD_DEG = 75;
+
+/**
+ * Distance (meters) the chamfer nodes are placed back from a sharp kink,
+ * along each incoming/outgoing edge. Capped to 40% of the adjacent edge
+ * length so we never overshoot the prev/next node.
+ */
+const KINK_SMOOTH_OFFSET_M = 2.0;
+
+/**
  * Compute the shared mesh-road analysis: road network, per-segment world
  * geometry + half-width, junction polygons, per-segment clip-back distances.
  *
@@ -2171,7 +2318,7 @@ export function buildMeshRoadAnalysis(terrainData, squareSize) {
   };
 }
 
-function generateMeshRoads(terrainData, squareSize) {
+export function generateMeshRoads(terrainData, squareSize) {
   const analysis = buildMeshRoadAnalysis(terrainData, squareSize);
   if (!analysis) return { meshRoads: [], junctions: [] };
   const { roadNetwork, segmentInfo, junctions, segmentClips } = analysis;
@@ -2221,12 +2368,21 @@ function generateMeshRoads(terrainData, squareSize) {
       // Trim the spline back from junctions so it stops at the bisector edge
       // instead of overlapping into the intersection. Applied in world meters,
       // before decimation, so the trim is exact.
+      //
+      // We trim slightly LESS than the full clip-back (by JUNCTION_COLLISION_OVERLAP
+      // meters). This lets the MeshRoad's end-cap extend a few centimeters INTO
+      // the junction prism's volume rather than sitting exactly on the prism's
+      // side wall. Without this small overlap, the two vertical surfaces are
+      // coplanar — the physics engine treats coplanar collision surfaces as
+      // ambiguous and ejects cars with extreme force (instakill on contact).
+      const startClip = Math.max(0, clip.startClipBack - JUNCTION_COLLISION_OVERLAP);
+      const endClip = Math.max(0, clip.endClipBack - JUNCTION_COLLISION_OVERLAP);
       const trimmed =
-        touchesStart || touchesEnd
+        (touchesStart && startClip > 0) || (touchesEnd && endClip > 0)
           ? clipPolylineEnds(
               rawNodes,
-              touchesStart ? clip.startClipBack : 0,
-              touchesEnd ? clip.endClipBack : 0,
+              touchesStart ? startClip : 0,
+              touchesEnd ? endClip : 0,
             )
           : rawNodes;
       if (trimmed.length < 2) continue;
@@ -2241,8 +2397,33 @@ function generateMeshRoads(terrainData, squareSize) {
       const decimated = decimateNodes(stripped);
       if (decimated.length < 2) continue;
 
+      // Defend against pathologically short first/last edges. clipPolylineEnds
+      // produces interpolated endpoints; when a clip target lands close to an
+      // existing polyline node, the interpolated endpoint and that node end
+      // up <1 m apart. decimateNodes always keeps both endpoints, so the
+      // sliver survives. BeamNG's MeshRoad spline interpolation reads that
+      // sliver as an extreme curvature spike at the cap, producing a tiny
+      // solid wall that instantly ejects any car touching it.
+      pruneShortEndEdges(decimated, MIN_NODE_SPACING_M / 2);
+      if (decimated.length < 2) continue;
+
+      // After pruning, drop the whole road if what's left is too short to be
+      // a real road. Catches the degenerate case where prune couldn't help
+      // (e.g., only 2 nodes that happen to be sub-meter apart). Threshold is
+      // 3m — below that BeamNG can't even render a meaningful slab and the
+      // spline collapse causes physics issues at the resulting tiny cap.
+      if (polylineXYLength(decimated) < MIN_MESH_ROAD_LENGTH) continue;
+
+      // Smooth sharp interior kinks (>75° turns) by chamfering them into two
+      // gentler corners. Without this, BeamNG's cubic spline overshoots
+      // sharp control points and the resulting collision volume bulges past
+      // the polyline — particularly bad at nodeIndex 1 (right next to the
+      // cap) where the bulge can leak into the adjacent junction prism.
+      const smoothed = smoothSharpKinks(decimated, KINK_SMOOTH_THRESHOLD_DEG, KINK_SMOOTH_OFFSET_M);
+      if (smoothed.length < 2) continue;
+
       // Reattach depth and normal after decimation
-      const nodes = decimated.map(n => [n[0], n[1], n[2], n[3], 0.5, 0, 0, 1]);
+      const nodes = smoothed.map(n => [n[0], n[1], n[2], n[3], 0.5, 0, 0, 1]);
 
       meshRoads.push({
         class: 'MeshRoad',
@@ -4094,6 +4275,30 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   const { meshRoads, junctions: meshRoadJunctions } = roadType === 'mesh'
     ? generateMeshRoads(exportTerrainData, squareSize)
     : { meshRoads: [], junctions: [] };
+
+  // Post-emit validation: scan every MeshRoad for geometric patterns that
+  // commonly cause BeamNG physics issues (instakill on contact, mesh
+  // pop-through, sharp curvature spikes). Logged to console as a summary so
+  // bad maps are visible in dev tools without aborting the export.
+  if (meshRoads.length > 0) {
+    const scan = scanAllMeshRoads(meshRoads);
+    if (scan.roadsWithIssues > 0) {
+      const typeCounts = Object.entries(scan.issuesByType)
+        .map(([t, n]) => `${t}=${n}`)
+        .join(', ');
+      console.warn(
+        `[MeshRoad anomaly scan] ${scan.roadsWithIssues}/${scan.totalRoads} roads have issues ` +
+        `(${scan.errors} errors, ${scan.warnings} warnings). Types: ${typeCounts}`,
+      );
+      // First 5 error-level anomalies with positions, for spot-checking.
+      const firstErrors = scan.anomalies
+        .flatMap((a) => a.issues.filter((i) => i.severity === 'error').map((i) => ({ road: a.name, ...i })))
+        .slice(0, 5);
+      if (firstErrors.length > 0) console.warn('[MeshRoad anomaly scan] First error samples:', firstErrors);
+    } else {
+      console.log(`[MeshRoad anomaly scan] All ${scan.totalRoads} roads clean.`);
+    }
+  }
 
   const decalRoads = roadType === 'decal'
     ? generateDecalRoads(exportTerrainData, squareSize)
