@@ -1,5 +1,5 @@
 <template>
-  <div class="w-full h-full relative">
+  <div class="w-full h-full relative" @click="requestPointerLock">
     <canvas ref="canvasRef" class="w-full h-full block" />
 
     <!-- Stats overlay (top-left) -->
@@ -17,7 +17,7 @@
     </div>
 
     <!-- Layer toggles (top center) -->
-    <div class="absolute top-4 left-1/2 -translate-x-1/2 bg-black/85 text-white text-xs p-3 rounded-lg flex gap-4 items-center">
+    <div class="absolute top-4 left-1/2 -translate-x-1/2 bg-black/85 text-white text-xs p-3 rounded-lg flex gap-4 items-center pointer-events-auto" @click.stop>
       <label class="flex items-center gap-1.5 cursor-pointer select-none"><input type="checkbox" v-model="showRoads" /> Road slabs</label>
       <label class="flex items-center gap-1.5 cursor-pointer select-none"><input type="checkbox" v-model="showJunctions" /> Junctions</label>
       <label class="flex items-center gap-1.5 cursor-pointer select-none"><input type="checkbox" v-model="showCenterlines" /> Centerlines</label>
@@ -25,9 +25,24 @@
     </div>
 
     <!-- Help (bottom-right) -->
-    <div class="absolute bottom-4 right-4 bg-black/85 text-white/70 text-xs font-mono p-3 rounded-lg pointer-events-none">
-      <div>Drag: orbit · Wheel: zoom · Right-drag: pan</div>
-      <div class="mt-1">Coords: BeamNG world (Z-up, meters)</div>
+    <div class="absolute bottom-4 right-4 bg-black/85 text-white/80 text-xs font-mono p-3 rounded-lg pointer-events-none space-y-0.5">
+      <div class="font-bold text-[#ff6655] mb-1">Controls</div>
+      <div>Click canvas: capture mouse</div>
+      <div>Mouse: look around</div>
+      <div>W A S D: move horizontally</div>
+      <div>Space / Ctrl: up / down</div>
+      <div>Shift: sprint (5×)</div>
+      <div>Esc: release mouse</div>
+    </div>
+
+    <!-- Click-to-activate overlay -->
+    <div
+      v-if="!pointerLocked"
+      class="absolute inset-0 flex items-center justify-center bg-black/40 pointer-events-none"
+    >
+      <div class="bg-black/85 text-white text-base px-6 py-4 rounded-lg shadow-2xl border border-white/20">
+        Click anywhere to fly · Esc to release
+      </div>
     </div>
   </div>
 </template>
@@ -35,7 +50,6 @@
 <script setup>
 import { ref, watch, onMounted, onBeforeUnmount, shallowRef } from 'vue';
 import * as THREE from 'three';
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { buildMeshRoadAnalysis } from '../../services/exportBeamNGLevel.js';
 import { buildJunctionMeshGroup } from '../../services/junctionMesh.js';
 
@@ -48,6 +62,7 @@ const showRoads = ref(true);
 const showJunctions = ref(true);
 const showCenterlines = ref(false);
 const wireframe = ref(false);
+const pointerLocked = ref(false);
 
 const stats = ref({
   segmentCount: 0,
@@ -64,22 +79,35 @@ const stats = ref({
 let scene;
 let camera;
 let renderer;
-let controls;
 let animId = 0;
 const roadsGroup = shallowRef(null);
 const junctionsGroup = shallowRef(null);
 const centerlinesGroup = shallowRef(null);
 
+// ── Flycam state ─────────────────────────────────────────────────────────
+// Yaw rotates around world +Z (BeamNG up). Pitch is local elevation.
+// yaw = 0 → looking toward +X. Pitch limited to (-π/2, π/2) exclusive.
+let yaw = Math.PI / 2;     // start looking +Y (north)
+let pitch = -0.4;          // ~22° down
+const MOUSE_SENSITIVITY = 0.0022;
+const BASE_SPEED = 30;     // m/s
+const SPRINT_MULTIPLIER = 5;
+const keys = { fwd: false, back: false, left: false, right: false, up: false, down: false, sprint: false };
+let lastTime = 0;
+
 onMounted(() => {
   setupScene();
   rebuildScene();
-  animate();
+  attachInputHandlers();
+  animate(performance.now());
   window.addEventListener('resize', onResize);
 });
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animId);
   window.removeEventListener('resize', onResize);
+  detachInputHandlers();
+  if (document.pointerLockElement === canvasRef.value) document.exitPointerLock();
   disposeAll();
 });
 
@@ -94,20 +122,14 @@ function setupScene() {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x0a0a14);
 
-  camera = new THREE.PerspectiveCamera(45, w / h, 1, 50000);
-  // Match BeamNG world convention: Z is up, X east, Y north.
-  camera.up.set(0, 0, 1);
-  camera.position.set(300, -300, 400);
-  camera.lookAt(0, 0, 0);
+  camera = new THREE.PerspectiveCamera(60, w / h, 0.5, 50000);
+  camera.up.set(0, 0, 1); // BeamNG: Z is up
+  camera.position.set(0, -100, 60);
+  applyOrientation();
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
   renderer.setSize(w, h, false);
   renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-
-  controls = new OrbitControls(camera, canvas);
-  controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
-  controls.target.set(0, 0, 0);
 
   scene.add(new THREE.AmbientLight(0xffffff, 0.55));
   const dir = new THREE.DirectionalLight(0xffffff, 0.9);
@@ -117,7 +139,6 @@ function setupScene() {
   dir2.position.set(-300, 200, 200);
   scene.add(dir2);
 
-  // World axes (X red, Y green, Z blue) at origin, 30 m long.
   scene.add(new THREE.AxesHelper(30));
 }
 
@@ -144,7 +165,7 @@ function rebuildScene() {
 
   const { roadNetwork, segmentInfo, junctions } = analysis;
 
-  // Frame the camera on the centroid of all junctions (or roads as fallback).
+  // Frame the camera near the centroid of all junctions (or roads as fallback).
   let cx = 0;
   let cy = 0;
   let n = 0;
@@ -157,10 +178,13 @@ function rebuildScene() {
   if (n > 0) {
     cx /= n;
     cy /= n;
-    controls.target.set(cx, cy, 0);
-    camera.position.set(cx + 200, cy - 200, 350);
-    camera.lookAt(cx, cy, 0);
-    controls.update();
+    // Position the camera 100 m south and 80 m above the centroid, looking
+    // toward it. Y is "north" in BeamNG world coords, so −Y from centroid =
+    // south side. Yaw is set so we face +Y (north).
+    camera.position.set(cx, cy - 100, 80);
+    yaw = Math.PI / 2;
+    pitch = -0.5;
+    applyOrientation();
   }
 
   // Stats: polygon vertex distribution and degree histogram.
@@ -185,16 +209,10 @@ function rebuildScene() {
     degreeMore: degN,
   };
 
-  // Build & add three layered groups.
   const roads = buildRoadSlabsGroup(segmentInfo, analysis.surfaceLift);
-  if (roads) {
-    scene.add(roads);
-    roadsGroup.value = roads;
-  }
+  if (roads) { scene.add(roads); roadsGroup.value = roads; }
   const jGroup = buildJunctionMeshGroup(junctions, { depth: analysis.surfaceLift });
   if (jGroup) {
-    // Replace the BeamNG-bound material with a bright debug-only material
-    // that's fully under our control (no BeamNG material lookup involved).
     jGroup.traverse((c) => {
       if (c.isMesh) {
         c.material = new THREE.MeshLambertMaterial({
@@ -208,19 +226,11 @@ function rebuildScene() {
     junctionsGroup.value = jGroup;
   }
   const lines = buildCenterlinesGroup(segmentInfo);
-  if (lines) {
-    scene.add(lines);
-    centerlinesGroup.value = lines;
-  }
+  if (lines) { scene.add(lines); centerlinesGroup.value = lines; }
 
   updateVisibility();
 }
 
-/**
- * Build one extruded-rectangle slab per network segment. Matches MeshRoad's
- * top/bottom/side topology so junction prism walls visibly butt against
- * road end-caps (or expose any misalignment).
- */
 function buildRoadSlabsGroup(segmentInfo, depth) {
   const group = new THREE.Group();
   group.name = 'road_slabs';
@@ -238,9 +248,6 @@ function buildRoadSlabsGroup(segmentInfo, depth) {
 
 function buildSlabGeometry(centerline, halfWidth, depth) {
   if (!Array.isArray(centerline) || centerline.length < 2) return null;
-  // For each centerline vertex, emit 4 corners: TL (top-left), TR (top-right),
-  // BL (bottom-left), BR (bottom-right). "left" = +perpendicular along
-  // outbound CCW; depth extrudes downward.
   const positions = [];
   for (let i = 0; i < centerline.length; i++) {
     const p = centerline[i];
@@ -260,7 +267,6 @@ function buildSlabGeometry(centerline, halfWidth, depth) {
     if (len < 1e-6) return null;
     const nx = (-ty / len) * halfWidth;
     const ny = (tx / len) * halfWidth;
-    // TL: left + top, TR: right + top, BL: left + bottom, BR: right + bottom
     positions.push(p[0] + nx, p[1] + ny, p[2]);
     positions.push(p[0] - nx, p[1] - ny, p[2]);
     positions.push(p[0] + nx, p[1] + ny, p[2] - depth);
@@ -268,7 +274,6 @@ function buildSlabGeometry(centerline, halfWidth, depth) {
   }
   const N = positions.length / 12;
   if (N < 2) return null;
-
   const indices = [];
   for (let i = 0; i < N - 1; i++) {
     const a = i * 4;
@@ -281,30 +286,14 @@ function buildSlabGeometry(centerline, halfWidth, depth) {
     const trB = b + 1;
     const blB = b + 2;
     const brB = b + 3;
-    // Top (normal +Z): TL_A, TR_A, TR_B, TL_B (CCW from above).
     indices.push(tlA, trA, trB, tlA, trB, tlB);
-    // Bottom (normal -Z): mirrored winding.
     indices.push(brA, blA, blB, brA, blB, brB);
-    // Left wall: TL_A, BL_A, BL_B, TL_B (CCW from outside left).
     indices.push(tlA, blA, blB, tlA, blB, tlB);
-    // Right wall: TR_B, BR_B, BR_A, TR_A (CCW from outside right).
     indices.push(trB, brB, brA, trB, brA, trA);
   }
-  // End caps so the prism is closed.
-  const tl0 = 0;
-  const tr0 = 1;
-  const bl0 = 2;
-  const br0 = 3;
-  // Start cap: outward normal points opposite to outbound. From behind the
-  // road, CCW order is TL, BL, BR, TR.
-  indices.push(tl0, bl0, br0, tl0, br0, tr0);
+  indices.push(0, 2, 3, 0, 3, 1);
   const tE = (N - 1) * 4;
-  const trE = tE + 1;
-  const blE = tE + 2;
-  const brE = tE + 3;
-  // End cap: outward normal = +outbound. From the front, CCW is TR, BR, BL, TL.
-  indices.push(trE, brE, blE, trE, blE, tE);
-
+  indices.push(tE + 1, tE + 3, tE + 2, tE + 1, tE + 2, tE);
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
   geometry.setIndex(indices);
@@ -344,9 +333,125 @@ function updateVisibility() {
   }
 }
 
-function animate() {
+// ── Flycam input ─────────────────────────────────────────────────────────
+
+function attachInputHandlers() {
+  document.addEventListener('pointerlockchange', onPointerLockChange);
+  document.addEventListener('mousemove', onMouseMove);
+  document.addEventListener('keydown', onKeyDown);
+  document.addEventListener('keyup', onKeyUp);
+}
+
+function detachInputHandlers() {
+  document.removeEventListener('pointerlockchange', onPointerLockChange);
+  document.removeEventListener('mousemove', onMouseMove);
+  document.removeEventListener('keydown', onKeyDown);
+  document.removeEventListener('keyup', onKeyUp);
+}
+
+function requestPointerLock() {
+  if (document.pointerLockElement === canvasRef.value) return;
+  canvasRef.value?.requestPointerLock?.();
+}
+
+function onPointerLockChange() {
+  pointerLocked.value = document.pointerLockElement === canvasRef.value;
+  if (!pointerLocked.value) {
+    // Clear pressed-key state so a key held while Esc is pressed doesn't
+    // remain "stuck" once we regain focus.
+    for (const k of Object.keys(keys)) keys[k] = false;
+  }
+}
+
+function onMouseMove(e) {
+  if (!pointerLocked.value) return;
+  yaw -= e.movementX * MOUSE_SENSITIVITY;
+  pitch -= e.movementY * MOUSE_SENSITIVITY;
+  const limit = Math.PI / 2 - 0.01;
+  if (pitch > limit) pitch = limit;
+  if (pitch < -limit) pitch = -limit;
+  applyOrientation();
+}
+
+function onKeyDown(e) {
+  if (!pointerLocked.value) return;
+  switch (e.code) {
+    case 'KeyW': case 'ArrowUp': keys.fwd = true; break;
+    case 'KeyS': case 'ArrowDown': keys.back = true; break;
+    case 'KeyA': case 'ArrowLeft': keys.left = true; break;
+    case 'KeyD': case 'ArrowRight': keys.right = true; break;
+    case 'Space': keys.up = true; e.preventDefault(); break;
+    case 'ControlLeft': case 'ControlRight': keys.down = true; e.preventDefault(); break;
+    case 'ShiftLeft': case 'ShiftRight': keys.sprint = true; break;
+    default: return;
+  }
+}
+
+function onKeyUp(e) {
+  switch (e.code) {
+    case 'KeyW': case 'ArrowUp': keys.fwd = false; break;
+    case 'KeyS': case 'ArrowDown': keys.back = false; break;
+    case 'KeyA': case 'ArrowLeft': keys.left = false; break;
+    case 'KeyD': case 'ArrowRight': keys.right = false; break;
+    case 'Space': keys.up = false; break;
+    case 'ControlLeft': case 'ControlRight': keys.down = false; break;
+    case 'ShiftLeft': case 'ShiftRight': keys.sprint = false; break;
+    default: return;
+  }
+}
+
+/**
+ * Apply yaw/pitch to the camera by computing a forward direction and using
+ * camera.lookAt with the Z-up convention. lookAt handles roll/up correctly
+ * as long as camera.up is set.
+ */
+function applyOrientation() {
+  if (!camera) return;
+  const cosP = Math.cos(pitch);
+  const fwdX = Math.cos(yaw) * cosP;
+  const fwdY = Math.sin(yaw) * cosP;
+  const fwdZ = Math.sin(pitch);
+  camera.lookAt(
+    camera.position.x + fwdX,
+    camera.position.y + fwdY,
+    camera.position.z + fwdZ,
+  );
+}
+
+/**
+ * Per-frame motion update. Yaw/pitch define forward; the right vector is the
+ * horizontal perpendicular (XY plane only, so strafing never drifts up/down).
+ */
+function applyMotion(deltaSec) {
+  if (!pointerLocked.value) return;
+  const speed = (keys.sprint ? SPRINT_MULTIPLIER : 1) * BASE_SPEED;
+  const step = speed * deltaSec;
+
+  const cosP = Math.cos(pitch);
+  const fwdX = Math.cos(yaw) * cosP;
+  const fwdY = Math.sin(yaw) * cosP;
+  const fwdZ = Math.sin(pitch);
+  // Right vector relative to yaw, kept horizontal so strafing doesn't drift.
+  const rightX = Math.sin(yaw);
+  const rightY = -Math.cos(yaw);
+
+  if (keys.fwd)   { camera.position.x += fwdX * step;  camera.position.y += fwdY * step;  camera.position.z += fwdZ * step; }
+  if (keys.back)  { camera.position.x -= fwdX * step;  camera.position.y -= fwdY * step;  camera.position.z -= fwdZ * step; }
+  if (keys.right) { camera.position.x += rightX * step; camera.position.y += rightY * step; }
+  if (keys.left)  { camera.position.x -= rightX * step; camera.position.y -= rightY * step; }
+  if (keys.up)    { camera.position.z += step; }
+  if (keys.down)  { camera.position.z -= step; }
+
+  if (keys.fwd || keys.back || keys.left || keys.right || keys.up || keys.down) {
+    applyOrientation();
+  }
+}
+
+function animate(now) {
   animId = requestAnimationFrame(animate);
-  controls?.update();
+  const deltaSec = lastTime ? Math.min((now - lastTime) / 1000, 0.1) : 0;
+  lastTime = now;
+  applyMotion(deltaSec);
   if (scene && camera && renderer) renderer.render(scene, camera);
 }
 
@@ -360,7 +465,6 @@ function onResize() {
 }
 
 function disposeAll() {
-  if (controls) controls.dispose();
   if (renderer) renderer.dispose();
   if (scene) disposeGroup(scene);
 }
