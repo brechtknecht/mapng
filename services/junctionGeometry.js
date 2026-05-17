@@ -162,18 +162,19 @@ export function analyzeJunctions(roadNetwork, segmentInfo) {
       clipsR[i] = distB;
     }
 
-    let skip = false;
+    // Cap-and-continue: if the desired miter clip would consume more than
+    // MAX_CLIPBACK_RATIO of a segment (acute-angle junctions, very-mismatched
+    // widths), clamp this one approach's clip rather than aborting the whole
+    // junction. The Pass-2 polygon is built from actual post-pipeline endpoints
+    // so a capped approach still gets a correct prism corner — at worst the
+    // road overlaps a few cm into the prism (the JUNCTION_COLLISION_OVERLAP
+    // mechanism is already designed for exactly this).
     for (let i = 0; i < N; i++) {
-      const clip = Math.max(clipsL[i], clipsR[i]);
       const segLen = polylineLength2D(approaches[i].worldGeometry);
-      if (segLen <= 0 || clip > segLen * MAX_CLIPBACK_RATIO) { skip = true; break; }
+      if (segLen <= 0) continue;
+      const desired = Math.max(clipsL[i], clipsR[i]);
+      const clip = Math.min(desired, segLen * MAX_CLIPBACK_RATIO);
       recordClip(approaches[i].segmentId, approaches[i].end, clip);
-    }
-    if (skip) {
-      // Undo any clips written for this junction before we discovered the skip.
-      // Simpler: overwrite with 0 — since we use max(), a later valid junction
-      // on the same segment end can still raise it. For the skipped junction we
-      // just leave the min-so-far (possibly 0) which is safe.
     }
   }
 
