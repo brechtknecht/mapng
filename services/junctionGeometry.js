@@ -429,19 +429,36 @@ export function mergeJunctionClusters(junctions) {
     buckets.get(root).push(junctions[i]);
   }
 
+  // finalize convex-hulls every output polygon. Singletons go through here
+  // too — the buildJunctionPolygons RIGHT/LEFT 2N-vertex pattern can be
+  // non-convex on acute-angled or width-mismatched junctions, and a
+  // non-convex polygon breaks the earcut-based prism builder's assumption
+  // that vertices fall inside the polygon's footprint. Convex collision is
+  // also the cheapest/most stable shape for BeamNG vehicle physics.
+  //
+  // Z is preserved per vertex (no clamp) so the junction's perimeter Z
+  // exactly matches each adjacent MeshRoad's seam Z — tires don't catch on a
+  // step. Spike-pyramid outliers are still caught downstream by
+  // validateJunctionPolygon's z_range_too_large rule.
   const finalize = (polygon) => {
-    const clamped = clampPolygonZRange(polygon);
+    const hull = convexHullXY(polygon);
+    if (!Array.isArray(hull) || hull.length < 3) return null;
     let cx = 0, cy = 0, cz = 0;
-    for (const v of clamped) { cx += v[0]; cy += v[1]; cz += v[2]; }
-    cx /= clamped.length;
-    cy /= clamped.length;
-    cz /= clamped.length;
-    return { position: [cx, cy, cz], polygon: clamped };
+    for (const v of hull) { cx += v[0]; cy += v[1]; cz += v[2]; }
+    cx /= hull.length;
+    cy /= hull.length;
+    cz /= hull.length;
+    return { position: [cx, cy, cz], polygon: hull };
+  };
+
+  const pushFinal = (polygon) => {
+    const f = finalize(polygon);
+    if (f) out.push(f);
   };
 
   const out = [];
   for (const members of buckets.values()) {
-    if (members.length === 1) { out.push(finalize(members[0].polygon)); continue; }
+    if (members.length === 1) { pushFinal(members[0].polygon); continue; }
 
     const allVerts = [];
     for (const m of members) for (const v of m.polygon) allVerts.push(v);
@@ -449,14 +466,11 @@ export function mergeJunctionClusters(junctions) {
     let zMin = Infinity, zMax = -Infinity;
     for (const v of allVerts) { if (v[2] < zMin) zMin = v[2]; if (v[2] > zMax) zMax = v[2]; }
     if (zMax - zMin > JUNCTION_MERGE_MAX_Z_RANGE_M) {
-      for (const m of members) out.push(finalize(m.polygon));
+      for (const m of members) pushFinal(m.polygon);
       continue;
     }
 
-    const hull = convexHullXY(allVerts);
-    if (hull.length < 3) { for (const m of members) out.push(finalize(m.polygon)); continue; }
-
-    out.push(finalize(hull));
+    pushFinal(allVerts);
   }
 
   return out;

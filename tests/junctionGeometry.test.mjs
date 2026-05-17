@@ -106,15 +106,51 @@ test('validateJunctionPolygon rejects polygons whose bbox is absurdly large', ()
 
 // ─── mergeJunctionClusters integration ────────────────────────────────────
 
-test('mergeJunctionClusters applies the Z clamp to single-member output', () => {
-  // Single junction with a Z spike — must not survive into the prism.
-  const spiked = {
-    position: [0, 0, 10],
-    polygon: [[0, 0, 10], [3, 0, 10], [3, 3, 10], [0, 3, 50]],
+test('mergeJunctionClusters convex-hulls a non-convex singleton', () => {
+  // L-shaped (non-convex) polygon. Singleton path used to skip the hull,
+  // sending non-convex shapes straight to the prism builder where the
+  // centroid-fan triangulator produced holes / inverted faces.
+  const lShape = {
+    position: [0, 0, 5],
+    polygon: [
+      [0, 0, 5], [4, 0, 5], [4, 1, 5],
+      [1, 1, 5], [1, 4, 5], [0, 4, 5],
+    ],
   };
-  const [merged] = mergeJunctionClusters([spiked]);
-  const zs = merged.polygon.map((v) => v[2]);
-  assert.ok(Math.max(...zs) - Math.min(...zs) <= JUNCTION_POLYGON_Z_CLAMP_RANGE_M + 1e-9);
+  const [merged] = mergeJunctionClusters([lShape]);
+  // The interior corner (1,1) should be dropped; the rest stay on the hull.
+  assert.ok(merged.polygon.length < lShape.polygon.length,
+    'hull should drop the interior vertex');
+  const hasInteriorCorner = merged.polygon.some(([x, y]) => x === 1 && y === 1);
+  assert.equal(hasInteriorCorner, false, 'interior corner must not be on the hull');
+  // Verify convexity: all consecutive cross products share a sign.
+  const verts = merged.polygon;
+  let sign = 0;
+  for (let i = 0; i < verts.length; i++) {
+    const a = verts[i];
+    const b = verts[(i + 1) % verts.length];
+    const c = verts[(i + 2) % verts.length];
+    const cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+    if (cross !== 0) {
+      const s = cross > 0 ? 1 : -1;
+      if (sign === 0) sign = s;
+      else assert.equal(s, sign, 'polygon must be convex (no sign change in edge crosses)');
+    }
+  }
+});
+
+test('mergeJunctionClusters preserves per-vertex Z (no implicit clamp)', () => {
+  // A polygon whose Z range is within the validator's cap but has spread
+  // must keep its vertex Zs intact — the seam between road and junction
+  // depends on the polygon edge Z matching the MeshRoad endpoint Z.
+  const sloped = {
+    position: [0, 0, 10.5],
+    polygon: [[0, 0, 10], [3, 0, 11], [3, 3, 11], [0, 3, 10]],
+  };
+  const [merged] = mergeJunctionClusters([sloped]);
+  const zs = merged.polygon.map((v) => v[2]).sort((a, b) => a - b);
+  assert.equal(zs[0], 10);
+  assert.equal(zs[zs.length - 1], 11);
 });
 
 test('mergeJunctionClusters merges polygons whose bboxes overlap even when centroids are far apart', () => {

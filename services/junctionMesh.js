@@ -5,6 +5,7 @@
 // art/shapes/main.materials.json registers.
 
 import * as THREE from 'three';
+import { Earcut } from 'three/src/extras/Earcut.js';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { ColladaExporter } from './ColladaExporter.js';
 import { MESH_ROAD_DEPTH } from './junctionGeometry.js';
@@ -13,9 +14,14 @@ import { MESH_ROAD_DEPTH } from './junctionGeometry.js';
  * Build an extruded prism for one junction polygon.
  *
  * The polygon is CCW in BeamNG world XY with per-vertex Z. The prism has:
- *  - top face: centroid fan with each perimeter vertex at its own Z
- *  - bottom face: reversed fan at vertex Z - depth
+ *  - top face: earcut triangulation of the polygon XY with per-vertex Z
+ *  - bottom face: same triangulation, reversed winding, Z - depth
  *  - N side walls: one trapezoid per polygon edge (slope follows perimeter Zs)
+ *
+ * Earcut handles arbitrary simple polygons (convex or not) without introducing
+ * a centroid vertex. The old centroid-fan approach failed silently when the
+ * polygon's centroid fell outside the polygon, producing holes in the top
+ * face and exposed bottom faces from below — those are tire-poppers in BeamNG.
  *
  * Vertices are duplicated per face so each face owns its outward normal and
  * UV space — no shared verts between top/bottom/sides.
@@ -23,11 +29,28 @@ import { MESH_ROAD_DEPTH } from './junctionGeometry.js';
 function buildJunctionPrismGeometry(polygon, depth) {
   if (!Array.isArray(polygon) || polygon.length < 3) return null;
 
-  let cx = 0, cy = 0, cz = 0;
-  for (const v of polygon) { cx += v[0]; cy += v[1]; cz += v[2]; }
-  cx /= polygon.length;
-  cy /= polygon.length;
-  cz /= polygon.length;
+  const N = polygon.length;
+
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const v of polygon) {
+    if (v[0] < minX) minX = v[0];
+    if (v[1] < minY) minY = v[1];
+    if (v[0] > maxX) maxX = v[0];
+    if (v[1] > maxY) maxY = v[1];
+  }
+  const spanX = (maxX - minX) || 1;
+  const spanY = (maxY - minY) || 1;
+  const uvOf = (v) => [(v[0] - minX) / spanX, (v[1] - minY) / spanY];
+
+  // Flat XY array for earcut; preserves polygon vertex order so the returned
+  // indices match polygon[] directly.
+  const flat = new Array(N * 2);
+  for (let i = 0; i < N; i++) {
+    flat[i * 2]     = polygon[i][0];
+    flat[i * 2 + 1] = polygon[i][1];
+  }
+  const triIdx = Earcut.triangulate(flat, null, 2);
+  if (!triIdx || triIdx.length === 0) return null;
 
   const positions = [];
   const normals = [];
@@ -39,30 +62,23 @@ function buildJunctionPrismGeometry(polygon, depth) {
     uvs.push(uvA[0], uvA[1], uvB[0], uvB[1], uvC[0], uvC[1]);
   };
 
-  const N = polygon.length;
-
-  // Top fan (CCW from above → +Z normal).
-  const topCentroid = [cx, cy, cz];
-  for (let i = 0; i < N; i++) {
-    const a = polygon[i];
-    const b = polygon[(i + 1) % N];
-    pushTri(
-      topCentroid, a, b,
-      [0, 0, 1],
-      [0.5, 0.5], [0, 0], [1, 0],
-    );
+  // Top face — earcut returns CCW indices for CCW input → +Z normal.
+  for (let i = 0; i < triIdx.length; i += 3) {
+    const a = polygon[triIdx[i]];
+    const b = polygon[triIdx[i + 1]];
+    const c = polygon[triIdx[i + 2]];
+    pushTri(a, b, c, [0, 0, 1], uvOf(a), uvOf(b), uvOf(c));
   }
 
-  // Bottom fan (reversed winding → -Z normal).
-  const botCentroid = [cx, cy, cz - depth];
-  for (let i = 0; i < N; i++) {
-    const a = [polygon[i][0], polygon[i][1], polygon[i][2] - depth];
-    const b = [polygon[(i + 1) % N][0], polygon[(i + 1) % N][1], polygon[(i + 1) % N][2] - depth];
-    pushTri(
-      botCentroid, b, a,
-      [0, 0, -1],
-      [0.5, 0.5], [1, 0], [0, 0],
-    );
+  // Bottom face — same triangulation, Z - depth, winding reversed so -Z normal.
+  for (let i = 0; i < triIdx.length; i += 3) {
+    const a = polygon[triIdx[i]];
+    const b = polygon[triIdx[i + 1]];
+    const c = polygon[triIdx[i + 2]];
+    const aB = [a[0], a[1], a[2] - depth];
+    const bB = [b[0], b[1], b[2] - depth];
+    const cB = [c[0], c[1], c[2] - depth];
+    pushTri(aB, cB, bB, [0, 0, -1], uvOf(a), uvOf(c), uvOf(b));
   }
 
   // Side walls — one trapezoid per polygon edge.
@@ -74,12 +90,12 @@ function buildJunctionPrismGeometry(polygon, depth) {
     const aBot = [a[0], a[1], a[2] - depth];
     const bBot = [b[0], b[1], b[2] - depth];
 
-    const dx = b[0] - a[0];
-    const dy = b[1] - a[1];
-    const elen = Math.sqrt(dx * dx + dy * dy) || 1;
+    const ex = b[0] - a[0];
+    const ey = b[1] - a[1];
+    const elen = Math.sqrt(ex * ex + ey * ey) || 1;
     // Outward normal: right-perpendicular of edge direction for CCW polygon.
-    const nx = dy / elen;
-    const ny = -dx / elen;
+    const nx = ey / elen;
+    const ny = -ex / elen;
     const normal = [nx, ny, 0];
 
     pushTri(aBot, bBot, bTop, normal, [0, 0], [1, 0], [1, 1]);
