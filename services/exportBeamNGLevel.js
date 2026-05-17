@@ -13,6 +13,7 @@ import {
   analyzeJunctions,
   buildJunctionPolygons,
   mergeJunctionClusters,
+  validateJunctionPolygon,
   clipPolylineEnds,
   pruneShortEndEdges,
   balanceEndEdges,
@@ -4096,7 +4097,25 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
         { worldBounds: { minX: -halfExtent, minY: -halfExtent, maxX: halfExtent, maxY: halfExtent } },
       )
     : [];
-  const meshRoadJunctions = mergeJunctionClusters([...rawJunctions, ...gapJunctions]);
+  const mergedJunctions = mergeJunctionClusters([...rawJunctions, ...gapJunctions]);
+
+  // Validation gate — drop any polygon that would produce a broken prism (and
+  // therefore broken vehicle collision). Reason counts go to console so bad
+  // polygons in real maps surface during export without blocking it.
+  const rejectionCounts = Object.create(null);
+  const meshRoadJunctions = [];
+  for (const j of mergedJunctions) {
+    const verdict = validateJunctionPolygon(j.polygon);
+    if (verdict.ok) {
+      meshRoadJunctions.push(j);
+    } else {
+      rejectionCounts[verdict.reason] = (rejectionCounts[verdict.reason] || 0) + 1;
+    }
+  }
+  if (Object.keys(rejectionCounts).length > 0) {
+    const breakdown = Object.entries(rejectionCounts).map(([r, c]) => `${r}=${c}`).join(' ');
+    console.warn(`[junctions] dropped ${mergedJunctions.length - meshRoadJunctions.length} invalid polygons: ${breakdown}`);
+  }
 
   const decalRoads = roadType === 'decal'
     ? generateDecalRoads(exportTerrainData, squareSize)
