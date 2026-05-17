@@ -24,6 +24,7 @@ import {
   MIN_MESH_ROAD_LENGTH,
 } from './junctionGeometry.js';
 import { generateJunctionsDAE } from './junctionMesh.js';
+import { detectGapJunctions } from './junctionRaster.js';
 import {
   getBeamNGFlavorById,
   getGlobalEnvironmentMap,
@@ -4082,7 +4083,20 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     ? generateMeshRoads(exportTerrainData, squareSize, meshRoadAnalysis)
     : { meshRoads: [], junctionEndpoints: new Map() };
   const rawJunctions = buildJunctionPolygons(meshRoadAnalysis?.roadNetwork, junctionEndpoints);
-  const meshRoadJunctions = mergeJunctionClusters(rawJunctions);
+
+  // Raster pass — diff a reference mask (OSM centerlines, round caps) against a
+  // coverage mask (emitted MeshRoad polylines with BUTT caps + filled junction
+  // polygons). Holes are real visible gaps; each hole becomes an extra junction
+  // polygon directly (no shared-endpoint assumption, no pipeline re-run).
+  const gapJunctions = meshRoadAnalysis
+    ? detectGapJunctions(
+        meshRoadAnalysis.segmentInfo,
+        meshRoads,
+        rawJunctions,
+        { worldBounds: { minX: -halfExtent, minY: -halfExtent, maxX: halfExtent, maxY: halfExtent } },
+      )
+    : [];
+  const meshRoadJunctions = mergeJunctionClusters([...rawJunctions, ...gapJunctions]);
 
   const decalRoads = roadType === 'decal'
     ? generateDecalRoads(exportTerrainData, squareSize)
