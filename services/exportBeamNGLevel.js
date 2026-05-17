@@ -11,6 +11,7 @@ import { ColladaExporter } from './ColladaExporter.js';
 import { buildRoadNetwork } from './roadNetwork.js';
 import {
   analyzeJunctions,
+  buildJunctionPolygons,
   mergeJunctionClusters,
   clipPolylineEnds,
   pruneShortEndEdges,
@@ -2081,7 +2082,7 @@ function buildSegmentWorldInfo(roadNetwork, terrainData, squareSize) {
  */
 function buildMeshRoadAnalysis(terrainData, squareSize) {
   if (!terrainData?.osmFeatures?.length) {
-    return { roadNetwork: null, segmentInfo: new Map(), junctions: [], segmentClips: new Map() };
+    return { roadNetwork: null, segmentInfo: new Map(), segmentClips: new Map() };
   }
   const roadNetwork = buildRoadNetwork(terrainData.osmFeatures.filter((feature) => {
     if (feature?.type !== 'road' || !Array.isArray(feature.geometry) || feature.geometry.length < 2) return false;
@@ -2090,10 +2091,9 @@ function buildMeshRoadAnalysis(terrainData, squareSize) {
   }));
 
   const segmentInfo = buildSegmentWorldInfo(roadNetwork, terrainData, squareSize);
-  const { junctions, segmentClips } = analyzeJunctions(roadNetwork, segmentInfo);
-  const mergedJunctions = mergeJunctionClusters(junctions);
+  const segmentClips = analyzeJunctions(roadNetwork, segmentInfo);
 
-  return { roadNetwork, segmentInfo, junctions: mergedJunctions, segmentClips };
+  return { roadNetwork, segmentInfo, segmentClips };
 }
 
 /**
@@ -2116,12 +2116,13 @@ function buildMeshRoadAnalysis(terrainData, squareSize) {
  * Node format: [x, y, z, fullWidth, depth, nx, ny, nz].
  */
 function generateMeshRoads(terrainData, squareSize, analysis) {
-  if (!terrainData?.osmFeatures?.length) return [];
+  if (!terrainData?.osmFeatures?.length) return { meshRoads: [], junctionEndpoints: new Map() };
   const ctx = analysis || buildMeshRoadAnalysis(terrainData, squareSize);
   const { roadNetwork, segmentClips } = ctx;
-  if (!roadNetwork) return [];
+  if (!roadNetwork) return { meshRoads: [], junctionEndpoints: new Map() };
 
   const meshRoads = [];
+  const junctionEndpoints = new Map();
   let roadIndex = 0;
 
   const sameLatLng = (a, b) => a && b && a.lat === b.lat && a.lng === b.lng;
@@ -2203,6 +2204,34 @@ function generateMeshRoads(terrainData, squareSize, analysis) {
       // have averaged them but explicit values keep the JSON output clean).
       nodes = nodes.map((n) => [n[0], n[1], n[2], n[3], MESH_ROAD_DEPTH, 0, 0, 1]);
 
+      // Record the actual post-pipeline endpoint for each junction-touching end
+      // so buildJunctionPolygons can use the exact MeshRoad cross-section position.
+      if (applyStartClip && nodes.length >= 2) {
+        const dx = nodes[1][0] - nodes[0][0];
+        const dy = nodes[1][1] - nodes[0][1];
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 0) {
+          junctionEndpoints.set(`${segment.id}|start`, {
+            pos: [nodes[0][0], nodes[0][1], nodes[0][2]],
+            outbound: [dx / len, dy / len],
+            halfWidth: nodes[0][3] / 2,
+          });
+        }
+      }
+      if (applyEndClip && nodes.length >= 2) {
+        const last = nodes.length - 1;
+        const dx = nodes[last - 1][0] - nodes[last][0];
+        const dy = nodes[last - 1][1] - nodes[last][1];
+        const len = Math.sqrt(dx * dx + dy * dy);
+        if (len > 0) {
+          junctionEndpoints.set(`${segment.id}|end`, {
+            pos: [nodes[last][0], nodes[last][1], nodes[last][2]],
+            outbound: [dx / len, dy / len],
+            halfWidth: nodes[last][3] / 2,
+          });
+        }
+      }
+
       meshRoads.push({
         class: 'MeshRoad',
         name: `MeshRoad_${roadIndex++}`,
@@ -2218,7 +2247,7 @@ function generateMeshRoads(terrainData, squareSize, analysis) {
     }
   }
 
-  return meshRoads;
+  return { meshRoads, junctionEndpoints };
 }
 
 /**
@@ -4049,10 +4078,11 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   const meshRoadAnalysis = roadType === 'mesh'
     ? buildMeshRoadAnalysis(exportTerrainData, squareSize)
     : null;
-  const meshRoads = meshRoadAnalysis
+  const { meshRoads, junctionEndpoints } = meshRoadAnalysis
     ? generateMeshRoads(exportTerrainData, squareSize, meshRoadAnalysis)
-    : [];
-  const meshRoadJunctions = meshRoadAnalysis?.junctions ?? [];
+    : { meshRoads: [], junctionEndpoints: new Map() };
+  const rawJunctions = buildJunctionPolygons(meshRoadAnalysis?.roadNetwork, junctionEndpoints);
+  const meshRoadJunctions = mergeJunctionClusters(rawJunctions);
 
   const decalRoads = roadType === 'decal'
     ? generateDecalRoads(exportTerrainData, squareSize)
