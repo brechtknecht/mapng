@@ -15,6 +15,7 @@
     "@tresjs/core": "^4.0.0",
     "@vue-leaflet/vue-leaflet": "^0.10.0",
     "@vueuse/core": "^11.0.0",
+    "3d-tiles-renderer": "^0.3.46",
     "fast-png": "^6.1.0",
     "fast-xml-parser": "^5.7.2",
     "geotiff": "^2.1.4-beta.1",

@@ -6,6 +6,7 @@ import { textures } from "./textureGenerator.js";
 import { createMetricProjector } from "./geoUtils.js";
 import { fetchSurroundingTiles, POSITIONS } from "./surroundingTiles.js";
 import { ColladaExporter } from './ColladaExporter.js';
+import { bakeGoogle3DTiles } from './google3dTiles.js';
 
 // --- Constants & Helpers ---
 export const SCENE_SIZE = 100;
@@ -1408,6 +1409,10 @@ export const exportToGLB = async (data, options = {}) => {
     onProgress,
     maxMeshResolution = 1024,
     returnBlob = false,
+    useGoogle3DTiles = false,
+    googleApiKey,
+    google3DErrorTarget,
+    stripGoogleGround,
   } = options;
   const resolvedIncludeCenterTile = typeof includeCenterTile === 'boolean'
     ? includeCenterTile
@@ -1421,9 +1426,20 @@ export const exportToGLB = async (data, options = {}) => {
     if (resolvedIncludeCenterTile) {
       onProgress?.('Building terrain mesh...');
       const terrainMesh = await createTerrainMesh(data, maxMeshResolution, centerTextureType);
-      const osmGroup = createOSMGroup(data);
+      const osmGroup = createOSMGroup(data, useGoogle3DTiles ? { includeBuildings: false } : {});
       scene.add(terrainMesh);
       scene.add(osmGroup);
+
+      if (useGoogle3DTiles) {
+        onProgress?.('Fetching Google Photorealistic 3D Tiles...');
+        const googleGroup = await bakeGoogle3DTiles(data, {
+          apiKey: googleApiKey,
+          errorTarget: google3DErrorTarget,
+          stripGround: stripGoogleGround !== false,
+          onProgress: (p) => onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`),
+        });
+        scene.add(googleGroup);
+      }
     }
 
     if (resolvedIncludeSurroundings) {
@@ -1477,6 +1493,10 @@ export const exportToDAE = async (data, options = {}) => {
     onProgress,
     maxMeshResolution = 1024,
     returnBlob = false,
+    useGoogle3DTiles = false,
+    googleApiKey,
+    google3DErrorTarget,
+    stripGoogleGround,
   } = options;
   const resolvedIncludeCenterTile = typeof includeCenterTile === 'boolean'
     ? includeCenterTile
@@ -1490,9 +1510,20 @@ export const exportToDAE = async (data, options = {}) => {
     if (resolvedIncludeCenterTile) {
       onProgress?.('Building terrain mesh...');
       const terrainMesh = await createTerrainMesh(data, maxMeshResolution, centerTextureType);
-      const osmGroup = createOSMGroup(data);
+      const osmGroup = createOSMGroup(data, useGoogle3DTiles ? { includeBuildings: false } : {});
       scene.add(terrainMesh);
       scene.add(osmGroup);
+
+      if (useGoogle3DTiles) {
+        onProgress?.('Fetching Google Photorealistic 3D Tiles...');
+        const googleGroup = await bakeGoogle3DTiles(data, {
+          apiKey: googleApiKey,
+          errorTarget: google3DErrorTarget,
+          stripGround: stripGoogleGround !== false,
+          onProgress: (p) => onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`),
+        });
+        scene.add(googleGroup);
+      }
     }
 
     if (resolvedIncludeSurroundings) {

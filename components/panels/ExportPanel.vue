@@ -122,6 +122,17 @@
             </label>
           </div>
 
+          <div class="flex items-center justify-between gap-2 px-0.5" :title="googleApiKey ? 'Use Google Photorealistic 3D Tiles for building geometry (untextured in BeamNG)' : 'Set VITE_GOOGLE_MAPS_API_KEY in .env.local to enable'">
+            <span class="text-[10px] shrink-0" :class="googleApiKey ? 'text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'">
+              Google 3D buildings
+              <span class="ml-1 text-[8px] uppercase tracking-wider bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1 py-0.5 rounded font-bold">exp</span>
+            </span>
+            <label class="flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" v-model="useGoogle3DTiles" :disabled="!googleApiKey || !beamNGIncludeBuildings" class="rounded border-gray-300 dark:border-gray-600 accent-[#FF6600] cursor-pointer disabled:cursor-not-allowed disabled:opacity-60" />
+              <span class="text-[9px]" :class="googleApiKey ? 'text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'">{{ googleApiKey ? 'replace OSM extrusion' : 'no API key' }}</span>
+            </label>
+          </div>
+
           <div class="flex items-center justify-between gap-2 px-0.5">
             <span class="text-[10px] text-gray-500 dark:text-gray-400 shrink-0">{{ t('exportPanel.applyFoundations') }}</span>
             <label class="flex items-center gap-1.5 cursor-pointer">
@@ -322,6 +333,16 @@
                 <input type="radio" v-model="modelTileSelection" value="surroundings-only" class="accent-[#FF6600] w-3 h-3" />
                 <span class="text-[9px] text-gray-500 dark:text-gray-400">{{ t('exportPanel.surroundingsOnly') }}</span>
               </label>
+            </div>
+            <div class="flex items-center justify-between gap-2 pt-1 border-t border-gray-200 dark:border-gray-600">
+              <label class="flex items-center gap-1.5 cursor-pointer" :title="googleApiKey ? 'Bake Google Photorealistic 3D Tiles into the export (skips OSM building extrusion)' : 'Set VITE_GOOGLE_MAPS_API_KEY in .env to enable'">
+                <input type="checkbox" v-model="useGoogle3DTiles" :disabled="!googleApiKey" class="accent-[#FF6600] w-3 h-3" />
+                <span class="text-[9px]" :class="googleApiKey ? 'text-gray-600 dark:text-gray-300' : 'text-gray-400 dark:text-gray-500'">
+                  Google Photorealistic 3D
+                  <span class="ml-1 text-[8px] uppercase tracking-wider bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1 py-0.5 rounded font-bold">exp</span>
+                </span>
+              </label>
+              <span v-if="!googleApiKey" class="text-[8px] text-gray-400 dark:text-gray-500">no API key</span>
             </div>
           </div>
 
@@ -598,6 +619,8 @@ const isAnyExporting = computed(() => (
 
 const modelCenterTextureType = ref('none');
 const modelTileSelection = ref('center-only');
+const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+const useGoogle3DTiles = ref(false);
 
 // Collapsible section states
 const showExports = ref(localStorage.getItem('mapng_showExports') !== 'false');
@@ -1131,7 +1154,10 @@ const handleGLBExport = async () => {
       surroundingTilePositions: props.surroundingTilePositions,
       center: props.center,
       resolution: props.resolution,
-      returnBlob: true
+      returnBlob: true,
+      useGoogle3DTiles: useGoogle3DTiles.value && !!googleApiKey,
+      googleApiKey,
+      onProgress: (msg) => console.log('[GLB export]', msg),
     });
     const typedBlob = await ensureDownloadBlobType(blob, 'model/gltf-binary', 'application/octet-stream');
     const filename = `terrain_${props.center.lat.toFixed(4)}_${props.center.lng.toFixed(4)}.glb`;
@@ -1164,7 +1190,10 @@ const handleDAEExport = async () => {
       surroundingTilePositions: props.surroundingTilePositions,
       center: props.center,
       resolution: props.resolution,
-      returnBlob: true
+      returnBlob: true,
+      useGoogle3DTiles: useGoogle3DTiles.value && !!googleApiKey,
+      googleApiKey,
+      onProgress: (msg) => console.log('[DAE export]', msg),
     });
     const typedBlob = await ensureDownloadBlobType(zipBlob, 'application/zip');
     const filename = `terrain_${props.center.lat.toFixed(4)}_${props.center.lng.toFixed(4)}.dae.zip`;
@@ -1305,6 +1334,8 @@ const handleBeamNGLevelExport = async () => {
       levelName: beamNGLevelName.value.trim(),
       elevationSource: props.elevationSource,
       requestedResolution: props.resolution,
+      useGoogle3DTiles: useGoogle3DTiles.value && !!googleApiKey,
+      googleApiKey,
       onProgress: ({ step, pct }) => {
         beamNGProgressStep.value = step;
         beamNGProgressPct.value  = pct;

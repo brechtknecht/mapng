@@ -5,6 +5,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { exportTer } from './exportTer.js';
 import { buildTerrainMaterials } from './osmTerrainMaterials.js';
 import { createOSMGroup, createSurroundingMeshes, SCENE_SIZE } from './export3d.js';
+import { bakeGoogle3DTiles } from './google3dTiles.js';
 import { prepareCroppedTerrainData } from './cropTerrain.js';
 import { applyBuildingFoundations } from './buildingFoundations.js';
 import { ColladaExporter } from './ColladaExporter.js';
@@ -531,6 +532,137 @@ async function generateOSMObjectsDAE(terrainData, worldSize) {
   const result = new ColladaExporter().parse(base00, undefined, { version: '1.4.1', upAxis: 'Z_UP' });
   if (!result?.data) return null;
   return result.data;
+}
+
+/**
+ * Bake Google Photorealistic 3D Tiles into a stand-alone DAE that lives in its
+ * own `art/shapes/google_tiles/` folder with its own materials.json (same
+ * pattern as the working mapng_flag asset). Keeping Google geometry isolated
+ * from osm_objects.dae avoids any cross-contamination with the vertex-colour
+ * `osm_object` material entry that the OSM-extruded buildings rely on.
+ *
+ * Returns { daeBlob, textureFiles, materialNames } or null if nothing baked.
+ */
+async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
+  const googleGroup = await bakeGoogle3DTiles(terrainData, {
+    apiKey: googleOptions.apiKey,
+    errorTarget: googleOptions.errorTarget,
+    stripGround: googleOptions.stripGround !== false,
+    onProgress: googleOptions.onProgress,
+    worldSize,
+  });
+
+  const googleMeshes = [];
+  googleGroup.traverse((c) => {
+    if (c.isMesh && c.userData.isGoogleTile) googleMeshes.push(c);
+  });
+  if (googleMeshes.length === 0) return null;
+
+  // Scene-space (Y-up, normalised) → BeamNG world-space (Z-up, metres).
+  const s = worldSize / SCENE_SIZE;
+  const transformMatrix = new THREE.Matrix4().set(
+    s,  0,  0,  0,
+    0,  0, -s,  0,
+    0,  s,  0,  0,
+    0,  0,  0,  1,
+  );
+
+  // Bake transform + clean up per-tile materials. Each surviving tile gets a
+  // unique MeshStandardMaterial with its own snapshotted texture and a name
+  // like "google_tile_N" that matches the BeamNG materials.json entry.
+  const materialNames = [];
+  const materials = [];
+  const tileGeoms = [];
+  for (const mesh of googleMeshes) {
+    if (!mesh.geometry?.attributes?.position || !mesh.geometry?.attributes?.uv) continue;
+    mesh.geometry.applyMatrix4(transformMatrix);
+    mesh.geometry.computeVertexNormals();
+    const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
+    if (!mat) continue;
+    mat.normalMap = null;
+    mat.roughnessMap = null;
+    mat.metalnessMap = null;
+    materials.push(mat);
+    if (mat.name && !materialNames.includes(mat.name)) materialNames.push(mat.name);
+    tileGeoms.push(mesh.geometry);
+  }
+  if (tileGeoms.length === 0) return null;
+
+  // Merge all tile geometries into ONE BufferGeometry with per-tile material
+  // groups. End result: a single Three.js Mesh with `material: [mat0, mat1…]`
+  // and `geometry.groups: [{start, count, materialIndex}, …]`. The
+  // ColladaExporter writes this as ONE <geometry> with ONE <instance_geometry>
+  // and N <instance_material> bindings — same DAE topology as the working
+  // textured debug cube (start01 > one_mesh), just with more materials.
+  const mergedGeom = mergeGeometries(tileGeoms, true);
+  if (!mergedGeom) return null;
+  const visualMesh = new THREE.Mesh(mergedGeom, materials);
+  visualMesh.name = 'google_tiles_mesh';
+
+  // Collision mesh — positions-only clone, single material.
+  const collisionGeom = new THREE.BufferGeometry();
+  collisionGeom.setAttribute('position', mergedGeom.attributes.position.clone());
+  if (mergedGeom.index) collisionGeom.setIndex(mergedGeom.index.clone());
+  collisionGeom.name = 'Colmesh-1';
+  const collisionMesh = new THREE.Mesh(
+    collisionGeom,
+    new THREE.MeshBasicMaterial({ name: 'osm_object', color: 0xffffff }),
+  );
+  collisionMesh.name = 'Colmesh-1';
+
+  // base00 > start01 > [single visual mesh] + Colmesh-1 — identical topology
+  // to the proven flag + textured-cube DAEs.
+  const base00 = new THREE.Group();
+  base00.name = 'base00';
+  const start01 = new THREE.Group();
+  start01.name = 'start01';
+  start01.add(visualMesh);
+  start01.add(collisionMesh);
+  base00.add(start01);
+  base00.updateMatrixWorld(true);
+
+  const result = new ColladaExporter().parse(base00, undefined, {
+    version: '1.4.1',
+    upAxis: 'Z_UP',
+    textureDirectory: 'textures',
+  });
+  if (!result?.data) return null;
+  return {
+    daeBlob: result.data,
+    textureFiles: result.textures ?? [],
+    materialNames,
+  };
+}
+
+/**
+ * Build a small textured-cube DAE that uses a known Google tile material name.
+ * Dropped near the player spawn as a diagnostic probe: if the cube renders
+ * textured in-game but the big osm_objects.dae stays invisible, the issue is
+ * in the photogrammetry mesh itself (UVs/normals/scale) rather than the
+ * material/texture pipeline.
+ */
+function generateGoogleDebugCubeDAE(materialName) {
+  const geom = new THREE.BoxGeometry(4, 4, 4);
+  // Build a fresh MeshStandardMaterial named to match the target material so
+  // BeamNG resolves it via main.materials.json the same way the big DAE does.
+  const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
+  mat.name = materialName;
+  const cube = new THREE.Mesh(geom, mat);
+  cube.name = 'google_debug_cube';
+
+  const base00 = new THREE.Group();
+  base00.name = 'base00';
+  const start01 = new THREE.Group();
+  start01.name = 'start01';
+  start01.add(cube);
+  base00.add(start01);
+  base00.updateMatrixWorld(true);
+
+  const result = new ColladaExporter().parse(base00, undefined, {
+    version: '1.4.1',
+    upAxis: 'Z_UP',
+  });
+  return result?.data ?? null;
 }
 
 /**
@@ -3930,6 +4062,9 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     flavorId,
     levelName: requestedLevelName = '',
     onProgress,
+    useGoogle3DTiles = false,
+    googleApiKey,
+    google3DErrorTarget,
   } = options;
   // Backward compat: generatePbrMaterials (bool) → pbrSource (string)
   let pbrSource = options.pbrSource;
@@ -4173,10 +4308,28 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   let previewBlob = await generatePreviewBlob(exportTerrainData);
 
   let osmDaeBlob = null;
+  let googleTilesDaeBlob = null;
+  let googleTilesTextureFiles = [];
+  let googleTilesMaterialNames = [];
+  let googleDebugCubeBlob = null;
   if (includeBuildings) {
     beginStep(`Building 3D OSM objects (${osmFeatureCount} features)…`, 65);
     await yield_();
     osmDaeBlob = await generateOSMObjectsDAE(exportTerrainData, worldSize);
+
+    if (useGoogle3DTiles && googleApiKey) {
+      const googleResult = await generateGoogleTilesDAE(exportTerrainData, worldSize, {
+        apiKey: googleApiKey,
+        errorTarget: google3DErrorTarget,
+        onProgress: (p) => report(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`, 65),
+      });
+      googleTilesDaeBlob = googleResult?.daeBlob ?? null;
+      googleTilesTextureFiles = googleResult?.textureFiles ?? [];
+      googleTilesMaterialNames = googleResult?.materialNames ?? [];
+      if (googleTilesMaterialNames.length > 0) {
+        googleDebugCubeBlob = generateGoogleDebugCubeDAE(googleTilesMaterialNames[0]);
+      }
+    }
   } else {
     beginStep('Skipping 3D OSM object export (disabled)…', 65);
     await yield_();
@@ -4507,6 +4660,49 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     if (osmDaeBlob) zip.file(`${base}/art/shapes/osm_objects.dae`, osmDaeBlob);
     if (junctionsDaeBlob) zip.file(`${base}/art/shapes/road_junctions.dae`, junctionsDaeBlob);
     if (backdropDaeBlob) zip.file(`${base}/art/shapes/terrain_backdrop.dae`, backdropDaeBlob);
+
+    // Google Photorealistic 3D Tiles live in their own folder (own DAE, own
+    // materials.json, own texture folder) — mirroring the working mapng_flag
+    // asset layout. Keeps the per-tile photogrammetry materials isolated from
+    // the OSM `osm_object` vertex-colour material in art/shapes/main.materials.json.
+    if (googleTilesDaeBlob) {
+      zip.folder(`${base}/art/shapes/google_tiles`);
+      zip.file(`${base}/art/shapes/google_tiles/google_tiles.dae`, googleTilesDaeBlob);
+      if (googleDebugCubeBlob) zip.file(`${base}/art/shapes/google_tiles/google_debug.dae`, googleDebugCubeBlob);
+      // Collision mesh material (vertex-colour, no texture).
+      const googleMaterials = {
+        osm_object: {
+          class: 'Material',
+          name: 'osm_object',
+          mapTo: 'osm_object',
+          annotation: 'BUILDINGS',
+          Stages: [{ diffuseColor: [1, 1, 1, 1], vertColor: true }],
+          translucentBlendOp: 'None',
+        },
+      };
+      // Per-tile photogrammetry textures + matching materials. Material shape
+      // mirrors the working mapng_flag entry exactly (Material class uses
+      // `colorMap`, not `diffuseMap`; needs 4 Stages even if 3 are empty).
+      if (googleTilesTextureFiles.length > 0) {
+        zip.folder(`${base}/art/shapes/google_tiles/textures`);
+        for (const tex of googleTilesTextureFiles) {
+          zip.file(`${base}/art/shapes/google_tiles/textures/${tex.name}.${tex.ext}`, tex.data);
+          googleMaterials[tex.name] = {
+            name: tex.name,
+            mapTo: tex.name,
+            class: 'Material',
+            Stages: [
+              { colorMap: `levels/${levelName}/art/shapes/google_tiles/textures/${tex.name}.${tex.ext}` },
+              {},
+              {},
+              {},
+            ],
+            translucentBlendOp: 'None',
+          };
+        }
+      }
+      zip.file(`${base}/art/shapes/google_tiles/main.materials.json`, JSON.stringify(googleMaterials, null, 2));
+    }
     for (const asset of mapngFlagFiles) {
       const relativePath = asset.path.startsWith('mapng/') ? asset.path.slice('mapng/'.length) : asset.path;
       if (relativePath === 'main.materials.json') {
@@ -4796,6 +4992,37 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       collisionType: 'Collision Mesh',
       decalType: 'Collision Mesh',
       prebuildCollisionData: 0,
+      useInstanceRenderData: true,
+    });
+  }
+
+  if (googleTilesDaeBlob) {
+    otherItems.push({
+      __parent: 'Other',
+      class: 'TSStatic',
+      name: 'google_tiles',
+      persistentId: generatePersistentId(),
+      position: [0, 0, 0],
+      shapeName: `levels/${levelName}/art/shapes/google_tiles/google_tiles.dae`,
+      collisionType: 'Collision Mesh',
+      decalType: 'Collision Mesh',
+      prebuildCollisionData: 0,
+      useInstanceRenderData: true,
+    });
+  }
+
+  // Diagnostic probe: 4-meter cube floating 5 m above the spawn point using the
+  // first Google tile material. If this cube renders textured but the big
+  // google_tiles mesh stays invisible, the issue is in the photogrammetry
+  // geometry (UVs / scale / normals), not the material/texture pipeline.
+  if (googleDebugCubeBlob && Array.isArray(spawnPosition)) {
+    otherItems.push({
+      __parent: 'Other',
+      class: 'TSStatic',
+      name: 'google_debug_cube',
+      persistentId: generatePersistentId(),
+      position: [spawnPosition[0], spawnPosition[1], spawnPosition[2] + 5],
+      shapeName: `levels/${levelName}/art/shapes/google_tiles/google_debug.dae`,
       useInstanceRenderData: true,
     });
   }
