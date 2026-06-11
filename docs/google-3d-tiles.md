@@ -66,12 +66,19 @@ exportBeamNGLevel.js
                                 textures/google_atlas_NN.png
                                        │
                                        ▼
-                              JSZip → BeamNG level zip
+                              POST /api/convert-dae
+                              (vite dev-server middleware →
+                               headless Blender ≤4.2, ~7 s)
                                        │
-                              one-time, outside the browser:
-                              blender --background --python
-                                beamng_glb_to_dae.py --
-                                google_tiles.glb google_tiles.dae
+                            ┌──────────┴──────────┐
+                            ▼                     ▼
+                     bridge available       bridge unavailable
+                     google_tiles.dae       google_tiles.glb +
+                     in the zip —           beamng_glb_to_dae.py +
+                     ready to play          README (manual one-liner)
+                                       │
+                                       ▼
+                              JSZip → BeamNG level zip
                                        │
                                        ▼
                               items.level.json
@@ -84,13 +91,21 @@ undocumented constraints our hand-rolled ColladaExporter kept tripping over
 (lessons 14–15). Blender's Collada exporter is what the BeamNG modding community
 itself uses; the GLB intermediate is verifiable in any viewer before conversion.
 
+**The conversion is automatic in dev:** `scripts/viteBlenderDaePlugin.mjs` adds a
+`POST /api/convert-dae` middleware to the Vite dev server that pipes the GLB through
+headless Blender and returns the .dae, so exported zips are ready to play. Blender
+resolution: `BLENDER_PATH` env var → portable unzips on the Desktop → Program Files
+(3.x/4.x only). Without a usable Blender, the export falls back to bundling the GLB +
+script for the manual command.
+
 ## Key files
 
 | File | Responsibility |
 |---|---|
 | `services/google3dTiles.js` | Headless tile fetcher. Sweeps a virtual camera through 5 stations, snapshots each tile's texture to a standalone canvas before disposing the renderer, transforms ECEF → mapng coords, clips to AOI, strips street-level ground tris. Owns the bake caches (in-memory + IndexedDB). |
 | `services/exportBeamNGLevel.js` | `generateGoogleTilesGLB()` (atlas + chunking + GLTFExporter) + zip-writer wiring for the `art/shapes/google_tiles/` folder; hides OSM building visuals (keeps their collision) when Google tiles are on. |
-| `scripts/beamng_glb_to_dae.py` | Headless Blender (≤4.2!) converter: sanitizes names, builds `base00 > start01`, exports the BeamNG-proven Collada. Shipped inside every export zip. |
+| `scripts/beamng_glb_to_dae.py` | Headless Blender (≤4.2!) converter: sanitizes names, builds `base00 > start01`, exports the BeamNG-proven Collada. Shipped in the zip when the bridge is unavailable. |
+| `scripts/viteBlenderDaePlugin.mjs` | Vite dev-server middleware `POST /api/convert-dae` — runs the converter automatically during export. |
 | `services/export3d.js` | Threads `useGoogle3DTiles` through `exportToGLB` / `exportToDAE` for direct GLB/DAE export paths. |
 | `components/panels/ExportPanel.vue` | Toggle in the BeamNG export section. Reads `VITE_GOOGLE_MAPS_API_KEY`. |
 | `stores/googleTilesStore.js` | Pinia store for the 3D-preview bake (status, progress, show toggle, markRaw'd group). |
@@ -298,7 +313,7 @@ After lessons 1–15 the conclusion: BeamNG's importer has more undocumented con
 - **Google data gaps** — inner courtyards, under trees, narrow alleys are missing in the source photogrammetry itself; no bake setting fixes those.
 - **No height calibration UI** — the Y offset is fully formula-driven now; if BeamNG terrain has unusual `maxHeight` settings, a `verticalOffset` slider may still be wanted.
 - ~~Collision mesh = visual mesh~~ — solved: photogrammetry is visual-only (`collisionType: None`), the hidden OSM building boxes in `osm_objects.dae` provide cheap watertight collision.
-- **Manual conversion step** — the Blender hop is one CLI command but still manual. Possible future: a tiny local companion service that watches for exports and converts automatically.
+- ~~Manual conversion step~~ — solved: the Vite dev-server bridge converts automatically during export (~7 s for a 75 MB GLB); manual fallback remains for prod builds / missing Blender.
 - **OSM buildings sky bug** — see lesson 6 note. Separate fix.
 
 ## Branch + commit

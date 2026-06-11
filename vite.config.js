@@ -2,6 +2,7 @@ import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { templateCompilerOptions } from '@tresjs/core';
 import { execSync } from 'child_process';
+import blenderDaePlugin from './scripts/viteBlenderDaePlugin.mjs';
 
 const commitHash = (() => {
   try {
@@ -16,7 +17,10 @@ export default defineConfig({
   plugins: [
     vue({
       ...templateCompilerOptions
-    })
+    }),
+    // POST /api/convert-dae: GLB → BeamNG .dae via headless Blender, so the
+    // BeamNG export can bundle the final google_tiles.dae automatically.
+    blenderDaePlugin()
   ],
   optimizeDeps: {
     exclude: ['geotiff'],

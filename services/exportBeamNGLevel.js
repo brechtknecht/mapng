@@ -4433,6 +4433,7 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
 
   let osmDaeBlob = null;
   let googleTilesGlbBlob = null;
+  let googleTilesDaeBlob = null;
   let googleTilesTextureFiles = [];
   let googleTilesMaterialNames = [];
   let googleDebugCubeBlob = null;
@@ -4476,6 +4477,42 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       } catch (err) {
         console.error('[BeamNG export] Google 3D Tiles bake failed — exporting without them:', err);
         report(`Google tiles failed (${err?.message ?? err}) — exporting without them`, 65);
+      }
+
+      // Auto-convert GLB → .dae through the dev-server Blender bridge
+      // (vite middleware → headless Blender ≤4.2). When the bridge is
+      // unavailable (no Blender, prod build), the zip ships the GLB plus
+      // the conversion script for the documented manual one-liner.
+      if (googleTilesGlbBlob) {
+        try {
+          beginStep('Converting Google tiles to DAE (Blender)…', 66);
+          await yield_();
+          const resp = await fetch('/api/convert-dae', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/octet-stream' },
+            body: googleTilesGlbBlob,
+          });
+          if (resp.ok) {
+            googleTilesDaeBlob = await resp.blob();
+            console.info(
+              `[BeamNG export] Blender bridge converted google_tiles.dae ` +
+              `(${(googleTilesDaeBlob.size / 1024 ** 2).toFixed(1)} MB) — zip is ready to play`,
+            );
+          } else {
+            const msg = await resp.text();
+            console.warn(
+              `[BeamNG export] Blender bridge unavailable (HTTP ${resp.status}): ${msg} — ` +
+              'shipping GLB + conversion script instead',
+            );
+            report('Blender bridge unavailable — zip needs the manual conversion step', 66);
+          }
+        } catch (err) {
+          console.warn(
+            '[BeamNG export] Blender bridge unreachable — shipping GLB + conversion script instead:',
+            err,
+          );
+          report('Blender bridge unreachable — zip needs the manual conversion step', 66);
+        }
       }
     }
   } else {
@@ -4817,9 +4854,14 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     // folder). Run the script once, drop google_tiles.dae next to the glb.
     if (googleTilesGlbBlob) {
       zip.folder(`${base}/art/shapes/google_tiles`);
-      zip.file(`${base}/art/shapes/google_tiles/google_tiles.glb`, googleTilesGlbBlob);
-      zip.file(`${base}/art/shapes/google_tiles/beamng_glb_to_dae.py`, beamngGlbToDaeScript);
-      zip.file(
+      if (googleTilesDaeBlob) {
+        // The dev-server Blender bridge already produced the final shape —
+        // the zip is ready to play, no GLB/conversion bundle needed.
+        zip.file(`${base}/art/shapes/google_tiles/google_tiles.dae`, googleTilesDaeBlob);
+      } else {
+        zip.file(`${base}/art/shapes/google_tiles/google_tiles.glb`, googleTilesGlbBlob);
+        zip.file(`${base}/art/shapes/google_tiles/beamng_glb_to_dae.py`, beamngGlbToDaeScript);
+        zip.file(
         `${base}/art/shapes/google_tiles/README_CONVERT.txt`,
         [
           'Google 3D Tiles — one-time conversion to .dae',
@@ -4850,7 +4892,8 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
           'Textures are NOT read from the .dae — they resolve via main.materials.json',
           'in this folder (google_atlas_NN entries pointing at textures/*.png).',
         ].join('\n'),
-      );
+        );
+      }
       if (googleDebugCubeBlob) zip.file(`${base}/art/shapes/google_tiles/google_debug.dae`, googleDebugCubeBlob);
       // Collision mesh material (vertex-colour, no texture).
       const googleMaterials = {
