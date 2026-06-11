@@ -6,6 +6,8 @@ import { exportTer } from './exportTer.js';
 import { buildTerrainMaterials } from './osmTerrainMaterials.js';
 import { createOSMGroup, createSurroundingMeshes, SCENE_SIZE } from './export3d.js';
 import { getOrBakeGoogle3DTiles } from './google3dTiles.js';
+import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
+import beamngGlbToDaeScript from '../scripts/beamng_glb_to_dae.py?raw';
 import { prepareCroppedTerrainData } from './cropTerrain.js';
 import { applyBuildingFoundations } from './buildingFoundations.js';
 import { ColladaExporter } from './ColladaExporter.js';
@@ -550,15 +552,21 @@ async function generateOSMObjectsDAE(terrainData, worldSize, { hideBuildingVisua
 }
 
 /**
- * Bake Google Photorealistic 3D Tiles into a stand-alone DAE that lives in its
- * own `art/shapes/google_tiles/` folder with its own materials.json (same
- * pattern as the working mapng_flag asset). Keeping Google geometry isolated
- * from osm_objects.dae avoids any cross-contamination with the vertex-colour
- * `osm_object` material entry that the OSM-extruded buildings rely on.
+ * Bake Google Photorealistic 3D Tiles into a BeamNG-ready GLB plus the atlas
+ * textures + material names for `art/shapes/google_tiles/`.
  *
- * Returns { daeBlob, textureFiles, materialNames } or null if nothing baked.
+ * The GLB is NOT loaded by BeamNG directly — its Torque-era importer only
+ * accepts .dae, and our hand-rolled Collada writer kept tripping over
+ * undocumented importer constraints (16-bit vertex indices, trailing digits
+ * in node names parsed as LOD sizes, ...). Instead the level zip ships the
+ * GLB together with scripts/beamng_glb_to_dae.py; a headless Blender run
+ * converts it to the final google_tiles.dae using the Collada exporter the
+ * BeamNG modding community itself relies on. The GLB is also verifiable in
+ * any glTF viewer — a trustworthy intermediate at last.
+ *
+ * Returns { glbBlob, textureFiles, materialNames } or null if nothing baked.
  */
-async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
+async function generateGoogleTilesGLB(terrainData, worldSize, googleOptions) {
   // Cached bake shared with the 3D preview — a preview-then-export flow only
   // hits the Google API once.
   const googleGroup = await getOrBakeGoogle3DTiles(terrainData, {
@@ -574,27 +582,21 @@ async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
   });
   if (googleMeshes.length === 0) return null;
 
-  // Scene-space (X/Z scene units, Y in metres above the .ter datum) →
-  // BeamNG world-space (Z-up, metres). X/Z scale by s; Y is already metres,
-  // so it maps to world-Z with factor 1.
+  // Bake-space (X/Z scene units, Y in metres above the .ter datum) → glTF
+  // space (Y-up, metres), authored so the round trip lands in BeamNG world
+  // coordinates: Blender's glTF import maps (gX, gY, gZ) → (gX, -gZ, gY),
+  // which must equal BeamNG's (s·x, -s·z, y). Hence simply gX = s·x,
+  // gY = y (already metres), gZ = s·z — a plain scale matrix.
   const s = worldSize / SCENE_SIZE;
-  const transformMatrix = new THREE.Matrix4().set(
-    s,  0,  0,  0,
-    0,  0, -s,  0,
-    0,  1,  0,  0,
-    0,  0,  0,  1,
-  );
+  const transformMatrix = new THREE.Matrix4().makeScale(s, 1, s);
 
   // Transform CLONES of the tile geometries — the source group is owned by
   // the bake cache and must survive untouched for the preview / next export.
   //
-  // TEXTURE ATLAS: per-tile materials produced thousands of
-  // <instance_material> group bindings in one DAE, and BeamNG's Collada
-  // importer scrambled the per-face material assignment ("textures all over
-  // the place"). The proven-working BeamNG shapes (flag, debug cube) are
-  // one-mesh-few-materials, so pack every tile texture into a few 4096²
-  // atlas sheets, remap the UVs into the atlas cells, and emit one material
-  // group per ATLAS (≤ ~16) instead of per tile (1000s).
+  // TEXTURE ATLAS: thousands of per-tile materials are unusable in BeamNG
+  // (materials.json bloat, importer scrambling). Pack every tile texture
+  // into a few 4096² atlas sheets and remap the UVs into the atlas cells —
+  // a handful of materials total.
   const ATLAS_SIZE = 4096;
   const PAD = 2; // gutter between cells against bilinear bleed
 
@@ -672,74 +674,88 @@ async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
     }
   }
 
-  // One merged geometry per atlas (no groups), then one final geometry with
-  // a single material group per atlas — a handful of bindings instead of
-  // thousands. Zero-padded names so no tooling can reorder them.
+  // Chunked meshes, ≤60k vertices each, ONE atlas material each. The final
+  // .dae lands in Torque's TSMesh which uses 16-bit vertex indices — a mesh
+  // past 65,535 verts imports with wrapped indices (shapes survive,
+  // texcoords scramble into kaleidoscope). Names end in "_mesh" because
+  // Torque parses trailing digits as LOD detail sizes ("foo000" = render at
+  // 0 px = invisible); the Blender script re-sanitizes anyway.
+  const VERT_LIMIT = 60000;
   const materialNames = [];
-  const materials = [];
-  const atlasGeoms = [];
+  const tilesGroup = new THREE.Group();
+  tilesGroup.name = 'google_tiles';
+  let mergeFailed = false;
+
   for (const a of atlases) {
     if (a.entries.length === 0) continue;
-    const merged = mergeGeometries(a.entries.map((e) => e.geom), false);
-    if (!merged) {
-      console.error(
-        `[BeamNG export] mergeGeometries failed for atlas ${materials.length} ` +
-        `(${a.entries.length} tiles, attribute mismatch?) — dropping Google tiles from this export`,
-      );
-      return null;
-    }
-    const matName = `google_atlas_${String(materials.length).padStart(2, '0')}`;
+    const matName = `google_atlas_${String(materialNames.length).padStart(2, '0')}`;
     const tex = new THREE.CanvasTexture(a.canvas);
     tex.name = matName;
+    // glTF convention (v=0 at the image top) — matches the source tile UVs
+    // and keeps GLTFExporter from misexporting the canvas.
+    tex.flipY = false;
     const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
     mat.name = matName;
     mat.map = tex;
-    materials.push(mat);
     materialNames.push(matName);
-    atlasGeoms.push(merged);
+
+    let chunk = [];
+    let chunkVerts = 0;
+    const flushChunk = () => {
+      if (chunk.length === 0) return;
+      const merged = mergeGeometries(chunk, false);
+      if (!merged) {
+        console.error(
+          `[BeamNG export] mergeGeometries failed for a ${chunk.length}-tile chunk of ${matName} ` +
+          '(attribute mismatch?) — dropping Google tiles from this export',
+        );
+        mergeFailed = true;
+        chunk = [];
+        return;
+      }
+      const mesh = new THREE.Mesh(merged, mat);
+      mesh.name = `google_tiles_a${matName.slice(-2)}_c${String(tilesGroup.children.length).padStart(3, '0')}_mesh`;
+      tilesGroup.add(mesh);
+      chunk = [];
+      chunkVerts = 0;
+    };
+
+    for (const e of a.entries) {
+      const vCount = e.geom.attributes.position.count;
+      if (chunkVerts + vCount > VERT_LIMIT && chunk.length > 0) flushChunk();
+      if (mergeFailed) return null;
+      chunk.push(e.geom);
+      chunkVerts += vCount;
+    }
+    flushChunk();
+    if (mergeFailed) return null;
   }
+  if (tilesGroup.children.length === 0) return null;
   console.info(
-    `[BeamNG export] packed ${entries.length} Google tile textures into ${materials.length} ` +
-    `${ATLAS_SIZE}px atlas(es)`,
+    `[BeamNG export] packed ${entries.length} Google tiles into ${materialNames.length} ` +
+    `${ATLAS_SIZE}px atlas(es), ${tilesGroup.children.length} meshes (≤${VERT_LIMIT} verts each)`,
   );
 
-  const mergedGeom = mergeGeometries(atlasGeoms, true);
-  if (!mergedGeom) {
-    console.error(
-      `[BeamNG export] final mergeGeometries failed across ${atlasGeoms.length} atlas geometries — ` +
-      'dropping Google tiles from this export',
-    );
-    return null;
-  }
-  const visualMesh = new THREE.Mesh(mergedGeom, materials);
-  visualMesh.name = 'google_tiles_mesh';
-
-  // No Colmesh-1 here on purpose: colliding against raw photogrammetry is
+  // No collision mesh on purpose: colliding against raw photogrammetry is
   // expensive and lumpy. The extruded OSM building boxes (kept in
   // osm_objects.dae's collision mesh even when their visuals are hidden)
-  // provide the collision instead.
+  // provide the collision instead. The base00 > start01 node skeleton is
+  // added by the Blender conversion script.
+  tilesGroup.updateMatrixWorld(true);
 
-  // base00 > start01 > [single visual mesh] — same topology as the proven
-  // flag + textured-cube DAEs, minus the collision mesh.
-  const base00 = new THREE.Group();
-  base00.name = 'base00';
-  const start01 = new THREE.Group();
-  start01.name = 'start01';
-  start01.add(visualMesh);
-  base00.add(start01);
-  base00.updateMatrixWorld(true);
+  const glbBuffer = await new GLTFExporter().parseAsync(tilesGroup, { binary: true });
+  const glbBlob = new Blob([glbBuffer], { type: 'model/gltf-binary' });
 
-  const result = new ColladaExporter().parse(base00, undefined, {
-    version: '1.4.1',
-    upAxis: 'Z_UP',
-    textureDirectory: 'textures',
-  });
-  if (!result?.data) return null;
-  return {
-    daeBlob: result.data,
-    textureFiles: result.textures ?? [],
-    materialNames,
-  };
+  // Atlas PNGs for the zip's textures/ folder + materials.json entries.
+  const textureFiles = [];
+  for (let i = 0; i < atlases.length; i++) {
+    if (atlases[i].entries.length === 0) continue;
+    const name = materialNames[textureFiles.length];
+    const data = await new Promise((resolve) => atlases[i].canvas.toBlob(resolve, 'image/png'));
+    if (data) textureFiles.push({ name, ext: 'png', data });
+  }
+
+  return { glbBlob, textureFiles, materialNames };
 }
 
 /**
@@ -4416,7 +4432,7 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   let previewBlob = await generatePreviewBlob(exportTerrainData);
 
   let osmDaeBlob = null;
-  let googleTilesDaeBlob = null;
+  let googleTilesGlbBlob = null;
   let googleTilesTextureFiles = [];
   let googleTilesMaterialNames = [];
   let googleDebugCubeBlob = null;
@@ -4434,7 +4450,7 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       // A failed Google bake must never take down the whole level export —
       // catch, log loudly, and continue with the OSM-only level.
       try {
-        const googleResult = await generateGoogleTilesDAE(exportTerrainData, worldSize, {
+        const googleResult = await generateGoogleTilesGLB(exportTerrainData, worldSize, {
           apiKey: googleApiKey,
           errorTarget: google3DErrorTarget,
           onProgress: (p) => report(
@@ -4442,7 +4458,7 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
             65,
           ),
         });
-        googleTilesDaeBlob = googleResult?.daeBlob ?? null;
+        googleTilesGlbBlob = googleResult?.glbBlob ?? null;
         googleTilesTextureFiles = googleResult?.textureFiles ?? [];
         googleTilesMaterialNames = googleResult?.materialNames ?? [];
         if (googleTilesMaterialNames.length > 0) {
@@ -4453,8 +4469,8 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
           report('Google tiles: no geometry produced — exporting without them', 65);
         } else {
           console.info(
-            `[BeamNG export] Google tiles DAE built: ${googleTilesMaterialNames.length} materials, ` +
-            `${googleTilesTextureFiles.length} textures`,
+            `[BeamNG export] Google tiles GLB built: ${googleTilesMaterialNames.length} atlas materials, ` +
+            `${googleTilesTextureFiles.length} textures — convert with scripts/beamng_glb_to_dae.py`,
           );
         }
       } catch (err) {
@@ -4793,13 +4809,48 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     if (junctionsDaeBlob) zip.file(`${base}/art/shapes/road_junctions.dae`, junctionsDaeBlob);
     if (backdropDaeBlob) zip.file(`${base}/art/shapes/terrain_backdrop.dae`, backdropDaeBlob);
 
-    // Google Photorealistic 3D Tiles live in their own folder (own DAE, own
+    // Google Photorealistic 3D Tiles live in their own folder (own
     // materials.json, own texture folder) — mirroring the working mapng_flag
-    // asset layout. Keeps the per-tile photogrammetry materials isolated from
-    // the OSM `osm_object` vertex-colour material in art/shapes/main.materials.json.
-    if (googleTilesDaeBlob) {
+    // asset layout. The geometry ships as google_tiles.glb plus a Blender
+    // conversion script: BeamNG only loads .dae, and Blender's Collada
+    // exporter is the BeamNG-proven serializer (see the README in the
+    // folder). Run the script once, drop google_tiles.dae next to the glb.
+    if (googleTilesGlbBlob) {
       zip.folder(`${base}/art/shapes/google_tiles`);
-      zip.file(`${base}/art/shapes/google_tiles/google_tiles.dae`, googleTilesDaeBlob);
+      zip.file(`${base}/art/shapes/google_tiles/google_tiles.glb`, googleTilesGlbBlob);
+      zip.file(`${base}/art/shapes/google_tiles/beamng_glb_to_dae.py`, beamngGlbToDaeScript);
+      zip.file(
+        `${base}/art/shapes/google_tiles/README_CONVERT.txt`,
+        [
+          'Google 3D Tiles — one-time conversion to .dae',
+          '=============================================',
+          '',
+          'BeamNG only loads COLLADA (.dae) shapes, and Blender\'s exporter is the',
+          'reliable way to produce one.',
+          '',
+          '⚠ Blender 3.x or 4.x required (4.2 LTS recommended) — Collada export was',
+          '  REMOVED in Blender 5.0+. A portable zip from',
+          '  https://download.blender.org/release/Blender4.2/ works without installing.',
+          '',
+          '  1. Extract this zip (or open the folder if already extracted).',
+          '  2. In this folder, run:',
+          '',
+          '     blender --background --factory-startup --python beamng_glb_to_dae.py -- google_tiles.glb google_tiles.dae',
+          '',
+          '     (On Windows, use the full path to blender.exe, e.g.',
+          '      "...\\blender-4.2.9-windows-x64\\blender.exe")',
+          '',
+          '  3. Re-zip the level (or keep it as an unpacked folder in your BeamNG',
+          '     mods directory). The level\'s items.level.json already references',
+          '     google_tiles.dae — once the file exists, the photogrammetry appears.',
+          '',
+          'You can inspect google_tiles.glb in any glTF viewer (e.g. Blender itself,',
+          'or https://gltf-viewer.donmccurdy.com) to verify the bake before converting.',
+          '',
+          'Textures are NOT read from the .dae — they resolve via main.materials.json',
+          'in this folder (google_atlas_NN entries pointing at textures/*.png).',
+        ].join('\n'),
+      );
       if (googleDebugCubeBlob) zip.file(`${base}/art/shapes/google_tiles/google_debug.dae`, googleDebugCubeBlob);
       // Collision mesh material (vertex-colour, no texture).
       const googleMaterials = {
@@ -5128,13 +5179,16 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     });
   }
 
-  if (googleTilesDaeBlob) {
+  if (googleTilesGlbBlob) {
     otherItems.push({
       __parent: 'Other',
       class: 'TSStatic',
       name: 'google_tiles',
       persistentId: generatePersistentId(),
       position: [0, 0, 0],
+      // The .dae does not exist in the fresh zip — it's produced by the
+      // one-time Blender conversion (see README_CONVERT.txt in the google_tiles
+      // folder). Until then BeamNG logs a missing shape and renders nothing.
       shapeName: `levels/${levelName}/art/shapes/google_tiles/google_tiles.dae`,
       // Visual-only: the DAE ships no Colmesh and collision is explicitly off —
       // the hidden OSM building boxes in osm_objects.dae do the colliding.

@@ -28,51 +28,69 @@ ExportPanel.vue (toggle)
         ▼
 exportBeamNGLevel.js
         │
-        ├── generateOSMObjectsDAE()   ← unchanged OSM path
+        ├── generateOSMObjectsDAE()   ← OSM path (buildings → collision-only
+        │                               when Google tiles are on)
         │
-        └── generateGoogleTilesDAE() ──┐
+        └── generateGoogleTilesGLB() ──┐
                  │                     │
                  ▼                     │
+        getOrBakeGoogle3DTiles()       │   (memory → IndexedDB → bake)
         bakeGoogle3DTiles()            │
         services/google3dTiles.js      │
                  │                     │
                  ▼                     │
         3d-tiles-renderer              │
         + GoogleCloudAuthPlugin        │
+        camera sweep, 5 stations       │
                  │                     │
                  ▼                     │
         per-tile Three.js Mesh         │
         (MeshStandardMaterial,         │
          snapshotted CanvasTexture)    │
                                        ▼
-                              merged into one BufferGeometry
-                              with per-tile material groups
+                              texture ATLASES (4096², shelf-packed,
+                              UVs remapped) + CHUNKED meshes
+                              (≤60k verts, letter-named)
                                        │
                                        ▼
-                              ColladaExporter
+                              GLTFExporter → google_tiles.glb
+                              (verifiable in any glTF viewer!)
                                        │
                                        ▼
                               art/shapes/google_tiles/
-                                google_tiles.dae
-                                main.materials.json
+                                google_tiles.glb
+                                beamng_glb_to_dae.py    (Blender ≤4.2 headless)
+                                README_CONVERT.txt
+                                main.materials.json     (google_atlas_NN entries)
                                 google_debug.dae        (diagnostic cube)
-                                textures/google_tile_*.png
+                                textures/google_atlas_NN.png
                                        │
                                        ▼
                               JSZip → BeamNG level zip
                                        │
+                              one-time, outside the browser:
+                              blender --background --python
+                                beamng_glb_to_dae.py --
+                                google_tiles.glb google_tiles.dae
+                                       │
                                        ▼
                               items.level.json
-                                Other > google_tiles    (TSStatic)
+                                Other > google_tiles    (TSStatic, collision None)
                                 Other > google_debug_cube
 ```
+
+**Why the Blender hop:** BeamNG only loads .dae, and its Torque-era importer has
+undocumented constraints our hand-rolled ColladaExporter kept tripping over
+(lessons 14–15). Blender's Collada exporter is what the BeamNG modding community
+itself uses; the GLB intermediate is verifiable in any viewer before conversion.
 
 ## Key files
 
 | File | Responsibility |
 |---|---|
 | `services/google3dTiles.js` | Headless tile fetcher. Sweeps a virtual camera through 5 stations, snapshots each tile's texture to a standalone canvas before disposing the renderer, transforms ECEF → mapng coords, clips to AOI, strips street-level ground tris. Owns the bake caches (in-memory + IndexedDB). |
-| `services/exportBeamNGLevel.js` | `generateGoogleTilesDAE()` builder + zip-writer wiring for the `art/shapes/google_tiles/` folder. |
+| `services/exportBeamNGLevel.js` | `generateGoogleTilesGLB()` (atlas + chunking + GLTFExporter) + zip-writer wiring for the `art/shapes/google_tiles/` folder; hides OSM building visuals (keeps their collision) when Google tiles are on. |
+| `scripts/beamng_glb_to_dae.py` | Headless Blender (≤4.2!) converter: sanitizes names, builds `base00 > start01`, exports the BeamNG-proven Collada. Shipped inside every export zip. |
 | `services/export3d.js` | Threads `useGoogle3DTiles` through `exportToGLB` / `exportToDAE` for direct GLB/DAE export paths. |
 | `components/panels/ExportPanel.vue` | Toggle in the BeamNG export section. Reads `VITE_GOOGLE_MAPS_API_KEY`. |
 | `stores/googleTilesStore.js` | Pinia store for the 3D-preview bake (status, progress, show toggle, markRaw'd group). |
@@ -157,20 +175,24 @@ The practical ceiling is browser memory (snapshot canvases), not the bill.
 ```
 levels/<level>/
   art/shapes/
-    osm_objects.dae                  (OSM roads, unchanged)
+    osm_objects.dae                  (OSM roads + building COLLISION;
+                                      building visuals hidden w/ Google tiles)
     main.materials.json              (osm_object vertex-colour material)
     google_tiles/
-      google_tiles.dae               (Google photogrammetry mesh)
-      main.materials.json            (osm_object + per-tile colorMap entries)
+      google_tiles.glb               (photogrammetry — convert once w/ Blender)
+      beamng_glb_to_dae.py           (the converter, Blender ≤4.2)
+      README_CONVERT.txt             (the command)
+      google_tiles.dae               (created by the conversion step)
+      main.materials.json            (google_atlas_NN colorMap entries)
       google_debug.dae               (diagnostic cube)
       textures/
-        google_tile_0.png
-        google_tile_1.png
+        google_atlas_00.png
+        google_atlas_01.png
         …
   main/MissionGroup/Level_objects/Other/
     items.level.json
       "name": "osm_objects"          (TSStatic)
-      "name": "google_tiles"         (TSStatic)
+      "name": "google_tiles"         (TSStatic, collisionType None)
       "name": "google_debug_cube"    (TSStatic, 5m above spawn)
 ```
 
@@ -260,13 +282,23 @@ Fix: `bakeGoogle3DTiles()` guarantees `position+uv+normal` on every output geome
 ### 13. `tiles.group` only holds the CURRENT selection — snapshot per station
 The renderer adds/removes tile scenes from `tiles.group` as the selection changes, so after a camera sweep a final `group.traverse()` would only see the *last* station's tiles. Snapshot `tiles.visibleTiles` after each station, union the sets, then dedupe to the **finest covering**: drop a tile only when selected descendants fully cover its area (recursive check over `tile.children`); keep partially-covered ones — a small LOD overlap beats a hole. Loaded-but-deselected scenes live on in the LRU cache (`tile.cached.scene`); call `scene.updateMatrixWorld(true)` before reading their geometry.
 
+### 14. Torque meshes use 16-BIT vertex indices — chunk at ≤60k verts
+A single merged geometry with millions of vertices imports into BeamNG with wrapped indices: shapes survive (positions get split/processed) but **texcoords scramble into kaleidoscope** — in-game only, while Three.js (32-bit indices) renders the same data perfectly. This was the real cause behind "textures all over the place", misdiagnosed twice (first as material bindings, then as atlas mapping). Emit many meshes of ≤60,000 vertices.
+
+### 15. Trailing digits in a mesh/node name are parsed as the LOD detail size
+That's *why* `Colmesh-1` works (negative = never rendered). A chunk named `foo_000` becomes "render at detail size 0" → invisible; mixed numeric suffixes become distance-switching LOD levels → flickering chaos. Every mesh name must end in a letter (`..._mesh`). This also retroactively explains lesson 5's "multiple sibling meshes are invisible" — those test meshes had numeric suffixes; the topology was never the problem (osm_objects.dae happily ships multiple meshes in a group).
+
+### 16. Don't hand-roll the final DAE — export GLB, convert with Blender ≤4.2
+After lessons 1–15 the conclusion: BeamNG's importer has more undocumented constraints than it's worth reverse-engineering. The shipped pipeline exports a clean GLB via three's battle-tested `GLTFExporter` (verifiable in any glTF viewer — the checkpoint this project never had) and converts it once, offline, with `scripts/beamng_glb_to_dae.py` using Blender's Collada exporter — the same one the BeamNG modding community uses. **Collada export was REMOVED in Blender 5.0+**; use 3.x/4.x (portable 4.2 LTS zip works without installing). Axis chain: the GLB is authored as `(s·x, yMetres, s·z)` so glTF(Y-up) → Blender(Z-up) → Collada `Z_UP` lands exactly in BeamNG world coordinates.
+
 ## Known issues / open questions
 
 - **Texture quality** — much improved by the camera sweep; the next dial is `errorTarget` 5 → 3–4 (raise the LRU byte budget along with it).
 - **Slight LOD overlap** — partially-covered coarse tiles are kept (lesson 13), so a sliver of doubled geometry can z-fight in rare spots. Acceptable trade vs holes so far.
 - **Google data gaps** — inner courtyards, under trees, narrow alleys are missing in the source photogrammetry itself; no bake setting fixes those.
 - **No height calibration UI** — the Y offset is fully formula-driven now; if BeamNG terrain has unusual `maxHeight` settings, a `verticalOffset` slider may still be wanted.
-- **Collision mesh = visual mesh** — fine for prototyping but photogrammetry collision will be very expensive at runtime. Future: convex decomposition or simplification before emitting `Colmesh-1`.
+- ~~Collision mesh = visual mesh~~ — solved: photogrammetry is visual-only (`collisionType: None`), the hidden OSM building boxes in `osm_objects.dae` provide cheap watertight collision.
+- **Manual conversion step** — the Blender hop is one CLI command but still manual. Possible future: a tiny local companion service that watches for exports and converts automatically.
 - **OSM buildings sky bug** — see lesson 6 note. Separate fix.
 
 ## Branch + commit
@@ -277,3 +309,6 @@ Branch: `google`
 - `c25e13f` Preview Google 3D Tiles in-app with a shared bake cache (+ pipeline hardening, lessons 9–11)
 - `b196bde` Anchor Google tiles vertically via horizontal ground probe (lesson 12)
 - `995db47` Sweep the bake camera and make ground stripping height-aware (lessons 7/13)
+- `8285d5b` Persist baked Google tiles in IndexedDB and auto-restore on load
+- `22b3ce8` Atlas-texture the Google tiles DAE; split visuals and collision
+- *(next)* Export GLB + Blender conversion route — first version confirmed working in-game (lessons 14–16)
