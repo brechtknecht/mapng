@@ -216,14 +216,23 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   }
 
   // Sample Google's altitude near AOI center — we'll anchor Y so that Google's
-  // ground at center == mapng's terrain at center. Picked from the lowest vertex
-  // within a small radius around the center ECEF point.
+  // ground at center == mapng's terrain at center.
+  //
+  // The probe must be HORIZONTAL (lat/lon distance). An earlier version
+  // measured 3D ECEF distance from a point at ellipsoid height 0 — but real
+  // ground sits tens of metres above the ellipsoid (geoid offset + terrain
+  // elevation, ~75 m in Berlin), so few or no vertices fell inside the
+  // sphere and the anchor collapsed to 0, floating the whole city by that
+  // altitude. Use a low percentile rather than the minimum so below-ground
+  // junk geometry (canals, basements) can't sink the anchor either.
   let googleGroundAlt = null;
   {
     const probeRadiusM = Math.max(50, extentM * 0.1);
     const probeRadiusSq = probeRadiusM * probeRadiusM;
+    const cosLat = Math.cos(latRad);
     const tmp = new THREE.Vector3();
     const cart = {};
+    const heights = [];
     tiles.group.updateMatrixWorld(true);
     tiles.group.traverse((node) => {
       if (!node.isMesh || !node.geometry) return;
@@ -232,20 +241,34 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       const m = node.matrixWorld;
       for (let i = 0; i < pos.count; i++) {
         tmp.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(m);
-        if (tmp.distanceToSquared(centerEcef) > probeRadiusSq) continue;
         WGS84_ELLIPSOID.getPositionToCartographic(tmp, cart);
-        if (googleGroundAlt === null || cart.height < googleGroundAlt) {
-          googleGroundAlt = cart.height;
-        }
+        const dNorth = (cart.lat - latRad) * 6371000;
+        const dEast = (cart.lon - lonRad) * 6371000 * cosLat;
+        if (dNorth * dNorth + dEast * dEast > probeRadiusSq) continue;
+        heights.push(cart.height);
       }
     });
+    if (heights.length > 0) {
+      heights.sort((x, y) => x - y);
+      googleGroundAlt = heights[Math.floor(heights.length * 0.05)];
+    }
   }
-  if (googleGroundAlt === null) googleGroundAlt = 0;
+  if (googleGroundAlt === null) {
+    console.warn(
+      '[google3dTiles] ground probe found no vertices near the AOI centre — ' +
+      'vertical anchor defaults to 0, tiles may float by the local ellipsoidal ground height',
+    );
+    googleGroundAlt = 0;
+  }
 
   const projector = createMetricProjector(data.bounds, data.width, data.height);
   const mapngGroundY = sampleHeightAtScene(data, 0, 0);
   const halfScene = SCENE_SIZE / 2;
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
+  console.info(
+    `[google3dTiles] vertical anchor: googleGroundAlt=${googleGroundAlt.toFixed(1)}m (ellipsoidal), ` +
+    `mapngGroundY=${mapngGroundY.toFixed(1)}m, minHeight=${minH.toFixed(1)}m`,
+  );
   // Output Y is meters while X/Z are scene units — anisotropic. The ground-
   // normal test below must run in a metrically uniform space or sloped
   // hillsides stop counting as ground; scale Y by this when building tris.
