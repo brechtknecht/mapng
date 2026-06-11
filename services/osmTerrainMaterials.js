@@ -860,7 +860,12 @@ export async function buildTerrainMaterials(terrainData, worldSize, exportLevelN
 
   // TerrainMaterialTextureSet: switches BeamNG to PBR mode. baseTexSize must
   // match the pixel dimensions of the base-slot textures we generate below.
-  const textureSetName = `${levelName}TerrainMaterialTextureSet`;
+  //
+  // Torque SimObject names must start with a letter — a level named "5"
+  // would yield "5TerrainMaterialTextureSet", which silently fails to
+  // register and renders the ENTIRE terrain black (no textures ever bind).
+  const safeNamePrefix = /^[A-Za-z_]/.test(levelName) ? levelName : `m_${levelName}`;
+  const textureSetName = `${safeNamePrefix}TerrainMaterialTextureSet`;
   materialDefs[textureSetName] = {
     name: textureSetName,
     class: 'TerrainMaterialTextureSet',
