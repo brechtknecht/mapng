@@ -4340,7 +4340,10 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
         const googleResult = await generateGoogleTilesDAE(exportTerrainData, worldSize, {
           apiKey: googleApiKey,
           errorTarget: google3DErrorTarget,
-          onProgress: (p) => report(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`, 65),
+          onProgress: (p) => report(
+            `Google tiles pass ${p.station ?? 1}/${p.stations ?? 1}: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`,
+            65,
+          ),
         });
         googleTilesDaeBlob = googleResult?.daeBlob ?? null;
         googleTilesTextureFiles = googleResult?.textureFiles ?? [];

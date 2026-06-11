@@ -15,7 +15,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   const status = ref('idle'); // 'idle' | 'baking' | 'ready' | 'error'
   const error = ref(null);
   const show = ref(true);
-  const progress = reactive({ visible: 0, inflight: 0 });
+  const progress = reactive({ visible: 0, inflight: 0, station: 1, stations: 1 });
   const group = shallowRef(null);
 
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
@@ -32,6 +32,8 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
         onProgress: (p) => {
           progress.visible = p.visible;
           progress.inflight = p.downloading + p.parsing;
+          progress.station = p.station ?? 1;
+          progress.stations = p.stations ?? 1;
         },
       });
       group.value = markRaw(baked);

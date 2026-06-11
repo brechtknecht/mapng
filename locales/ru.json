@@ -227,7 +227,7 @@
     "googleTilesNoKey": "Укажите VITE_GOOGLE_MAPS_API_KEY в .env.local, чтобы включить Google 3D Tiles.",
     "googleTilesLoad": "Загрузить Google 3D Tiles",
     "googleTilesRetry": "Повторить",
-    "googleTilesBaking": "Загружено плиток: {visible}, в работе: {inflight}…",
+    "googleTilesBaking": "Проход {station}/{stations} — загружено плиток: {visible}, в работе: {inflight}…",
     "googleTilesShow": "Показать плитки Google",
     "googleTilesRebake": "Пересчитать плитки"
   },

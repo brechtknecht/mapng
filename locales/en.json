@@ -228,7 +228,7 @@
     "googleTilesNoKey": "Set VITE_GOOGLE_MAPS_API_KEY in .env.local to enable Google 3D Tiles.",
     "googleTilesLoad": "Load Google 3D Tiles",
     "googleTilesRetry": "Retry",
-    "googleTilesBaking": "{visible} tiles loaded, {inflight} in flight…",
+    "googleTilesBaking": "Pass {station}/{stations} — {visible} tiles loaded, {inflight} in flight…",
     "googleTilesShow": "Show Google tiles",
     "googleTilesRebake": "Re-bake tiles"
   },

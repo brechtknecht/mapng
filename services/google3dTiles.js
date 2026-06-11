@@ -55,9 +55,11 @@ export const computeUnitsPerMeter = (data) => {
  *   @param {number} [options.errorTarget=5] lower = higher detail, more requests, slower bake
  *   @param {boolean} [options.stripGround=true] drop near-horizontal tris (preserve mapng terrain)
  *   @param {number} [options.groundNormalThreshold=0.85] |normal.y| above this counts as ground
- *   @param {number} [options.maxWaitMs=240000] hard cap on bake time
- *   @param {number} [options.stabilityMs=2500] queue must stay quiet this long to consider done
- *   @param {(p: {visible:number, downloading:number, parsing:number, elapsed:number}) => void} [options.onProgress]
+ *   @param {number} [options.groundDistanceM=2.5] only strip near-flat tris within this many metres of the mapng terrain (keeps flat/gentle roofs)
+ *   @param {boolean} [options.cameraSweep=true] sweep the camera through 4 extra oblique stations so facades get refined
+ *   @param {number} [options.maxWaitMs=300000] hard cap on total bake time across all stations
+ *   @param {number} [options.stabilityMs=2500] queue must stay quiet this long to consider a station done
+ *   @param {(p: {visible:number, downloading:number, parsing:number, elapsed:number, station:number, stations:number}) => void} [options.onProgress]
  */
 export async function bakeGoogle3DTiles(data, options = {}) {
   const {
@@ -70,9 +72,13 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     errorTarget = 5,
     stripGround = true,
     groundNormalThreshold = 0.85,
-    // 4× more tiles than baseline → tens-of-seconds bake. 4 min hard cap,
-    // 2.5 s queue-quiet window to be sure we caught the tail.
-    maxWaitMs = 240000,
+    // Near-flat tris are only stripped when they also sit within this many
+    // metres of the mapng terrain — streets go, roofs stay.
+    groundDistanceM = 2.5,
+    cameraSweep = true,
+    // Total budget across all camera stations. 2.5 s queue-quiet window per
+    // station to be sure we caught the tail.
+    maxWaitMs = 300000,
     stabilityMs = 2500,
     onProgress,
   } = options;
@@ -125,16 +131,40 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   tiles.downloadQueue.maxJobs = 20;
   tiles.parseQueue.maxJobs = 6;
 
-  // Single top-down camera at AOI center, in ECEF — same setup that worked
-  // before. Multi-camera rigs caused 0 tiles to load and broke the whole
-  // export pipeline; we keep the proven setup and rely on errorTarget alone
-  // to dial detail up/down.
+  // ONE camera, swept through several stations in sequence: top-down first
+  // (the proven baseline), then four oblique views from the cardinal
+  // directions so facades cover enough screen pixels for the LOD selector
+  // to refine them. Registering multiple cameras SIMULTANEOUSLY broke the
+  // bake entirely (0 tiles — hard-won lesson 7); repositioning a single
+  // camera keeps the selector consistent, and tiles loaded at earlier
+  // stations stay in the LRU cache. Each station's selection is snapshotted
+  // and the union is deduped to the finest covering before the merge.
   const centerEcef = new THREE.Vector3();
   WGS84_ELLIPSOID.getCartographicToPosition(latRad, lonRad, 0, centerEcef);
   const upDir = centerEcef.clone().normalize();
+  // Local ENU basis at the AOI centre (ECEF +Z points at the north pole).
+  const eastDir = new THREE.Vector3(0, 0, 1).cross(upDir).normalize();
+  const northDir = upDir.clone().cross(eastDir).normalize();
+  // Oblique geometry: far enough out that the whole AOI fits the 60° FOV
+  // and sits well past the near plane (the suspected multi-camera killer).
+  const obliqueDist = extentM * 1.1;
+  const obliqueAlt = extentM * 0.8;
+  const obliqueOffset = (dir) =>
+    new THREE.Vector3().addScaledVector(dir, obliqueDist).addScaledVector(upDir, obliqueAlt);
+  const stations = [
+    { label: 'top-down', offset: new THREE.Vector3().addScaledVector(upDir, extentM * 1.5 + 200) },
+  ];
+  if (cameraSweep) {
+    stations.push(
+      { label: 'north', offset: obliqueOffset(northDir) },
+      { label: 'east', offset: obliqueOffset(eastDir) },
+      { label: 'south', offset: obliqueOffset(northDir.clone().negate()) },
+      { label: 'west', offset: obliqueOffset(eastDir.clone().negate()) },
+    );
+  }
   const cam = new THREE.PerspectiveCamera(60, 1, 1, 1e9);
-  cam.position.copy(centerEcef).addScaledVector(upDir, extentM * 1.5 + 200);
   cam.up.copy(upDir);
+  cam.position.copy(centerEcef).add(stations[0].offset);
   cam.lookAt(centerEcef);
   cam.updateMatrixWorld(true);
 
@@ -153,12 +183,17 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   const onUpdateError = (e) => { updateError = e; };
   tiles.addEventListener('load-error', onUpdateError);
 
-  // Drive update loop until queue stays quiet for `stabilityMs` or we hit `maxWaitMs`.
+  // Drive the update loop per station until the queue stays quiet for
+  // `stabilityMs` (or the global `maxWaitMs` budget runs out), snapshotting
+  // the selection after each station. tiles.group only ever contains the
+  // CURRENT station's selection — later stations deselect what they don't
+  // need — so the union of per-station snapshots is what gets baked.
   const startedAt = performance.now();
   let timedOut = false;
-  let loadedTileCount = 0;
-  await new Promise((resolve, reject) => {
-    let lastChange = startedAt;
+  const selectedTiles = new Set();
+
+  const waitForQuiet = (stationIdx) => new Promise((resolve, reject) => {
+    let lastChange = performance.now();
     let lastVisible = -1;
 
     const tick = () => {
@@ -178,9 +213,15 @@ export async function bakeGoogle3DTiles(data, options = {}) {
         lastChange = now;
       }
 
-      onProgress?.({ visible, downloading, parsing, elapsed: now - startedAt });
+      onProgress?.({
+        visible,
+        downloading,
+        parsing,
+        elapsed: now - startedAt,
+        station: stationIdx + 1,
+        stations: stations.length,
+      });
 
-      loadedTileCount = visible;
       const quiet = downloading === 0 && parsing === 0 && (now - lastChange) > stabilityMs;
       if (quiet && visible > 0) { resolve(); return; }
       if (now - startedAt > maxWaitMs) { timedOut = true; resolve(); return; }
@@ -189,13 +230,72 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     requestAnimationFrame(tick);
   });
 
+  for (let s = 0; s < stations.length; s++) {
+    cam.position.copy(centerEcef).add(stations[s].offset);
+    cam.lookAt(centerEcef);
+    cam.updateMatrixWorld(true);
+
+    await waitForQuiet(s);
+
+    for (const tile of tiles.visibleTiles) selectedTiles.add(tile);
+    console.info(
+      `[google3dTiles] station ${s + 1}/${stations.length} (${stations[s].label}): ` +
+      `${tiles.visibleTiles.size} tiles selected, ${selectedTiles.size} unique total, ` +
+      `${((performance.now() - startedAt) / 1000).toFixed(1)}s elapsed`,
+    );
+    if (timedOut) {
+      console.warn(
+        `[google3dTiles] bake budget (${maxWaitMs / 1000}s) exhausted at station ` +
+        `${s + 1}/${stations.length} — skipping remaining stations`,
+      );
+      break;
+    }
+  }
+
   tiles.removeEventListener('load-error', onUpdateError);
+
+  // Different stations select the same region at different depths (e.g. the
+  // far side of the AOI is coarser from an oblique view). Keep the finest:
+  // drop any selected tile whose area is fully covered by selected
+  // descendants. Tiles partially covered by finer selections are kept —
+  // a small overlap beats a hole.
+  const coverMemo = new Map();
+  const coveredBySelection = (tile) => {
+    if (selectedTiles.has(tile)) return true;
+    if (coverMemo.has(tile)) return coverMemo.get(tile);
+    const kids = tile.children || [];
+    const covered = kids.length > 0 && kids.every(coveredBySelection);
+    coverMemo.set(tile, covered);
+    return covered;
+  };
+  const bakeTiles = [...selectedTiles].filter((tile) => {
+    const kids = tile.children || [];
+    return !(kids.length > 0 && kids.every(coveredBySelection));
+  });
+
+  // Resolve scenes; tiles can in principle drop out of the cache between
+  // stations (shouldn't happen below the LRU min thresholds, but be safe).
+  const bakeScenes = [];
+  for (const tile of bakeTiles) {
+    const scene = tile.cached?.scene;
+    if (!scene) continue;
+    scene.updateMatrixWorld(true);
+    bakeScenes.push(scene);
+  }
+  const forEachBakeMesh = (cb) => {
+    for (const scene of bakeScenes) {
+      scene.traverse((node) => {
+        if (node.isMesh && node.geometry) cb(node);
+      });
+    }
+  };
 
   const bakeSecs = ((performance.now() - startedAt) / 1000).toFixed(1);
   const cacheBytes = tiles.lruCache?.cachedBytes ?? 0;
   const cacheFull = typeof tiles.lruCache?.isFull === 'function' ? tiles.lruCache.isFull() : false;
   console.info(
-    `[google3dTiles] ${loadedTileCount} tile meshes loaded in ${bakeSecs}s ` +
+    `[google3dTiles] ${selectedTiles.size} tiles selected across ${stations.length} stations, ` +
+    `${bakeTiles.length} kept after finest-covering dedup, in ${bakeSecs}s ` +
     `(errorTarget=${errorTarget}, timedOut=${timedOut}, ` +
     `cache=${(cacheBytes / 1024 ** 2).toFixed(0)}MB, cacheFull=${cacheFull})`,
   );
@@ -205,7 +305,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       'Raise lruCache.maxBytesSize or use a higher errorTarget.',
     );
   }
-  if (loadedTileCount === 0) {
+  if (bakeScenes.length === 0) {
     try { tiles.dispose(); } catch (_) { /* noop */ }
     try { offscreen.dispose(); } catch (_) { /* noop */ }
     throw new Error(
@@ -233,9 +333,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     const tmp = new THREE.Vector3();
     const cart = {};
     const heights = [];
-    tiles.group.updateMatrixWorld(true);
-    tiles.group.traverse((node) => {
-      if (!node.isMesh || !node.geometry) return;
+    forEachBakeMesh((node) => {
       const pos = node.geometry.attributes.position;
       if (!pos) return;
       const m = node.matrixWorld;
@@ -282,11 +380,8 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
   const ab = new THREE.Vector3(), ac = new THREE.Vector3(), normal = new THREE.Vector3();
 
-  tiles.group.updateMatrixWorld(true);
-
   let outputMeshIdx = 0;
-  tiles.group.traverse((node) => {
-    if (!node.isMesh || !node.geometry) return;
+  forEachBakeMesh((node) => {
     const srcGeom = node.geometry;
     const srcPos = srcGeom.attributes.position;
     if (!srcPos) return;
@@ -296,6 +391,9 @@ export async function bakeGoogle3DTiles(data, options = {}) {
 
     const newPositions = new Float32Array(vCount * 3);
     const insideMask = new Uint8Array(vCount);
+    // Metres above the local mapng terrain — lets the ground strip below
+    // distinguish streets (≈0 m) from flat roofs (10–30 m).
+    const aboveTerrain = new Float32Array(vCount);
 
     for (let i = 0; i < vCount; i++) {
       tmpEcef.set(srcPos.getX(i), srcPos.getY(i), srcPos.getZ(i)).applyMatrix4(worldMat);
@@ -318,6 +416,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       newPositions[i * 3]     = sceneX;
       newPositions[i * 3 + 1] = beamZMeters;
       newPositions[i * 3 + 2] = sceneZ;
+      aboveTerrain[i] = beamZMeters - (sampleHeightAtScene(data, sceneX, sceneZ) - minH);
 
       insideMask[i] = (Math.abs(sceneX) <= halfScene && Math.abs(sceneZ) <= halfScene) ? 1 : 0;
     }
@@ -334,16 +433,22 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       if (!insideMask[i0] && !insideMask[i1] && !insideMask[i2]) continue;
 
       if (stripGround) {
-        a.fromArray(newPositions, i0 * 3);
-        b.fromArray(newPositions, i1 * 3);
-        c.fromArray(newPositions, i2 * 3);
-        a.y *= unitsPerMeter;
-        b.y *= unitsPerMeter;
-        c.y *= unitsPerMeter;
-        ab.subVectors(b, a);
-        ac.subVectors(c, a);
-        normal.crossVectors(ab, ac).normalize();
-        if (Math.abs(normal.y) > groundNormalThreshold) continue;
+        // Orientation alone can't tell a street from a flat roof — both are
+        // near-horizontal. Only strip tris that are ALSO near the mapng
+        // terrain height, so streets vanish and roofs survive.
+        const elevAvg = (aboveTerrain[i0] + aboveTerrain[i1] + aboveTerrain[i2]) / 3;
+        if (elevAvg < groundDistanceM) {
+          a.fromArray(newPositions, i0 * 3);
+          b.fromArray(newPositions, i1 * 3);
+          c.fromArray(newPositions, i2 * 3);
+          a.y *= unitsPerMeter;
+          b.y *= unitsPerMeter;
+          c.y *= unitsPerMeter;
+          ab.subVectors(b, a);
+          ac.subVectors(c, a);
+          normal.crossVectors(ab, ac).normalize();
+          if (Math.abs(normal.y) > groundNormalThreshold) continue;
+        }
       }
 
       newIdx.push(i0, i1, i2);
@@ -416,11 +521,11 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   try { offscreen.dispose(); } catch (_) { /* noop */ }
 
   console.info(
-    `[google3dTiles] ${outputMeshIdx}/${loadedTileCount} tile meshes survived AOI clip + ground strip`,
+    `[google3dTiles] ${outputMeshIdx} tile meshes (from ${bakeScenes.length} tiles) survived AOI clip + ground strip`,
   );
   if (outputMeshIdx === 0) {
     throw new Error(
-      `bakeGoogle3DTiles: ${loadedTileCount} tiles loaded but none survived AOI clipping/ground stripping. ` +
+      `bakeGoogle3DTiles: ${bakeScenes.length} tiles loaded but none survived AOI clipping/ground stripping. ` +
       'The AOI bounds and the Google tile region may not overlap, or stripGround removed everything.',
     );
   }

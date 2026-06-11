@@ -227,7 +227,7 @@
     "googleTilesNoKey": "Définissez VITE_GOOGLE_MAPS_API_KEY dans .env.local pour activer les tuiles 3D Google.",
     "googleTilesLoad": "Charger les tuiles 3D Google",
     "googleTilesRetry": "Réessayer",
-    "googleTilesBaking": "{visible} tuiles chargées, {inflight} en cours…",
+    "googleTilesBaking": "Passe {station}/{stations} — {visible} tuiles chargées, {inflight} en cours…",
     "googleTilesShow": "Afficher les tuiles Google",
     "googleTilesRebake": "Recalculer les tuiles"
   },

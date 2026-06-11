@@ -303,7 +303,12 @@
               </p>
 
               <p v-if="googleTilesStore.status === 'baking'" class="text-[10px] text-gray-400 dark:text-gray-500">
-                {{ t('preview.googleTilesBaking', { visible: googleTilesStore.progress.visible, inflight: googleTilesStore.progress.inflight }) }}
+                {{ t('preview.googleTilesBaking', {
+                  station: googleTilesStore.progress.station,
+                  stations: googleTilesStore.progress.stations,
+                  visible: googleTilesStore.progress.visible,
+                  inflight: googleTilesStore.progress.inflight,
+                }) }}
               </p>
 
               <template v-if="googleTilesStore.status === 'ready'">

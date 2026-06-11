@@ -227,7 +227,7 @@
     "googleTilesNoKey": "Ustaw VITE_GOOGLE_MAPS_API_KEY w .env.local, aby włączyć Google 3D Tiles.",
     "googleTilesLoad": "Wczytaj Google 3D Tiles",
     "googleTilesRetry": "Spróbuj ponownie",
-    "googleTilesBaking": "{visible} kafelków wczytanych, {inflight} w toku…",
+    "googleTilesBaking": "Przebieg {station}/{stations} — {visible} kafelków wczytanych, {inflight} w toku…",
     "googleTilesShow": "Pokaż kafelki Google",
     "googleTilesRebake": "Przelicz kafelki"
   },

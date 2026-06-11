@@ -227,7 +227,7 @@
     "googleTilesNoKey": "Imposta VITE_GOOGLE_MAPS_API_KEY in .env.local per abilitare Google 3D Tiles.",
     "googleTilesLoad": "Carica Google 3D Tiles",
     "googleTilesRetry": "Riprova",
-    "googleTilesBaking": "{visible} tasselli caricati, {inflight} in corso…",
+    "googleTilesBaking": "Passata {station}/{stations} — {visible} tasselli caricati, {inflight} in corso…",
     "googleTilesShow": "Mostra tasselli Google",
     "googleTilesRebake": "Rigenera tasselli"
   },
