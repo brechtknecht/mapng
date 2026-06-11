@@ -106,11 +106,18 @@ The preview, the BeamNG export and the GLB/DAE exports all go through
 
 1. **In-memory** (single entry, keyed by AOI bounds + resolution + bake options) —
    shared within the session; preview-then-export bakes once.
-2. **IndexedDB** (`mapng-google-tiles`, a few most-recent bakes) — survives page
-   reloads/HMR, so regenerating the same coordinates restores the bake in seconds
-   instead of re-fetching. "Re-bake" purges both layers for the current key.
+2. **IndexedDB** (`mapng-google-tiles`, 3 most-recent bakes, LRU-pruned) — survives
+   page reloads/HMR. The preview **auto-restores** on load: when terrain data for an
+   already-baked AOI appears, the tiles reappear without clicking Load and without any
+   Google request (`restoreBakedGoogle3DTiles()` is restore-only). Cache keys are
+   versioned (`v2|…`) and bounds-rounded to ~1 cm so float noise can't split keys.
+   "Re-bake" purges both layers for the current key.
    ⚠️ This persists Google-derived content on disk — personal/dev use only, in line
    with the fork-only scope above.
+
+While the tiles are visible, the preview auto-hides the OSM-extruded buildings
+(`featureVisibility.buildings`) and restores the previous setting when the tiles are
+hidden — both at once just z-fight inside the photogrammetry.
 
 The cached group is owned by the cache: consumers never mutate or dispose it (the BeamNG
 export clones geometries before transforming, GLB/DAE clone the mesh nodes).

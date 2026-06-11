@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, shallowRef, reactive } from 'vue';
 import { markRaw, toRaw } from 'vue';
-import { getOrBakeGoogle3DTiles, clearGoogleTilesCache } from '../services/google3dTiles.js';
+import { getOrBakeGoogle3DTiles, restoreBakedGoogle3DTiles } from '../services/google3dTiles.js';
 
 /**
  * State for the Google Photorealistic 3D Tiles preview in Preview3D.
@@ -20,7 +20,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
 
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
-  async function bakeForPreview(terrainData) {
+  async function bakeForPreview(terrainData, forceRebake = false) {
     if (!apiKey || !terrainData || status.value === 'baking') return;
     status.value = 'baking';
     error.value = null;
@@ -29,6 +29,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     try {
       const baked = await getOrBakeGoogle3DTiles(toRaw(terrainData), {
         apiKey,
+        forceRebake,
         onProgress: (p) => {
           progress.visible = p.visible;
           progress.inflight = p.downloading + p.parsing;
@@ -54,13 +55,32 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     error.value = null;
   }
 
-  /** Force a fresh bake (drops the shared cache entry first). */
+  /**
+   * Probe the caches for an existing bake of this AOI — never fetches from
+   * Google. Called when terrain data appears (page load / regenerate) so a
+   * previously baked AOI reappears without clicking "Load".
+   */
+  async function tryRestore(terrainData) {
+    if (!terrainData || status.value !== 'idle') return;
+    try {
+      const restored = await restoreBakedGoogle3DTiles(toRaw(terrainData), { apiKey });
+      // Only apply if nothing else (a click on Load) changed state meanwhile.
+      if (restored && status.value === 'idle') {
+        group.value = markRaw(restored);
+        show.value = true;
+        status.value = 'ready';
+      }
+    } catch (err) {
+      console.warn('[googleTilesStore] cache restore failed:', err);
+    }
+  }
+
+  /** Force a fresh bake (purges both the in-memory and IndexedDB cache entries). */
   async function rebake(terrainData) {
     if (status.value === 'baking') return;
     group.value = null;
-    clearGoogleTilesCache();
-    await bakeForPreview(terrainData);
+    await bakeForPreview(terrainData, true);
   }
 
-  return { status, error, show, progress, group, apiKey, bakeForPreview, rebake, reset };
+  return { status, error, show, progress, group, apiKey, bakeForPreview, rebake, reset, tryRestore };
 });

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { TilesRenderer, GoogleCloudAuthPlugin, WGS84_ELLIPSOID } from '3d-tiles-renderer';
 import { createMetricProjector } from './geoUtils.js';
+import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTilesPersistentCache.js';
 
 // Mirror export3d.js — kept local to avoid a circular import.
 const SCENE_SIZE = 100;
@@ -546,9 +547,23 @@ export async function bakeGoogle3DTiles(data, options = {}) {
 
 let _bakeCache = null; // { key, promise }
 
-const bakeCacheKey = (data, { errorTarget = 5, stripGround = true } = {}) => {
+// Bump when the bake output format/semantics change — persisted bakes from
+// older versions are then simply never matched (and age out via LRU prune).
+const BAKE_FORMAT_VERSION = 2;
+
+const bakeCacheKey = (
+  data,
+  { errorTarget = 5, stripGround = true, groundDistanceM = 2.5, cameraSweep = true } = {},
+) => {
   const b = data.bounds;
-  return `${b.north},${b.south},${b.east},${b.west}|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}`;
+  // Round to ~1 cm so float formatting noise between sessions can't split
+  // identical coordinates into different cache keys.
+  const r = (x) => Number(x).toFixed(7);
+  return (
+    `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
+    `|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}` +
+    `|gd=${groundDistanceM}|sweep=${cameraSweep}`
+  );
 };
 
 const disposeGroup = (group) => {
@@ -564,27 +579,102 @@ const disposeGroup = (group) => {
 };
 
 /**
- * Cached front-end for bakeGoogle3DTiles(). Returns the same Group for
- * identical (bounds, resolution, errorTarget, stripGround); concurrent calls
- * during a bake share one in-flight promise. `onProgress` only fires when a
- * real bake runs — cache hits resolve immediately.
+ * Cached front-end for bakeGoogle3DTiles(). Two layers:
+ *
+ * 1. In-memory (this module, single entry) — same Group for identical
+ *    (bounds, resolution, bake options); concurrent calls during a bake
+ *    share one in-flight promise.
+ * 2. IndexedDB (googleTilesPersistentCache.js) — survives page reloads /
+ *    dev-server HMR, so re-generating the same coordinates restores the
+ *    bake from disk instead of re-fetching from Google.
+ *
+ * `onProgress` only fires when a real bake runs — cache hits resolve fast.
+ * Pass `forceRebake: true` to bypass and purge both layers for this key.
  */
 export function getOrBakeGoogle3DTiles(data, options = {}) {
-  const key = bakeCacheKey(data, options);
-  if (_bakeCache?.key === key) {
+  const { forceRebake = false, ...bakeOptions } = options;
+  const key = bakeCacheKey(data, bakeOptions);
+  if (!forceRebake && _bakeCache?.key === key) {
     console.info('[google3dTiles] cache hit — reusing baked tiles');
     return _bakeCache.promise;
   }
 
   clearGoogleTilesCache();
 
-  const promise = bakeGoogle3DTiles(data, options).catch((err) => {
+  const run = async () => {
+    if (forceRebake) {
+      await deletePersistedBake(key).catch(() => { /* best effort */ });
+    } else {
+      try {
+        const t0 = performance.now();
+        const restored = await loadPersistedBake(key);
+        if (restored) {
+          console.info(
+            `[google3dTiles] restored ${restored.children.length} tile meshes from IndexedDB ` +
+            `in ${((performance.now() - t0) / 1000).toFixed(1)}s — no Google refetch`,
+          );
+          return restored;
+        }
+      } catch (err) {
+        console.warn('[google3dTiles] persistent cache read failed — baking fresh:', err);
+      }
+    }
+
+    const group = await bakeGoogle3DTiles(data, bakeOptions);
+    // Persist in the background; never block or fail the bake on it.
+    persistBake(key, group)
+      .then((bytes) => {
+        if (bytes !== null) {
+          console.info(
+            `[google3dTiles] bake persisted to IndexedDB (~${(bytes / 1024 ** 2).toFixed(0)} MB) key=${key}`,
+          );
+        }
+      })
+      .catch((err) => console.warn('[google3dTiles] persisting bake failed (quota?):', err));
+    return group;
+  };
+
+  const promise = run().catch((err) => {
     // Failed bakes must not poison the cache.
     if (_bakeCache?.promise === promise) _bakeCache = null;
     throw err;
   });
   _bakeCache = { key, promise };
   return promise;
+}
+
+/**
+ * Restore-only probe: returns the baked Group for this AOI from the
+ * in-memory or IndexedDB cache, or null — never fetches from Google.
+ * Used by the 3D preview on page load so an already-baked AOI reappears
+ * without clicking "Load".
+ */
+export async function restoreBakedGoogle3DTiles(data, options = {}) {
+  const { forceRebake: _ignored, ...bakeOptions } = options;
+  const key = bakeCacheKey(data, bakeOptions);
+  if (_bakeCache?.key === key) return _bakeCache.promise;
+
+  let group = null;
+  try {
+    group = await loadPersistedBake(key);
+  } catch (err) {
+    console.warn('[google3dTiles] persistent cache probe failed:', err);
+    return null;
+  }
+  if (!group) {
+    console.info(`[google3dTiles] no persisted bake for key ${key}`);
+    return null;
+  }
+  // A bake may have started for the same key while we were decoding —
+  // defer to it rather than overwriting (its group would get disposed).
+  if (_bakeCache?.key === key) return _bakeCache.promise;
+
+  clearGoogleTilesCache();
+  _bakeCache = { key, promise: Promise.resolve(group) };
+  console.info(
+    `[google3dTiles] restored ${group.children.length} tile meshes from IndexedDB — no Google refetch`,
+  );
+  return group;
 }
 
 /** Dispose the cached bake (geometries, materials, canvas textures), if any. */

@@ -381,10 +381,30 @@ const props = defineProps(["terrainData"]);
 const googleTilesStore = useGoogleTilesStore();
 
 // New AOI → the baked tiles no longer match the terrain; back to idle.
-// (The shared bake cache handles its own eviction on the next bake.)
-watch(() => props.terrainData, () => {
+// Then probe the persistent cache: if this AOI was baked before (even in a
+// previous session — IndexedDB survives reloads/HMR), restore it without a
+// click and without any Google refetch.
+watch(() => props.terrainData, (data) => {
   if (googleTilesStore.status !== 'idle') googleTilesStore.reset();
-});
+  if (data) googleTilesStore.tryRestore(data);
+}, { immediate: true });
+
+// Google photogrammetry replaces the OSM-extruded buildings — showing both
+// just z-fights inside the photogrammetry. Auto-hide OSM buildings while the
+// tiles are visible and restore the previous setting when they go away.
+let buildingsBeforeTiles = null;
+watch(
+  () => googleTilesStore.status === 'ready' && googleTilesStore.show,
+  (tilesVisible) => {
+    if (tilesVisible) {
+      buildingsBeforeTiles = featureVisibility.buildings;
+      featureVisibility.buildings = false;
+    } else if (buildingsBeforeTiles !== null) {
+      featureVisibility.buildings = buildingsBeforeTiles;
+      buildingsBeforeTiles = null;
+    }
+  },
+);
 
 const controlsRef = ref(null);
 
