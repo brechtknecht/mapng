@@ -229,7 +229,11 @@
     "googleTilesRetry": "Erneut versuchen",
     "googleTilesBaking": "Durchlauf {station}/{stations} — {visible} Kacheln geladen, {inflight} in Arbeit…",
     "googleTilesShow": "Google-Kacheln anzeigen",
-    "googleTilesRebake": "Neu backen"
+    "googleTilesRebake": "Neu backen",
+    "googleTilesQualityStandard": "Standard",
+    "googleTilesQualityHigh": "Ultra",
+    "googleTilesQualityStandardHint": "5 Kamera-Stationen — Minuten, moderater Speicher",
+    "googleTilesQualityHighHint": "25 Kamera-Stationen inkl. Tiefflug-Raster — deutlich schärfer, 3–10× Zeit/Speicher/Anfragen"
   },
   "exportPanel": {
     "osmMissing": "OSM-Daten fehlen",

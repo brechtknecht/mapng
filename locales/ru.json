@@ -229,7 +229,11 @@
     "googleTilesRetry": "Повторить",
     "googleTilesBaking": "Проход {station}/{stations} — загружено плиток: {visible}, в работе: {inflight}…",
     "googleTilesShow": "Показать плитки Google",
-    "googleTilesRebake": "Пересчитать плитки"
+    "googleTilesRebake": "Пересчитать плитки",
+    "googleTilesQualityStandard": "Стандарт",
+    "googleTilesQualityHigh": "Ультра",
+    "googleTilesQualityStandardHint": "5 позиций камеры — минуты, умеренная память",
+    "googleTilesQualityHighHint": "25 позиций с низковысотной сеткой — заметно чётче, 3-10× время/память/запросы"
   },
   "exportPanel": {
     "osmMissing": "Данные OSM отсутствуют",

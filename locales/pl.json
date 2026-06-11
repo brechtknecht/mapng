@@ -229,7 +229,11 @@
     "googleTilesRetry": "Spróbuj ponownie",
     "googleTilesBaking": "Przebieg {station}/{stations} — {visible} kafelków wczytanych, {inflight} w toku…",
     "googleTilesShow": "Pokaż kafelki Google",
-    "googleTilesRebake": "Przelicz kafelki"
+    "googleTilesRebake": "Przelicz kafelki",
+    "googleTilesQualityStandard": "Standard",
+    "googleTilesQualityHigh": "Ultra",
+    "googleTilesQualityStandardHint": "5 stanowisk kamery — minuty, umiarkowana pamięć",
+    "googleTilesQualityHighHint": "25 stanowisk z siatką niskiego lotu — znacznie ostrzej, 3-10× czas/pamięć/zapytania"
   },
   "exportPanel": {
     "osmMissing": "Dane OSM brakują",

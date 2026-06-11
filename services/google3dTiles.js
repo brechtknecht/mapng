@@ -57,8 +57,9 @@ export const computeUnitsPerMeter = (data) => {
  *   @param {boolean} [options.stripGround=true] drop near-horizontal tris (preserve mapng terrain)
  *   @param {number} [options.groundNormalThreshold=0.85] |normal.y| above this counts as ground
  *   @param {number} [options.groundDistanceM=2.5] only strip near-flat tris within this many metres of the mapng terrain (keeps flat/gentle roofs)
- *   @param {boolean} [options.cameraSweep=true] sweep the camera through 4 extra oblique stations so facades get refined
- *   @param {number} [options.maxWaitMs=300000] hard cap on total bake time across all stations
+ *   @param {boolean} [options.cameraSweep=true] sweep the camera through extra stations so facades get refined
+ *   @param {'standard'|'high'} [options.quality='standard'] 'high' = 25 stations incl. a 4×4 low-altitude grid for much deeper LOD
+ *   @param {number} [options.maxWaitMs] hard cap on total bake time across all stations (default 300s, 900s for high)
  *   @param {number} [options.stabilityMs=2500] queue must stay quiet this long to consider a station done
  *   @param {(p: {visible:number, downloading:number, parsing:number, elapsed:number, station:number, stations:number}) => void} [options.onProgress]
  */
@@ -77,9 +78,15 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     // metres of the mapng terrain — streets go, roofs stay.
     groundDistanceM = 2.5,
     cameraSweep = true,
+    // 'standard': 5 stations (top-down + 4 oblique).
+    // 'high':    25 stations (top-down + 8 lower oblique + 4×4 low-altitude
+    //            grid). Screen-space error scales with camera distance, so
+    //            the ~4× closer grid cameras force several LOD levels more
+    //            mesh + texture detail. Expect 3-10× tiles/time/memory.
+    quality = 'standard',
     // Total budget across all camera stations. 2.5 s queue-quiet window per
     // station to be sure we caught the tail.
-    maxWaitMs = 300000,
+    maxWaitMs = quality === 'high' ? 900000 : 300000,
     stabilityMs = 2500,
     onProgress,
   } = options;
@@ -127,8 +134,14 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // coverage that looks like success. This is a one-shot offline bake, not
   // realtime rendering: give it a generous byte budget and wider queues.
   // (Tile-count caps of 8000/6000 are already ample — leave them alone.)
-  tiles.lruCache.minBytesSize = 1.0 * 1024 ** 3;
-  tiles.lruCache.maxBytesSize = 1.5 * 1024 ** 3;
+  // High quality pulls several thousand extra tiles — scale the budgets up
+  // (and the 8000-tile default count cap, which standard never reaches).
+  tiles.lruCache.minBytesSize = (quality === 'high' ? 2.5 : 1.0) * 1024 ** 3;
+  tiles.lruCache.maxBytesSize = (quality === 'high' ? 3.0 : 1.5) * 1024 ** 3;
+  if (quality === 'high') {
+    tiles.lruCache.minSize = 20000;
+    tiles.lruCache.maxSize = 24000;
+  }
   tiles.downloadQueue.maxJobs = 20;
   tiles.parseQueue.maxJobs = 6;
 
@@ -146,22 +159,61 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // Local ENU basis at the AOI centre (ECEF +Z points at the north pole).
   const eastDir = new THREE.Vector3(0, 0, 1).cross(upDir).normalize();
   const northDir = upDir.clone().cross(eastDir).normalize();
-  // Oblique geometry: far enough out that the whole AOI fits the 60° FOV
-  // and sits well past the near plane (the suspected multi-camera killer).
-  const obliqueDist = extentM * 1.1;
-  const obliqueAlt = extentM * 0.8;
-  const obliqueOffset = (dir) =>
-    new THREE.Vector3().addScaledVector(dir, obliqueDist).addScaledVector(upDir, obliqueAlt);
+  // Stations: { label, offset (camera position relative to AOI centre),
+  // target (look-at point relative to AOI centre, default = centre) }.
+  const horiz = (e, n) =>
+    new THREE.Vector3().addScaledVector(eastDir, e).addScaledVector(northDir, n);
   const stations = [
     { label: 'top-down', offset: new THREE.Vector3().addScaledVector(upDir, extentM * 1.5 + 200) },
   ];
   if (cameraSweep) {
-    stations.push(
-      { label: 'north', offset: obliqueOffset(northDir) },
-      { label: 'east', offset: obliqueOffset(eastDir) },
-      { label: 'south', offset: obliqueOffset(northDir.clone().negate()) },
-      { label: 'west', offset: obliqueOffset(eastDir.clone().negate()) },
-    );
+    if (quality === 'high') {
+      // 8 perimeter obliques, lower than standard for sharper facades. The
+      // near side fills the frustum at high LOD; the far side is covered by
+      // the opposite station.
+      const dirs = [
+        ['north', 0, 1], ['north-east', Math.SQRT1_2, Math.SQRT1_2],
+        ['east', 1, 0], ['south-east', Math.SQRT1_2, -Math.SQRT1_2],
+        ['south', 0, -1], ['south-west', -Math.SQRT1_2, -Math.SQRT1_2],
+        ['west', -1, 0], ['north-west', -Math.SQRT1_2, Math.SQRT1_2],
+      ];
+      for (const [label, e, n] of dirs) {
+        stations.push({
+          label: `oblique-${label}`,
+          offset: horiz(e * extentM * 0.8, n * extentM * 0.8).addScaledVector(upDir, extentM * 0.5),
+        });
+      }
+      // 4×4 grid of low-altitude cells, each looked at straight down from
+      // ~4× closer than the overview — this is what drags the LOD selector
+      // several levels deeper (screen-space error scales with distance).
+      const GRID = 4;
+      const cellM = extentM / GRID;
+      const gridAlt = cellM * 1.3 + 60;
+      for (let gy = 0; gy < GRID; gy++) {
+        for (let gx = 0; gx < GRID; gx++) {
+          const cellE = ((gx + 0.5) / GRID - 0.5) * extentM;
+          const cellN = ((gy + 0.5) / GRID - 0.5) * extentM;
+          const target = horiz(cellE, cellN);
+          stations.push({
+            label: `grid-${gx},${gy}`,
+            offset: target.clone().addScaledVector(upDir, gridAlt),
+            target,
+          });
+        }
+      }
+    } else {
+      // Standard: 4 oblique views, far enough out that the whole AOI fits
+      // the 60° FOV and sits well past the near plane (the suspected
+      // multi-camera killer).
+      const obliqueOffset = (e, n) =>
+        horiz(e * extentM * 1.1, n * extentM * 1.1).addScaledVector(upDir, extentM * 0.8);
+      stations.push(
+        { label: 'north', offset: obliqueOffset(0, 1) },
+        { label: 'east', offset: obliqueOffset(1, 0) },
+        { label: 'south', offset: obliqueOffset(0, -1) },
+        { label: 'west', offset: obliqueOffset(-1, 0) },
+      );
+    }
   }
   const cam = new THREE.PerspectiveCamera(60, 1, 1, 1e9);
   cam.up.copy(upDir);
@@ -231,9 +283,12 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     requestAnimationFrame(tick);
   });
 
+  const lookTarget = new THREE.Vector3();
   for (let s = 0; s < stations.length; s++) {
     cam.position.copy(centerEcef).add(stations[s].offset);
-    cam.lookAt(centerEcef);
+    lookTarget.copy(centerEcef);
+    if (stations[s].target) lookTarget.add(stations[s].target);
+    cam.lookAt(lookTarget);
     cam.updateMatrixWorld(true);
 
     await waitForQuiet(s);
@@ -297,7 +352,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   console.info(
     `[google3dTiles] ${selectedTiles.size} tiles selected across ${stations.length} stations, ` +
     `${bakeTiles.length} kept after finest-covering dedup, in ${bakeSecs}s ` +
-    `(errorTarget=${errorTarget}, timedOut=${timedOut}, ` +
+    `(errorTarget=${errorTarget}, quality=${quality}, timedOut=${timedOut}, ` +
     `cache=${(cacheBytes / 1024 ** 2).toFixed(0)}MB, cacheFull=${cacheFull})`,
   );
   if (cacheFull) {
@@ -553,7 +608,7 @@ const BAKE_FORMAT_VERSION = 2;
 
 const bakeCacheKey = (
   data,
-  { errorTarget = 5, stripGround = true, groundDistanceM = 2.5, cameraSweep = true } = {},
+  { errorTarget = 5, stripGround = true, groundDistanceM = 2.5, cameraSweep = true, quality = 'standard' } = {},
 ) => {
   const b = data.bounds;
   // Round to ~1 cm so float formatting noise between sessions can't split
@@ -562,9 +617,28 @@ const bakeCacheKey = (
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
     `|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}` +
-    `|gd=${groundDistanceM}|sweep=${cameraSweep}`
+    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}`
   );
 };
+
+/**
+ * The preferred bake quality, persisted by the 3D-preview selector. Resolved
+ * centrally so the preview AND the exports (which don't pass `quality`)
+ * agree on the same cache key — a mismatch would silently re-bake.
+ */
+export function getPreferredBakeQuality() {
+  try {
+    const q = localStorage.getItem('mapng_google_bake_quality');
+    return q === 'high' ? 'high' : 'standard';
+  } catch (_) {
+    return 'standard';
+  }
+}
+
+const resolveBakeOptions = (options) => ({
+  ...options,
+  quality: options.quality ?? getPreferredBakeQuality(),
+});
 
 const disposeGroup = (group) => {
   group.traverse((child) => {
@@ -592,7 +666,7 @@ const disposeGroup = (group) => {
  * Pass `forceRebake: true` to bypass and purge both layers for this key.
  */
 export function getOrBakeGoogle3DTiles(data, options = {}) {
-  const { forceRebake = false, ...bakeOptions } = options;
+  const { forceRebake = false, ...bakeOptions } = resolveBakeOptions(options);
   const key = bakeCacheKey(data, bakeOptions);
   if (!forceRebake && _bakeCache?.key === key) {
     console.info('[google3dTiles] cache hit — reusing baked tiles');
@@ -650,7 +724,7 @@ export function getOrBakeGoogle3DTiles(data, options = {}) {
  * without clicking "Load".
  */
 export async function restoreBakedGoogle3DTiles(data, options = {}) {
-  const { forceRebake: _ignored, ...bakeOptions } = options;
+  const { forceRebake: _ignored, ...bakeOptions } = resolveBakeOptions(options);
   const key = bakeCacheKey(data, bakeOptions);
   if (_bakeCache?.key === key) return _bakeCache.promise;
 

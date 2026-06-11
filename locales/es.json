@@ -229,7 +229,11 @@
     "googleTilesRetry": "Reintentar",
     "googleTilesBaking": "Pasada {station}/{stations} — {visible} teselas cargadas, {inflight} en curso…",
     "googleTilesShow": "Mostrar teselas de Google",
-    "googleTilesRebake": "Rehacer teselas"
+    "googleTilesRebake": "Rehacer teselas",
+    "googleTilesQualityStandard": "Estándar",
+    "googleTilesQualityHigh": "Ultra",
+    "googleTilesQualityStandardHint": "5 estaciones de cámara — minutos, memoria moderada",
+    "googleTilesQualityHighHint": "25 estaciones incl. cuadrícula a baja altura — mucho más nítido, 3-10× tiempo/memoria/peticiones"
   },
   "exportPanel": {
     "osmMissing": "Faltan datos OSM",

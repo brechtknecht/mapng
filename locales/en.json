@@ -230,7 +230,11 @@
     "googleTilesRetry": "Retry",
     "googleTilesBaking": "Pass {station}/{stations} — {visible} tiles loaded, {inflight} in flight…",
     "googleTilesShow": "Show Google tiles",
-    "googleTilesRebake": "Re-bake tiles"
+    "googleTilesRebake": "Re-bake tiles",
+    "googleTilesQualityStandard": "Standard",
+    "googleTilesQualityHigh": "Ultra",
+    "googleTilesQualityStandardHint": "5 camera stations — minutes, moderate memory",
+    "googleTilesQualityHighHint": "25 camera stations incl. low-altitude grid — much sharper, 3-10× time/memory/requests"
   },
   "exportPanel": {
     "osmMissing": "OSM Data missing",

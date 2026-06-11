@@ -229,7 +229,11 @@
     "googleTilesRetry": "Réessayer",
     "googleTilesBaking": "Passe {station}/{stations} — {visible} tuiles chargées, {inflight} en cours…",
     "googleTilesShow": "Afficher les tuiles Google",
-    "googleTilesRebake": "Recalculer les tuiles"
+    "googleTilesRebake": "Recalculer les tuiles",
+    "googleTilesQualityStandard": "Standard",
+    "googleTilesQualityHigh": "Ultra",
+    "googleTilesQualityStandardHint": "5 stations de caméra — quelques minutes, mémoire modérée",
+    "googleTilesQualityHighHint": "25 stations dont grille basse altitude — bien plus net, 3-10× temps/mémoire/requêtes"
   },
   "exportPanel": {
     "osmMissing": "Données OSM manquantes",

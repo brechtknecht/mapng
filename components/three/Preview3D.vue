@@ -289,6 +289,35 @@
             </p>
 
             <template v-else>
+              <div class="flex bg-gray-100 dark:bg-gray-800 rounded-md p-0.5 border border-gray-200 dark:border-gray-700">
+                <button
+                  @click="googleTilesStore.setQuality('standard')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityStandardHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'standard'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityStandard') }}
+                </button>
+                <button
+                  @click="googleTilesStore.setQuality('high')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityHighHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'high'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityHigh') }}
+                </button>
+              </div>
+
               <button
                 v-if="googleTilesStore.status === 'idle' || googleTilesStore.status === 'error'"
                 @click="googleTilesStore.bakeForPreview(terrainData)"
@@ -388,6 +417,15 @@ watch(() => props.terrainData, (data) => {
   if (googleTilesStore.status !== 'idle') googleTilesStore.reset();
   if (data) googleTilesStore.tryRestore(data);
 }, { immediate: true });
+
+// Quality switch: the displayed bake no longer matches — drop it and probe
+// the caches for a bake of the newly selected quality (instant when cached,
+// otherwise the Load button reappears).
+watch(() => googleTilesStore.quality, () => {
+  if (googleTilesStore.status === 'baking') return;
+  googleTilesStore.reset();
+  if (props.terrainData) googleTilesStore.tryRestore(props.terrainData);
+});
 
 // Google photogrammetry replaces the OSM-extruded buildings — showing both
 // just z-fights inside the photogrammetry. Auto-hide OSM buildings while the

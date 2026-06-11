@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia';
 import { ref, shallowRef, reactive } from 'vue';
 import { markRaw, toRaw } from 'vue';
-import { getOrBakeGoogle3DTiles, restoreBakedGoogle3DTiles } from '../services/google3dTiles.js';
+import { getOrBakeGoogle3DTiles, restoreBakedGoogle3DTiles, getPreferredBakeQuality } from '../services/google3dTiles.js';
 
 /**
  * State for the Google Photorealistic 3D Tiles preview in Preview3D.
@@ -17,6 +17,14 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   const show = ref(true);
   const progress = reactive({ visible: 0, inflight: 0, station: 1, stations: 1 });
   const group = shallowRef(null);
+  // 'standard' (5 camera stations) | 'high' (25 stations, much deeper LOD).
+  // Persisted so the exports resolve the same quality → same cache key.
+  const quality = ref(getPreferredBakeQuality());
+
+  function setQuality(q) {
+    quality.value = q === 'high' ? 'high' : 'standard';
+    try { localStorage.setItem('mapng_google_bake_quality', quality.value); } catch (_) { /* private mode */ }
+  }
 
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
@@ -30,6 +38,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
       const baked = await getOrBakeGoogle3DTiles(toRaw(terrainData), {
         apiKey,
         forceRebake,
+        quality: quality.value,
         onProgress: (p) => {
           progress.visible = p.visible;
           progress.inflight = p.downloading + p.parsing;
@@ -63,7 +72,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   async function tryRestore(terrainData) {
     if (!terrainData || status.value !== 'idle') return;
     try {
-      const restored = await restoreBakedGoogle3DTiles(toRaw(terrainData), { apiKey });
+      const restored = await restoreBakedGoogle3DTiles(toRaw(terrainData), { apiKey, quality: quality.value });
       // Only apply if nothing else (a click on Load) changed state meanwhile.
       if (restored && status.value === 'idle') {
         group.value = markRaw(restored);
@@ -82,5 +91,5 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     await bakeForPreview(terrainData, true);
   }
 
-  return { status, error, show, progress, group, apiKey, bakeForPreview, rebake, reset, tryRestore };
+  return { status, error, show, progress, group, apiKey, quality, setQuality, bakeForPreview, rebake, reset, tryRestore };
 });
