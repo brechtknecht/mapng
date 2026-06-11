@@ -316,6 +316,19 @@
                 >
                   {{ t('preview.googleTilesQualityHigh') }}
                 </button>
+                <button
+                  @click="googleTilesStore.setQuality('roads')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityRoadsHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'roads'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityRoads') }}
+                </button>
               </div>
 
               <button
@@ -356,6 +369,24 @@
                     {{ t('preview.googleTilesShow') }}
                   </span>
                 </label>
+                <label class="flex items-center gap-2 cursor-pointer group/check">
+                  <div class="relative">
+                    <input
+                      type="checkbox"
+                      v-model="googleTilesStore.showCameras"
+                      class="peer sr-only"
+                    />
+                    <div
+                      class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#FF6600]"
+                    ></div>
+                  </div>
+                  <span class="text-xs text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">
+                    {{ t('preview.googleTilesShowCameras') }}
+                  </span>
+                </label>
+                <p v-if="googleTilesStore.showCameras" class="text-[10px] text-gray-400 dark:text-gray-500">
+                  {{ t('preview.googleTilesCamerasLegend') }}
+                </p>
                 <button
                   @click="googleTilesStore.rebake(terrainData)"
                   class="text-[10px] text-gray-400 dark:text-gray-500 hover:text-[#FF6600] underline"

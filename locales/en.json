@@ -234,7 +234,11 @@
     "googleTilesQualityStandard": "Standard",
     "googleTilesQualityHigh": "Ultra",
     "googleTilesQualityStandardHint": "5 camera stations — minutes, moderate memory",
-    "googleTilesQualityHighHint": "25 camera stations incl. low-altitude grid — much sharper, 3-10× time/memory/requests"
+    "googleTilesQualityHighHint": "25 camera stations incl. low-altitude grid — much sharper, 3-10× time/memory/requests",
+    "googleTilesQualityRoads": "+Roads",
+    "googleTilesShowCameras": "Show camera positions",
+    "googleTilesCamerasLegend": "white = overview · purple = oblique · blue = grid · orange = road",
+    "googleTilesQualityRoadsHint": "Ultra plus up to 40 street-level cameras along the OSM roads — Google's deepest detail in the driving corridor"
   },
   "exportPanel": {
     "osmMissing": "OSM Data missing",

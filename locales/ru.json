@@ -233,7 +233,11 @@
     "googleTilesQualityStandard": "Стандарт",
     "googleTilesQualityHigh": "Ультра",
     "googleTilesQualityStandardHint": "5 позиций камеры — минуты, умеренная память",
-    "googleTilesQualityHighHint": "25 позиций с низковысотной сеткой — заметно чётче, 3-10× время/память/запросы"
+    "googleTilesQualityHighHint": "25 позиций с низковысотной сеткой — заметно чётче, 3-10× время/память/запросы",
+    "googleTilesQualityRoads": "+Улицы",
+    "googleTilesShowCameras": "Показать позиции камер",
+    "googleTilesCamerasLegend": "белый = обзор · фиолетовый = наклонная · синий = сетка · оранжевый = улица",
+    "googleTilesQualityRoadsHint": "Ультра плюс до 40 камер на уровне улицы вдоль дорог OSM — максимальная детализация Google в коридоре движения"
   },
   "exportPanel": {
     "osmMissing": "Данные OSM отсутствуют",

@@ -6,7 +6,7 @@ import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTil
 // Mirror export3d.js — kept local to avoid a circular import.
 const SCENE_SIZE = 100;
 
-const sampleHeightAtScene = (data, x, z) => {
+export const sampleHeightAtScene = (data, x, z) => {
   const half = SCENE_SIZE / 2;
   const u = Math.max(0, Math.min(1, (x + half) / SCENE_SIZE));
   const v = Math.max(0, Math.min(1, (z + half) / SCENE_SIZE));
@@ -41,6 +41,77 @@ export const computeUnitsPerMeter = (data) => {
   return SCENE_SIZE / realWidthMeters;
 };
 
+// Road classes worth a street-level camera, most important first — the
+// station cap is spent on major driving corridors before side streets.
+const ROAD_PRIORITY = {
+  motorway: 0,
+  trunk: 1,
+  primary: 2,
+  secondary: 3,
+  tertiary: 4,
+  residential: 5,
+  unclassified: 6,
+  living_street: 7,
+};
+
+/**
+ * Sample street-level camera stations along the OSM road network: one every
+ * `spacingM` metres along roads (major classes first), deduped to `minSepM`,
+ * capped at `maxStations`. Returns ENU offsets + a down-street look target.
+ */
+const buildRoadStations = (data, {
+  centerLat, centerLng, metersPerDegree, extentM,
+  horiz, upDir, groundAltAt,
+  spacingM = 120, minSepM = 60, altitudeM = 25, aheadM = 35, maxStations = 40,
+}) => {
+  const half = extentM / 2;
+  const roads = (data.osmFeatures ?? [])
+    .filter((f) => f.type === 'road' && f.geometry?.length >= 2 && (f.tags?.highway in ROAD_PRIORITY))
+    .map((f) => ({ f, prio: ROAD_PRIORITY[f.tags.highway] }))
+    .sort((a, b) => a.prio - b.prio);
+
+  const accepted = [];
+  const minSepSq = minSepM * minSepM;
+  outer:
+  for (const { f } of roads) {
+    const pts = f.geometry.map((p) => ({
+      e: (p.lng - centerLng) * metersPerDegree,
+      n: (p.lat - centerLat) * 111320,
+    }));
+    let carry = spacingM * 0.5; // first station half a spacing into the road
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const segLen = Math.hypot(b.e - a.e, b.n - a.n);
+      if (segLen < 1e-6) continue;
+      let t = carry;
+      while (t < segLen) {
+        const u = t / segLen;
+        const e = a.e + (b.e - a.e) * u;
+        const n = a.n + (b.n - a.n) * u;
+        t += spacingM;
+        if (Math.abs(e) > half || Math.abs(n) > half) continue;
+        if (accepted.some((s) => (s.e - e) ** 2 + (s.n - n) ** 2 < minSepSq)) continue;
+        accepted.push({ e, n, dirE: (b.e - a.e) / segLen, dirN: (b.n - a.n) / segLen });
+        if (accepted.length >= maxStations) break outer;
+      }
+      carry = t - segLen;
+    }
+  }
+
+  return accepted.map((s, i) => {
+    const groundAlt = groundAltAt(s.e, s.n);
+    return {
+      label: `road-${i}`,
+      offset: horiz(s.e, s.n).addScaledVector(upDir, groundAlt + altitudeM),
+      // Aim at the street surface a few car-lengths ahead — the frustum then
+      // covers asphalt plus both facade walls at maximum LOD.
+      target: horiz(s.e + s.dirE * aheadM, s.n + s.dirN * aheadM).addScaledVector(upDir, groundAlt),
+      viz: { kind: 'road', e: s.e, n: s.n, aglM: altitudeM },
+    };
+  });
+};
+
 /**
  * Fetch Google Photorealistic 3D Tiles covering the AOI in `data.bounds`, transform
  * into mapng's scene coordinate system, optionally strip ground tris, and return a
@@ -58,7 +129,7 @@ export const computeUnitsPerMeter = (data) => {
  *   @param {number} [options.groundNormalThreshold=0.85] |normal.y| above this counts as ground
  *   @param {number} [options.groundDistanceM=2.5] only strip near-flat tris within this many metres of the mapng terrain (keeps flat/gentle roofs)
  *   @param {boolean} [options.cameraSweep=true] sweep the camera through extra stations so facades get refined
- *   @param {'standard'|'high'} [options.quality='standard'] 'high' = 25 stations incl. a 4×4 low-altitude grid for much deeper LOD
+ *   @param {'standard'|'high'|'roads'} [options.quality='standard'] 'high' = 25 stations incl. a 4×4 low-altitude grid; 'roads' = high + up to 40 street-level stations along OSM roads
  *   @param {number} [options.maxWaitMs] hard cap on total bake time across all stations (default 300s, 900s for high)
  *   @param {number} [options.stabilityMs=2500] queue must stay quiet this long to consider a station done
  *   @param {(p: {visible:number, downloading:number, parsing:number, elapsed:number, station:number, stations:number}) => void} [options.onProgress]
@@ -83,10 +154,13 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     //            grid). Screen-space error scales with camera distance, so
     //            the ~4× closer grid cameras force several LOD levels more
     //            mesh + texture detail. Expect 3-10× tiles/time/memory.
+    // 'roads':   'high' plus up to 40 street-level stations (~25 m above the
+    //            OSM roads, aimed down-street) pulling Google's DEEPEST tiles
+    //            along the driving corridor.
     quality = 'standard',
     // Total budget across all camera stations. 2.5 s queue-quiet window per
     // station to be sure we caught the tail.
-    maxWaitMs = quality === 'high' ? 900000 : 300000,
+    maxWaitMs = quality === 'roads' ? 1200000 : quality === 'high' ? 900000 : 300000,
     stabilityMs = 2500,
     onProgress,
   } = options;
@@ -134,11 +208,12 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // coverage that looks like success. This is a one-shot offline bake, not
   // realtime rendering: give it a generous byte budget and wider queues.
   // (Tile-count caps of 8000/6000 are already ample — leave them alone.)
-  // High quality pulls several thousand extra tiles — scale the budgets up
-  // (and the 8000-tile default count cap, which standard never reaches).
-  tiles.lruCache.minBytesSize = (quality === 'high' ? 2.5 : 1.0) * 1024 ** 3;
-  tiles.lruCache.maxBytesSize = (quality === 'high' ? 3.0 : 1.5) * 1024 ** 3;
-  if (quality === 'high') {
+  // High/roads quality pulls several thousand extra tiles — scale the budgets
+  // up (and the 8000-tile default count cap, which standard never reaches).
+  const heavyBake = quality === 'high' || quality === 'roads';
+  tiles.lruCache.minBytesSize = (heavyBake ? 2.5 : 1.0) * 1024 ** 3;
+  tiles.lruCache.maxBytesSize = (heavyBake ? 3.0 : 1.5) * 1024 ** 3;
+  if (heavyBake) {
     tiles.lruCache.minSize = 20000;
     tiles.lruCache.maxSize = 24000;
   }
@@ -163,11 +238,17 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // target (look-at point relative to AOI centre, default = centre) }.
   const horiz = (e, n) =>
     new THREE.Vector3().addScaledVector(eastDir, e).addScaledVector(northDir, n);
+  // `viz` carries an ENU footprint (east/north metres from the AOI centre,
+  // approx. height above ground) so the 3D preview can display the stations.
   const stations = [
-    { label: 'top-down', offset: new THREE.Vector3().addScaledVector(upDir, extentM * 1.5 + 200) },
+    {
+      label: 'top-down',
+      offset: new THREE.Vector3().addScaledVector(upDir, extentM * 1.5 + 200),
+      viz: { kind: 'overview', e: 0, n: 0, aglM: extentM * 1.5 + 200 },
+    },
   ];
   if (cameraSweep) {
-    if (quality === 'high') {
+    if (quality === 'high' || quality === 'roads') {
       // 8 perimeter obliques, lower than standard for sharper facades. The
       // near side fills the frustum at high LOD; the far side is covered by
       // the opposite station.
@@ -181,6 +262,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
         stations.push({
           label: `oblique-${label}`,
           offset: horiz(e * extentM * 0.8, n * extentM * 0.8).addScaledVector(upDir, extentM * 0.5),
+          viz: { kind: 'oblique', e: e * extentM * 0.8, n: n * extentM * 0.8, aglM: extentM * 0.5 },
         });
       }
       // 4×4 grid of low-altitude cells, each looked at straight down from
@@ -198,6 +280,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
             label: `grid-${gx},${gy}`,
             offset: target.clone().addScaledVector(upDir, gridAlt),
             target,
+            viz: { kind: 'grid', e: cellE, n: cellN, aglM: gridAlt },
           });
         }
       }
@@ -207,11 +290,13 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       // multi-camera killer).
       const obliqueOffset = (e, n) =>
         horiz(e * extentM * 1.1, n * extentM * 1.1).addScaledVector(upDir, extentM * 0.8);
+      const obliqueViz = (e, n) =>
+        ({ kind: 'oblique', e: e * extentM * 1.1, n: n * extentM * 1.1, aglM: extentM * 0.8 });
       stations.push(
-        { label: 'north', offset: obliqueOffset(0, 1) },
-        { label: 'east', offset: obliqueOffset(1, 0) },
-        { label: 'south', offset: obliqueOffset(0, -1) },
-        { label: 'west', offset: obliqueOffset(-1, 0) },
+        { label: 'north', offset: obliqueOffset(0, 1), viz: obliqueViz(0, 1) },
+        { label: 'east', offset: obliqueOffset(1, 0), viz: obliqueViz(1, 0) },
+        { label: 'south', offset: obliqueOffset(0, -1), viz: obliqueViz(0, -1) },
+        { label: 'west', offset: obliqueOffset(-1, 0), viz: obliqueViz(-1, 0) },
       );
     }
   }
@@ -305,6 +390,56 @@ export async function bakeGoogle3DTiles(data, options = {}) {
         `${s + 1}/${stations.length} — skipping remaining stations`,
       );
       break;
+    }
+
+    // 'roads' quality: street-level stations need the ellipsoidal ground
+    // altitude, which is only known once the overview station has loaded
+    // tiles — probe now and append the road pass to the sweep. Per-station
+    // street height = centre altitude + the mapng heightmap's relative
+    // elevation (the geoid offset is locally constant).
+    if (s === 0 && quality === 'roads') {
+      const probeRadiusM = Math.max(50, extentM * 0.1);
+      const probeRadiusSq = probeRadiusM * probeRadiusM;
+      const cosLatP = Math.cos(latRad);
+      const tmpP = new THREE.Vector3();
+      const cartP = {};
+      const heightsP = [];
+      tiles.group.updateMatrixWorld(true);
+      tiles.group.traverse((node) => {
+        if (!node.isMesh || !node.geometry?.attributes?.position) return;
+        const pos = node.geometry.attributes.position;
+        const m = node.matrixWorld;
+        for (let i = 0; i < pos.count; i += 7) { // stride — estimate only
+          tmpP.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(m);
+          WGS84_ELLIPSOID.getPositionToCartographic(tmpP, cartP);
+          const dN = (cartP.lat - latRad) * 6371000;
+          const dE = (cartP.lon - lonRad) * 6371000 * cosLatP;
+          if (dN * dN + dE * dE > probeRadiusSq) continue;
+          heightsP.push(cartP.height);
+        }
+      });
+      if (heightsP.length === 0) {
+        console.warn('[google3dTiles] road pass: ground probe found nothing — skipping street-level stations');
+      } else {
+        heightsP.sort((x, y) => x - y);
+        const centerGroundAlt = heightsP[Math.floor(heightsP.length * 0.05)];
+        const upm = computeUnitsPerMeter(data);
+        const centerTerrain = sampleHeightAtScene(data, 0, 0);
+        const groundAltAt = (e, n) =>
+          centerGroundAlt + (sampleHeightAtScene(data, e * upm, -n * upm) - centerTerrain);
+        const roadStations = buildRoadStations(data, {
+          centerLat, centerLng, metersPerDegree, extentM, horiz, upDir, groundAltAt,
+        });
+        if (roadStations.length === 0) {
+          console.warn('[google3dTiles] road pass: no OSM roads found in the AOI — skipping street-level stations');
+        } else {
+          stations.push(...roadStations);
+          console.info(
+            `[google3dTiles] road pass: ${roadStations.length} street-level stations queued ` +
+            `(ground ≈ ${centerGroundAlt.toFixed(1)}m ellipsoidal)`,
+          );
+        }
+      }
     }
   }
 
@@ -430,6 +565,9 @@ export async function bakeGoogle3DTiles(data, options = {}) {
 
   const out = new THREE.Group();
   out.name = 'GoogleTiles3D';
+  // Station footprints for the 3D preview's camera-position overlay
+  // (includes road stations appended mid-sweep).
+  out.userData.bakeStations = stations.map((st) => st.viz).filter(Boolean);
 
   const tmpEcef = new THREE.Vector3();
   const cart = {};
@@ -629,7 +767,7 @@ const bakeCacheKey = (
 export function getPreferredBakeQuality() {
   try {
     const q = localStorage.getItem('mapng_google_bake_quality');
-    return q === 'high' ? 'high' : 'standard';
+    return q === 'high' || q === 'roads' ? q : 'standard';
   } catch (_) {
     return 'standard';
   }

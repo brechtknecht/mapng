@@ -15,14 +15,16 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   const status = ref('idle'); // 'idle' | 'baking' | 'ready' | 'error'
   const error = ref(null);
   const show = ref(true);
+  const showCameras = ref(false); // overlay the bake's camera stations in the preview
   const progress = reactive({ visible: 0, inflight: 0, station: 1, stations: 1 });
   const group = shallowRef(null);
-  // 'standard' (5 camera stations) | 'high' (25 stations, much deeper LOD).
+  // 'standard' (5 camera stations) | 'high' (25 stations, much deeper LOD) |
+  // 'roads' (high + street-level stations along the OSM roads).
   // Persisted so the exports resolve the same quality → same cache key.
   const quality = ref(getPreferredBakeQuality());
 
   function setQuality(q) {
-    quality.value = q === 'high' ? 'high' : 'standard';
+    quality.value = q === 'high' || q === 'roads' ? q : 'standard';
     try { localStorage.setItem('mapng_google_bake_quality', quality.value); } catch (_) { /* private mode */ }
   }
 
@@ -91,5 +93,5 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     await bakeForPreview(terrainData, true);
   }
 
-  return { status, error, show, progress, group, apiKey, quality, setQuality, bakeForPreview, rebake, reset, tryRestore };
+  return { status, error, show, showCameras, progress, group, apiKey, quality, setQuality, bakeForPreview, rebake, reset, tryRestore };
 });

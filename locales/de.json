@@ -233,7 +233,11 @@
     "googleTilesQualityStandard": "Standard",
     "googleTilesQualityHigh": "Ultra",
     "googleTilesQualityStandardHint": "5 Kamera-Stationen — Minuten, moderater Speicher",
-    "googleTilesQualityHighHint": "25 Kamera-Stationen inkl. Tiefflug-Raster — deutlich schärfer, 3–10× Zeit/Speicher/Anfragen"
+    "googleTilesQualityHighHint": "25 Kamera-Stationen inkl. Tiefflug-Raster — deutlich schärfer, 3–10× Zeit/Speicher/Anfragen",
+    "googleTilesQualityRoads": "+Straßen",
+    "googleTilesShowCameras": "Kamerapositionen anzeigen",
+    "googleTilesCamerasLegend": "weiß = Übersicht · lila = schräg · blau = Raster · orange = Straße",
+    "googleTilesQualityRoadsHint": "Ultra plus bis zu 40 Straßenkameras entlang der OSM-Straßen — Googles höchstes Detail im Fahrkorridor"
   },
   "exportPanel": {
     "osmMissing": "OSM-Daten fehlen",

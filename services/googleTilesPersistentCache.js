@@ -144,6 +144,7 @@ export async function loadPersistedBake(key) {
   const record = await idbGet(key);
   if (!record?.meshes?.length) return null;
   const group = await deserializeGroup(record.meshes);
+  if (record.stations) group.userData.bakeStations = record.stations;
   // Touch the LRU timestamp so frequently used AOIs survive pruning.
   try {
     const meta = (await idbGet(META_KEY)) || {};
@@ -157,7 +158,12 @@ export async function loadPersistedBake(key) {
 export async function persistBake(key, group) {
   if (!hasIdb()) return null;
   const meshes = await serializeGroup(group);
-  await idbPut(key, { createdAt: Date.now(), meshes });
+  await idbPut(key, {
+    createdAt: Date.now(),
+    meshes,
+    // Camera-station footprints for the preview overlay.
+    stations: group.userData?.bakeStations ?? null,
+  });
 
   let bytes = 0;
   for (const m of meshes) {

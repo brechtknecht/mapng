@@ -233,7 +233,11 @@
     "googleTilesQualityStandard": "Estándar",
     "googleTilesQualityHigh": "Ultra",
     "googleTilesQualityStandardHint": "5 estaciones de cámara — minutos, memoria moderada",
-    "googleTilesQualityHighHint": "25 estaciones incl. cuadrícula a baja altura — mucho más nítido, 3-10× tiempo/memoria/peticiones"
+    "googleTilesQualityHighHint": "25 estaciones incl. cuadrícula a baja altura — mucho más nítido, 3-10× tiempo/memoria/peticiones",
+    "googleTilesQualityRoads": "+Calles",
+    "googleTilesShowCameras": "Mostrar posiciones de cámara",
+    "googleTilesCamerasLegend": "blanco = vista general · morado = oblicua · azul = cuadrícula · naranja = calle",
+    "googleTilesQualityRoadsHint": "Ultra más hasta 40 cámaras a nivel de calle a lo largo de las vías OSM — el máximo detalle de Google en el corredor"
   },
   "exportPanel": {
     "osmMissing": "Faltan datos OSM",
