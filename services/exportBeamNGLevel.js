@@ -448,7 +448,7 @@ function generateRoadArchitectHeightmapPng(terrainData, terrainBlockMaxHeight) {
  *
  * Returns a Blob, or null if there are no OSM features.
  */
-async function generateOSMObjectsDAE(terrainData, worldSize) {
+async function generateOSMObjectsDAE(terrainData, worldSize, { hideBuildingVisuals = false } = {}) {
   if (!terrainData.osmFeatures?.length) return null;
 
   // Barriers are exported as native TSStatic objects in BeamNG scene JSON,
@@ -476,6 +476,7 @@ async function generateOSMObjectsDAE(terrainData, worldSize) {
   );
 
   let buildingCollisionMesh = null;
+  const hiddenVisuals = [];
 
   osmGroup.traverse(child => {
     if (!child.isMesh) return;
@@ -508,7 +509,21 @@ async function generateOSMObjectsDAE(terrainData, worldSize) {
       );
       buildingCollisionMesh.name = 'Colmesh-1';
     }
+    // Google photogrammetry replaces the extruded boxes VISUALLY, but the
+    // boxes stay in Colmesh-1: simple, watertight collision is both cheaper
+    // and more reliable than colliding against raw photogrammetry.
+    if (isBuildingMesh && hideBuildingVisuals) {
+      hiddenVisuals.push(child);
+    }
   });
+
+  if (hiddenVisuals.length > 0) {
+    for (const mesh of hiddenVisuals) mesh.parent?.remove(mesh);
+    console.info(
+      `[BeamNG export] OSM building visuals hidden (${hiddenVisuals.length} mesh) — ` +
+      'collision boxes kept in Colmesh-1, Google tiles provide the visuals',
+    );
+  }
 
   // Always wrap in the BeamNG scene hierarchy:
   // Working BeamNG structure (matches flag reference asset):
@@ -572,68 +587,145 @@ async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
 
   // Transform CLONES of the tile geometries — the source group is owned by
   // the bake cache and must survive untouched for the preview / next export.
-  // Each tile keeps its unique MeshStandardMaterial with its snapshotted
-  // texture and a name like "google_tile_N" matching the BeamNG
-  // materials.json entry.
-  const materialNames = [];
-  const materials = [];
-  const tileGeoms = [];
+  //
+  // TEXTURE ATLAS: per-tile materials produced thousands of
+  // <instance_material> group bindings in one DAE, and BeamNG's Collada
+  // importer scrambled the per-face material assignment ("textures all over
+  // the place"). The proven-working BeamNG shapes (flag, debug cube) are
+  // one-mesh-few-materials, so pack every tile texture into a few 4096²
+  // atlas sheets, remap the UVs into the atlas cells, and emit one material
+  // group per ATLAS (≤ ~16) instead of per tile (1000s).
+  const ATLAS_SIZE = 4096;
+  const PAD = 2; // gutter between cells against bilinear bleed
+
+  const entries = [];
   for (const mesh of googleMeshes) {
     if (!mesh.geometry?.attributes?.position) continue;
     const geom = mesh.geometry.clone();
     geom.applyMatrix4(transformMatrix);
     geom.computeVertexNormals();
     const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
-    if (!mat) continue;
-    mat.normalMap = null;
-    mat.roughnessMap = null;
-    mat.metalnessMap = null;
-    materials.push(mat);
-    if (mat.name && !materialNames.includes(mat.name)) materialNames.push(mat.name);
-    tileGeoms.push(geom);
+    const img = mat?.map?.image ?? null;
+    const valid = img && img.width > 0 && img.height > 0;
+    entries.push({
+      geom,
+      img: valid ? img : null,
+      // Untextured tiles get a small grey cell so their (zero-filled) UVs
+      // sample a neutral colour instead of a neighbouring tile.
+      w: Math.min(valid ? img.width : 8, ATLAS_SIZE - 2 * PAD),
+      h: Math.min(valid ? img.height : 8, ATLAS_SIZE - 2 * PAD),
+      x: 0,
+      y: 0,
+      atlas: null,
+    });
   }
-  if (tileGeoms.length === 0) return null;
+  if (entries.length === 0) return null;
 
-  // Merge all tile geometries into ONE BufferGeometry with per-tile material
-  // groups. End result: a single Three.js Mesh with `material: [mat0, mat1…]`
-  // and `geometry.groups: [{start, count, materialIndex}, …]`. The
-  // ColladaExporter writes this as ONE <geometry> with ONE <instance_geometry>
-  // and N <instance_material> bindings — same DAE topology as the working
-  // textured debug cube (start01 > one_mesh), just with more materials.
-  const mergedGeom = mergeGeometries(tileGeoms, true);
+  // Shelf-pack, tallest first, into as many atlases as needed.
+  const atlases = [];
+  const newAtlas = () => {
+    const canvas = document.createElement('canvas');
+    canvas.width = ATLAS_SIZE;
+    canvas.height = ATLAS_SIZE;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#808080';
+    ctx.fillRect(0, 0, ATLAS_SIZE, ATLAS_SIZE);
+    const atlas = { canvas, ctx, cursorX: PAD, cursorY: PAD, shelfH: 0, entries: [] };
+    atlases.push(atlas);
+    return atlas;
+  };
+  let atlas = newAtlas();
+  const packOrder = [...entries].sort((a, b) => b.h - a.h);
+  for (const e of packOrder) {
+    if (atlas.cursorX + e.w + PAD > ATLAS_SIZE) {
+      // new shelf
+      atlas.cursorX = PAD;
+      atlas.cursorY += atlas.shelfH + PAD;
+      atlas.shelfH = 0;
+    }
+    if (atlas.cursorY + e.h + PAD > ATLAS_SIZE) {
+      atlas = newAtlas();
+    }
+    e.atlas = atlas;
+    e.x = atlas.cursorX;
+    e.y = atlas.cursorY;
+    if (e.img) atlas.ctx.drawImage(e.img, e.x, e.y, e.w, e.h);
+    atlas.cursorX += e.w + PAD;
+    atlas.shelfH = Math.max(atlas.shelfH, e.h);
+    atlas.entries.push(e);
+  }
+
+  // Remap each tile's UVs into its atlas cell. Half-texel inset keeps
+  // bilinear samples inside the cell; UVs are clamped to [0,1] (Google
+  // photogrammetry doesn't use wrapping).
+  for (const e of entries) {
+    const uv = e.geom.attributes.uv;
+    const inset = 0.5;
+    const u0 = (e.x + inset) / ATLAS_SIZE;
+    const v0 = (e.y + inset) / ATLAS_SIZE;
+    const uw = (e.w - 2 * inset) / ATLAS_SIZE;
+    const vh = (e.h - 2 * inset) / ATLAS_SIZE;
+    for (let i = 0; i < uv.count; i++) {
+      const u = Math.min(1, Math.max(0, uv.getX(i)));
+      const v = Math.min(1, Math.max(0, uv.getY(i)));
+      uv.setXY(i, u0 + u * uw, v0 + v * vh);
+    }
+  }
+
+  // One merged geometry per atlas (no groups), then one final geometry with
+  // a single material group per atlas — a handful of bindings instead of
+  // thousands. Zero-padded names so no tooling can reorder them.
+  const materialNames = [];
+  const materials = [];
+  const atlasGeoms = [];
+  for (const a of atlases) {
+    if (a.entries.length === 0) continue;
+    const merged = mergeGeometries(a.entries.map((e) => e.geom), false);
+    if (!merged) {
+      console.error(
+        `[BeamNG export] mergeGeometries failed for atlas ${materials.length} ` +
+        `(${a.entries.length} tiles, attribute mismatch?) — dropping Google tiles from this export`,
+      );
+      return null;
+    }
+    const matName = `google_atlas_${String(materials.length).padStart(2, '0')}`;
+    const tex = new THREE.CanvasTexture(a.canvas);
+    tex.name = matName;
+    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
+    mat.name = matName;
+    mat.map = tex;
+    materials.push(mat);
+    materialNames.push(matName);
+    atlasGeoms.push(merged);
+  }
+  console.info(
+    `[BeamNG export] packed ${entries.length} Google tile textures into ${materials.length} ` +
+    `${ATLAS_SIZE}px atlas(es)`,
+  );
+
+  const mergedGeom = mergeGeometries(atlasGeoms, true);
   if (!mergedGeom) {
-    // mergeGeometries returns null when attribute sets differ between
-    // geometries — bakeGoogle3DTiles guarantees position+uv+normal on every
-    // tile, so reaching this means that invariant broke upstream.
     console.error(
-      `[BeamNG export] mergeGeometries failed across ${tileGeoms.length} Google tile geometries ` +
-      '(attribute mismatch?) — dropping Google tiles from this export',
+      `[BeamNG export] final mergeGeometries failed across ${atlasGeoms.length} atlas geometries — ` +
+      'dropping Google tiles from this export',
     );
     return null;
   }
   const visualMesh = new THREE.Mesh(mergedGeom, materials);
   visualMesh.name = 'google_tiles_mesh';
 
-  // Collision mesh — positions-only clone, single material.
-  const collisionGeom = new THREE.BufferGeometry();
-  collisionGeom.setAttribute('position', mergedGeom.attributes.position.clone());
-  if (mergedGeom.index) collisionGeom.setIndex(mergedGeom.index.clone());
-  collisionGeom.name = 'Colmesh-1';
-  // Explicit assignment — the Material constructor's `name` param drops
-  // silently on some Three r0.162 paths (hard-won lesson #3).
-  const collisionMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
-  collisionMat.name = 'osm_object';
-  const collisionMesh = new THREE.Mesh(collisionGeom, collisionMat);
-  collisionMesh.name = 'Colmesh-1';
+  // No Colmesh-1 here on purpose: colliding against raw photogrammetry is
+  // expensive and lumpy. The extruded OSM building boxes (kept in
+  // osm_objects.dae's collision mesh even when their visuals are hidden)
+  // provide the collision instead.
 
-  // base00 > start01 > [single visual mesh] + Colmesh-1 — identical topology
-  // to the proven flag + textured-cube DAEs.
+  // base00 > start01 > [single visual mesh] — same topology as the proven
+  // flag + textured-cube DAEs, minus the collision mesh.
   const base00 = new THREE.Group();
   base00.name = 'base00';
   const start01 = new THREE.Group();
   start01.name = 'start01';
   start01.add(visualMesh);
-  start01.add(collisionMesh);
   base00.add(start01);
   base00.updateMatrixWorld(true);
 
@@ -4331,7 +4423,12 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   if (includeBuildings) {
     beginStep(`Building 3D OSM objects (${osmFeatureCount} features)…`, 65);
     await yield_();
-    osmDaeBlob = await generateOSMObjectsDAE(exportTerrainData, worldSize);
+    // With Google tiles active, the extruded OSM buildings stay in the DAE's
+    // collision mesh but are dropped from the visuals — the photogrammetry
+    // is the visible geometry, the boxes do the (cheap) colliding.
+    osmDaeBlob = await generateOSMObjectsDAE(exportTerrainData, worldSize, {
+      hideBuildingVisuals: !!(useGoogle3DTiles && googleApiKey),
+    });
 
     if (useGoogle3DTiles && googleApiKey) {
       // A failed Google bake must never take down the whole level export —
@@ -5039,8 +5136,10 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       persistentId: generatePersistentId(),
       position: [0, 0, 0],
       shapeName: `levels/${levelName}/art/shapes/google_tiles/google_tiles.dae`,
-      collisionType: 'Collision Mesh',
-      decalType: 'Collision Mesh',
+      // Visual-only: the DAE ships no Colmesh and collision is explicitly off —
+      // the hidden OSM building boxes in osm_objects.dae do the colliding.
+      collisionType: 'None',
+      decalType: 'None',
       prebuildCollisionData: 0,
       useInstanceRenderData: true,
     });
