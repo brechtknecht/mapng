@@ -222,7 +222,14 @@
     "surroundingDesc": "Mosaicos adyacentes adaptativos con mezcla de costuras y detalle satelital optimizado para vista previa.",
     "wireframeMode": "Modo wireframe",
     "features3d": "Features 3D",
-    "resetCamera": "Restablecer camara"
+    "resetCamera": "Restablecer camara",
+    "googleTiles": "Google 3D Tiles",
+    "googleTilesNoKey": "Define VITE_GOOGLE_MAPS_API_KEY en .env.local para activar Google 3D Tiles.",
+    "googleTilesLoad": "Cargar Google 3D Tiles",
+    "googleTilesRetry": "Reintentar",
+    "googleTilesBaking": "{visible} teselas cargadas, {inflight} en curso…",
+    "googleTilesShow": "Mostrar teselas de Google",
+    "googleTilesRebake": "Rehacer teselas"
   },
   "exportPanel": {
     "osmMissing": "Faltan datos OSM",

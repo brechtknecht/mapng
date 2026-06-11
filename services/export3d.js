@@ -6,7 +6,7 @@ import { textures } from "./textureGenerator.js";
 import { createMetricProjector } from "./geoUtils.js";
 import { fetchSurroundingTiles, POSITIONS } from "./surroundingTiles.js";
 import { ColladaExporter } from './ColladaExporter.js';
-import { bakeGoogle3DTiles } from './google3dTiles.js';
+import { getOrBakeGoogle3DTiles, computeUnitsPerMeter } from './google3dTiles.js';
 
 // --- Constants & Helpers ---
 export const SCENE_SIZE = 100;
@@ -1432,13 +1432,22 @@ export const exportToGLB = async (data, options = {}) => {
 
       if (useGoogle3DTiles) {
         onProgress?.('Fetching Google Photorealistic 3D Tiles...');
-        const googleGroup = await bakeGoogle3DTiles(data, {
+        const googleGroup = await getOrBakeGoogle3DTiles(data, {
           apiKey: googleApiKey,
           errorTarget: google3DErrorTarget,
           stripGround: stripGoogleGround !== false,
           onProgress: (p) => onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`),
         });
-        scene.add(googleGroup);
+        // Clone the mesh nodes (geometry/material stay shared) — the cached
+        // group is owned by the bake cache and may be parented into the 3D
+        // preview scene right now; scene.add() on it directly would steal it.
+        // Bake Y is metres above the .ter datum; scale by unitsPerMeter to
+        // match the scene-unit terrain mesh.
+        const googleWrapper = new THREE.Group();
+        googleWrapper.name = 'GoogleTiles3D';
+        for (const child of googleGroup.children) googleWrapper.add(child.clone());
+        googleWrapper.scale.y = computeUnitsPerMeter(data);
+        scene.add(googleWrapper);
       }
     }
 
@@ -1516,13 +1525,19 @@ export const exportToDAE = async (data, options = {}) => {
 
       if (useGoogle3DTiles) {
         onProgress?.('Fetching Google Photorealistic 3D Tiles...');
-        const googleGroup = await bakeGoogle3DTiles(data, {
+        const googleGroup = await getOrBakeGoogle3DTiles(data, {
           apiKey: googleApiKey,
           errorTarget: google3DErrorTarget,
           stripGround: stripGoogleGround !== false,
           onProgress: (p) => onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`),
         });
-        scene.add(googleGroup);
+        // Same shared-cache handling as the GLB path above: clone the mesh
+        // nodes and scale metres-Y into scene units.
+        const googleWrapper = new THREE.Group();
+        googleWrapper.name = 'GoogleTiles3D';
+        for (const child of googleGroup.children) googleWrapper.add(child.clone());
+        googleWrapper.scale.y = computeUnitsPerMeter(data);
+        scene.add(googleWrapper);
       }
     }
 

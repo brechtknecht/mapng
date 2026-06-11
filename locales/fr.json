@@ -222,7 +222,14 @@
     "surroundingDesc": "Tuiles adjacentes adaptatives avec fusion des jonctions et detail satellite optimise pour un chargement plus rapide.",
     "wireframeMode": "Mode fil de fer",
     "features3d": "Elements 3D",
-    "resetCamera": "Reinitialiser la caméra"
+    "resetCamera": "Reinitialiser la caméra",
+    "googleTiles": "Google 3D Tiles",
+    "googleTilesNoKey": "Définissez VITE_GOOGLE_MAPS_API_KEY dans .env.local pour activer les tuiles 3D Google.",
+    "googleTilesLoad": "Charger les tuiles 3D Google",
+    "googleTilesRetry": "Réessayer",
+    "googleTilesBaking": "{visible} tuiles chargées, {inflight} en cours…",
+    "googleTilesShow": "Afficher les tuiles Google",
+    "googleTilesRebake": "Recalculer les tuiles"
   },
   "exportPanel": {
     "osmMissing": "Données OSM manquantes",

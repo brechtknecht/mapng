@@ -222,7 +222,14 @@
     "surroundingDesc": "Adaptive angrenzende Tiles mit Nahtübergängen und für Vorschau optimierten Satellitendetails für schnelleres Laden.",
     "wireframeMode": "Drahtgittermodus",
     "features3d": "3D-Features",
-    "resetCamera": "Kamera zurücksetzen"
+    "resetCamera": "Kamera zurücksetzen",
+    "googleTiles": "Google 3D Tiles",
+    "googleTilesNoKey": "VITE_GOOGLE_MAPS_API_KEY in .env.local setzen, um Google 3D Tiles zu aktivieren.",
+    "googleTilesLoad": "Google 3D Tiles laden",
+    "googleTilesRetry": "Erneut versuchen",
+    "googleTilesBaking": "{visible} Kacheln geladen, {inflight} in Arbeit…",
+    "googleTilesShow": "Google-Kacheln anzeigen",
+    "googleTilesRebake": "Neu backen"
   },
   "exportPanel": {
     "osmMissing": "OSM-Daten fehlen",

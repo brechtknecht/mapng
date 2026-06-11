@@ -222,7 +222,14 @@
     "surroundingDesc": "Adaptacyjne sąsiednie kafelki ze zszywaniem szwów i optymalizowanym szczegółami satelity dla szybszego ładowania.",
     "wireframeMode": "Tryb szkieletu",
     "features3d": "Funkcje 3D",
-    "resetCamera": "Resetuj kamerę"
+    "resetCamera": "Resetuj kamerę",
+    "googleTiles": "Google 3D Tiles",
+    "googleTilesNoKey": "Ustaw VITE_GOOGLE_MAPS_API_KEY w .env.local, aby włączyć Google 3D Tiles.",
+    "googleTilesLoad": "Wczytaj Google 3D Tiles",
+    "googleTilesRetry": "Spróbuj ponownie",
+    "googleTilesBaking": "{visible} kafelków wczytanych, {inflight} w toku…",
+    "googleTilesShow": "Pokaż kafelki Google",
+    "googleTilesRebake": "Przelicz kafelki"
   },
   "exportPanel": {
     "osmMissing": "Dane OSM brakują",

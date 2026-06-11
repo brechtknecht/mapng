@@ -5,7 +5,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { exportTer } from './exportTer.js';
 import { buildTerrainMaterials } from './osmTerrainMaterials.js';
 import { createOSMGroup, createSurroundingMeshes, SCENE_SIZE } from './export3d.js';
-import { bakeGoogle3DTiles } from './google3dTiles.js';
+import { getOrBakeGoogle3DTiles } from './google3dTiles.js';
 import { prepareCroppedTerrainData } from './cropTerrain.js';
 import { applyBuildingFoundations } from './buildingFoundations.js';
 import { ColladaExporter } from './ColladaExporter.js';
@@ -544,12 +544,13 @@ async function generateOSMObjectsDAE(terrainData, worldSize) {
  * Returns { daeBlob, textureFiles, materialNames } or null if nothing baked.
  */
 async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
-  const googleGroup = await bakeGoogle3DTiles(terrainData, {
+  // Cached bake shared with the 3D preview — a preview-then-export flow only
+  // hits the Google API once.
+  const googleGroup = await getOrBakeGoogle3DTiles(terrainData, {
     apiKey: googleOptions.apiKey,
     errorTarget: googleOptions.errorTarget,
     stripGround: googleOptions.stripGround !== false,
     onProgress: googleOptions.onProgress,
-    worldSize,
   });
 
   const googleMeshes = [];
@@ -558,25 +559,30 @@ async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
   });
   if (googleMeshes.length === 0) return null;
 
-  // Scene-space (Y-up, normalised) → BeamNG world-space (Z-up, metres).
+  // Scene-space (X/Z scene units, Y in metres above the .ter datum) →
+  // BeamNG world-space (Z-up, metres). X/Z scale by s; Y is already metres,
+  // so it maps to world-Z with factor 1.
   const s = worldSize / SCENE_SIZE;
   const transformMatrix = new THREE.Matrix4().set(
     s,  0,  0,  0,
     0,  0, -s,  0,
-    0,  s,  0,  0,
+    0,  1,  0,  0,
     0,  0,  0,  1,
   );
 
-  // Bake transform + clean up per-tile materials. Each surviving tile gets a
-  // unique MeshStandardMaterial with its own snapshotted texture and a name
-  // like "google_tile_N" that matches the BeamNG materials.json entry.
+  // Transform CLONES of the tile geometries — the source group is owned by
+  // the bake cache and must survive untouched for the preview / next export.
+  // Each tile keeps its unique MeshStandardMaterial with its snapshotted
+  // texture and a name like "google_tile_N" matching the BeamNG
+  // materials.json entry.
   const materialNames = [];
   const materials = [];
   const tileGeoms = [];
   for (const mesh of googleMeshes) {
-    if (!mesh.geometry?.attributes?.position || !mesh.geometry?.attributes?.uv) continue;
-    mesh.geometry.applyMatrix4(transformMatrix);
-    mesh.geometry.computeVertexNormals();
+    if (!mesh.geometry?.attributes?.position) continue;
+    const geom = mesh.geometry.clone();
+    geom.applyMatrix4(transformMatrix);
+    geom.computeVertexNormals();
     const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
     if (!mat) continue;
     mat.normalMap = null;
@@ -584,7 +590,7 @@ async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
     mat.metalnessMap = null;
     materials.push(mat);
     if (mat.name && !materialNames.includes(mat.name)) materialNames.push(mat.name);
-    tileGeoms.push(mesh.geometry);
+    tileGeoms.push(geom);
   }
   if (tileGeoms.length === 0) return null;
 
@@ -595,7 +601,16 @@ async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
   // and N <instance_material> bindings — same DAE topology as the working
   // textured debug cube (start01 > one_mesh), just with more materials.
   const mergedGeom = mergeGeometries(tileGeoms, true);
-  if (!mergedGeom) return null;
+  if (!mergedGeom) {
+    // mergeGeometries returns null when attribute sets differ between
+    // geometries — bakeGoogle3DTiles guarantees position+uv+normal on every
+    // tile, so reaching this means that invariant broke upstream.
+    console.error(
+      `[BeamNG export] mergeGeometries failed across ${tileGeoms.length} Google tile geometries ` +
+      '(attribute mismatch?) — dropping Google tiles from this export',
+    );
+    return null;
+  }
   const visualMesh = new THREE.Mesh(mergedGeom, materials);
   visualMesh.name = 'google_tiles_mesh';
 
@@ -604,10 +619,11 @@ async function generateGoogleTilesDAE(terrainData, worldSize, googleOptions) {
   collisionGeom.setAttribute('position', mergedGeom.attributes.position.clone());
   if (mergedGeom.index) collisionGeom.setIndex(mergedGeom.index.clone());
   collisionGeom.name = 'Colmesh-1';
-  const collisionMesh = new THREE.Mesh(
-    collisionGeom,
-    new THREE.MeshBasicMaterial({ name: 'osm_object', color: 0xffffff }),
-  );
+  // Explicit assignment — the Material constructor's `name` param drops
+  // silently on some Three r0.162 paths (hard-won lesson #3).
+  const collisionMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+  collisionMat.name = 'osm_object';
+  const collisionMesh = new THREE.Mesh(collisionGeom, collisionMat);
   collisionMesh.name = 'Colmesh-1';
 
   // base00 > start01 > [single visual mesh] + Colmesh-1 — identical topology
@@ -4318,16 +4334,32 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     osmDaeBlob = await generateOSMObjectsDAE(exportTerrainData, worldSize);
 
     if (useGoogle3DTiles && googleApiKey) {
-      const googleResult = await generateGoogleTilesDAE(exportTerrainData, worldSize, {
-        apiKey: googleApiKey,
-        errorTarget: google3DErrorTarget,
-        onProgress: (p) => report(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`, 65),
-      });
-      googleTilesDaeBlob = googleResult?.daeBlob ?? null;
-      googleTilesTextureFiles = googleResult?.textureFiles ?? [];
-      googleTilesMaterialNames = googleResult?.materialNames ?? [];
-      if (googleTilesMaterialNames.length > 0) {
-        googleDebugCubeBlob = generateGoogleDebugCubeDAE(googleTilesMaterialNames[0]);
+      // A failed Google bake must never take down the whole level export —
+      // catch, log loudly, and continue with the OSM-only level.
+      try {
+        const googleResult = await generateGoogleTilesDAE(exportTerrainData, worldSize, {
+          apiKey: googleApiKey,
+          errorTarget: google3DErrorTarget,
+          onProgress: (p) => report(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`, 65),
+        });
+        googleTilesDaeBlob = googleResult?.daeBlob ?? null;
+        googleTilesTextureFiles = googleResult?.textureFiles ?? [];
+        googleTilesMaterialNames = googleResult?.materialNames ?? [];
+        if (googleTilesMaterialNames.length > 0) {
+          googleDebugCubeBlob = generateGoogleDebugCubeDAE(googleTilesMaterialNames[0]);
+        }
+        if (!googleResult) {
+          console.warn('[BeamNG export] Google 3D Tiles produced no geometry — exporting without them');
+          report('Google tiles: no geometry produced — exporting without them', 65);
+        } else {
+          console.info(
+            `[BeamNG export] Google tiles DAE built: ${googleTilesMaterialNames.length} materials, ` +
+            `${googleTilesTextureFiles.length} textures`,
+          );
+        }
+      } catch (err) {
+        console.error('[BeamNG export] Google 3D Tiles bake failed — exporting without them:', err);
+        report(`Google tiles failed (${err?.message ?? err}) — exporting without them`, 65);
       }
     }
   } else {

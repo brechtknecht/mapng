@@ -50,6 +50,10 @@
               :feature-visibility="featureVisibility"
             />
 
+            <GoogleTiles3D
+              :terrain-data="terrainData"
+            />
+
             <SurroundingTerrain3D
               :terrain-data="terrainData"
               :visible="showSurroundings"
@@ -273,6 +277,60 @@
               </label>
             </div>
           </div>
+
+          <!-- Google Photorealistic 3D Tiles -->
+          <div class="space-y-2 pt-2">
+            <label class="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1 font-medium mb-1">
+              <Layers :size="12" /> {{ t('preview.googleTiles') }}
+            </label>
+
+            <p v-if="!googleTilesStore.apiKey" class="text-[10px] text-gray-400 dark:text-gray-500">
+              {{ t('preview.googleTilesNoKey') }}
+            </p>
+
+            <template v-else>
+              <button
+                v-if="googleTilesStore.status === 'idle' || googleTilesStore.status === 'error'"
+                @click="googleTilesStore.bakeForPreview(terrainData)"
+                :disabled="!terrainData"
+                class="w-full flex items-center justify-center gap-2 py-1.5 bg-[#FF6600] hover:bg-[#e65c00] disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded-md transition-colors"
+              >
+                {{ googleTilesStore.status === 'error' ? t('preview.googleTilesRetry') : t('preview.googleTilesLoad') }}
+              </button>
+
+              <p v-if="googleTilesStore.status === 'error'" class="text-[10px] text-red-500 break-words">
+                {{ googleTilesStore.error }}
+              </p>
+
+              <p v-if="googleTilesStore.status === 'baking'" class="text-[10px] text-gray-400 dark:text-gray-500">
+                {{ t('preview.googleTilesBaking', { visible: googleTilesStore.progress.visible, inflight: googleTilesStore.progress.inflight }) }}
+              </p>
+
+              <template v-if="googleTilesStore.status === 'ready'">
+                <label class="flex items-center gap-2 cursor-pointer group/check">
+                  <div class="relative">
+                    <input
+                      type="checkbox"
+                      v-model="googleTilesStore.show"
+                      class="peer sr-only"
+                    />
+                    <div
+                      class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#FF6600]"
+                    ></div>
+                  </div>
+                  <span class="text-xs text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">
+                    {{ t('preview.googleTilesShow') }}
+                  </span>
+                </label>
+                <button
+                  @click="googleTilesStore.rebake(terrainData)"
+                  class="text-[10px] text-gray-400 dark:text-gray-500 hover:text-[#FF6600] underline"
+                >
+                  {{ t('preview.googleTilesRebake') }}
+                </button>
+              </template>
+            </template>
+          </div>
         </div>
 
         <div class="pt-4 border-t border-gray-100 dark:border-gray-700">
@@ -291,7 +349,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onErrorCaptured } from "vue";
+import { ref, computed, reactive, watch, onErrorCaptured } from "vue";
 import { useI18n } from 'vue-i18n';
 import * as THREE from "three";
 import { TresCanvas } from "@tresjs/core";
@@ -308,10 +366,20 @@ const { t } = useI18n({ useScope: 'global' });
 import TerrainMesh from "./TerrainMesh.vue";
 import MapngFlag3D from "./MapngFlag3D.vue";
 import OSMFeatures3D from "./OSMFeatures3D.vue";
+import GoogleTiles3D from "./GoogleTiles3D.vue";
 import CSMLight from "./CSMLight.vue";
 import SurroundingTerrain3D from "./SurroundingTerrain3D.vue";
+import { useGoogleTilesStore } from "../../stores/googleTilesStore.js";
 
 const props = defineProps(["terrainData"]);
+
+const googleTilesStore = useGoogleTilesStore();
+
+// New AOI → the baked tiles no longer match the terrain; back to idle.
+// (The shared bake cache handles its own eviction on the next bake.)
+watch(() => props.terrainData, () => {
+  if (googleTilesStore.status !== 'idle') googleTilesStore.reset();
+});
 
 const controlsRef = ref(null);
 
