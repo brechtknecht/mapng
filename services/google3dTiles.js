@@ -130,7 +130,8 @@ const buildRoadStations = (data, {
  *   @param {number} [options.groundDistanceM=2.5] only strip near-flat tris within this many metres of the mapng terrain (keeps flat/gentle roofs)
  *   @param {boolean} [options.cameraSweep=true] sweep the camera through extra stations so facades get refined
  *   @param {'standard'|'high'|'roads'} [options.quality='standard'] 'high' = 25 stations incl. a 4×4 low-altitude grid; 'roads' = high + up to 40 street-level stations along OSM roads
- *   @param {number} [options.maxWaitMs] hard cap on total bake time across all stations (default 300s, 900s for high)
+ *   @param {number} [options.sensorSize] virtual sensor resolution the SSE is measured against (1024 standard, 1536 high/roads) — higher = deeper tiles at the same errorTarget
+ *   @param {number} [options.maxWaitMs] hard cap on total bake time; default derives from the station count (2 min + 25 s/station)
  *   @param {number} [options.stabilityMs=2500] queue must stay quiet this long to consider a station done
  *   @param {(p: {visible:number, downloading:number, parsing:number, elapsed:number, station:number, stations:number}) => void} [options.onProgress]
  */
@@ -150,17 +151,26 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     groundDistanceM = 2.5,
     cameraSweep = true,
     // 'standard': 5 stations (top-down + 4 oblique).
-    // 'high':    25 stations (top-down + 8 lower oblique + 4×4 low-altitude
-    //            grid). Screen-space error scales with camera distance, so
-    //            the ~4× closer grid cameras force several LOD levels more
-    //            mesh + texture detail. Expect 3-10× tiles/time/memory.
-    // 'roads':   'high' plus up to 40 street-level stations (~25 m above the
-    //            OSM roads, aimed down-street) pulling Google's DEEPEST tiles
-    //            along the driving corridor.
+    // 'high':    top-down + 8 lower obliques + a low-altitude grid sized to
+    //            ~250 m cells (4×4 on a 1 km AOI, up to 8×8 on large maps).
+    //            Screen-space error scales with camera distance, so the much
+    //            closer grid cameras force several LOD levels more mesh +
+    //            texture detail. Expect 3-10× tiles/time/memory.
+    // 'roads':   'high' plus street-level stations (~25 m above the OSM
+    //            roads, aimed down-street, ~40 per km²) pulling Google's
+    //            DEEPEST tiles along the driving corridor.
     quality = 'standard',
-    // Total budget across all camera stations. 2.5 s queue-quiet window per
-    // station to be sure we caught the tail.
-    maxWaitMs = quality === 'roads' ? 1200000 : quality === 'high' ? 900000 : 300000,
+    // Virtual sensor resolution. Screen-space error is measured in PIXELS
+    // against this render target, so resolution scales refinement directly:
+    // 1.5× resolution = 1.5× stricter in world terms (~half an LOD level
+    // deeper) — sharper tiles with no camera changes. 2048 was tried and
+    // roughly QUADRUPLED tile counts (a full LOD level everywhere), blowing
+    // every time/memory budget; 1536 is the sweet spot.
+    sensorSize = quality === 'standard' ? 1024 : 1536,
+    // Optional override for the total bake budget. By default it is derived
+    // from the station count (which scales with AOI size): 2 min base +
+    // 25 s per station. 2.5 s queue-quiet window per station.
+    maxWaitMs = null,
     stabilityMs = 2500,
     onProgress,
   } = options;
@@ -217,8 +227,34 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     tiles.lruCache.minSize = 20000;
     tiles.lruCache.maxSize = 24000;
   }
-  tiles.downloadQueue.maxJobs = 20;
-  tiles.parseQueue.maxJobs = 6;
+  tiles.downloadQueue.maxJobs = 32;
+  tiles.parseQueue.maxJobs = 8;
+
+  // Everything time-driven runs off a Web-Worker ticker, NOT
+  // requestAnimationFrame: browsers throttle rAF (and main-thread timers)
+  // to ~1 fps or pause them entirely in background tabs, which turned long
+  // bakes into hour-long crawls the moment the user tabbed away. Worker
+  // messages are not throttled. This covers BOTH our own update loop AND
+  // the library's PriorityQueue job pump, whose default scheduler is rAF.
+  const tickerUrl = URL.createObjectURL(
+    new Blob(['setInterval(() => postMessage(0), 33);'], { type: 'text/javascript' }),
+  );
+  const ticker = new Worker(tickerUrl);
+  let tickHandler = null;
+  const scheduledJobs = [];
+  ticker.onmessage = () => {
+    if (scheduledJobs.length) {
+      for (const job of scheduledJobs.splice(0)) job();
+    }
+    tickHandler?.();
+  };
+  const stopTicker = () => {
+    tickHandler = null;
+    ticker.terminate();
+    URL.revokeObjectURL(tickerUrl);
+  };
+  tiles.downloadQueue.schedulingCallback = (fn) => { scheduledJobs.push(fn); };
+  tiles.parseQueue.schedulingCallback = (fn) => { scheduledJobs.push(fn); };
 
   // ONE camera, swept through several stations in sequence: top-down first
   // (the proven baseline), then four oblique views from the cardinal
@@ -265,10 +301,14 @@ export async function bakeGoogle3DTiles(data, options = {}) {
           viz: { kind: 'oblique', e: e * extentM * 0.8, n: n * extentM * 0.8, aglM: extentM * 0.5 },
         });
       }
-      // 4×4 grid of low-altitude cells, each looked at straight down from
-      // ~4× closer than the overview — this is what drags the LOD selector
+      // Grid of low-altitude cells, each looked at straight down from much
+      // closer than the overview — this is what drags the LOD selector
       // several levels deeper (screen-space error scales with distance).
-      const GRID = 4;
+      // The grid SIZE adapts to the AOI so detail DENSITY stays constant:
+      // ~250 m cells regardless of map size (a fixed 4×4 would let cell
+      // size — and camera altitude — grow with the AOI, collapsing quality
+      // on larger maps back to overview level).
+      const GRID = Math.min(8, Math.max(2, Math.round(extentM / 250)));
       const cellM = extentM / GRID;
       const gridAlt = cellM * 1.3 + 60;
       for (let gy = 0; gy < GRID; gy++) {
@@ -307,12 +347,14 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   cam.updateMatrixWorld(true);
 
   // Offscreen WebGLRenderer is only consumed for setResolutionFromRenderer's
-  // pixel-ratio + size info; nothing is ever drawn to it.
+  // pixel-ratio + size info; nothing is ever drawn to it. Its size is the
+  // virtual sensor the LOD selector measures screen-space error against —
+  // see the `sensorSize` option.
   const offscreenCanvas = document.createElement('canvas');
-  offscreenCanvas.width = 1024;
-  offscreenCanvas.height = 1024;
+  offscreenCanvas.width = sensorSize;
+  offscreenCanvas.height = sensorSize;
   const offscreen = new THREE.WebGLRenderer({ canvas: offscreenCanvas, alpha: true });
-  offscreen.setSize(1024, 1024, false);
+  offscreen.setSize(sensorSize, sensorSize, false);
 
   tiles.setCamera(cam);
   tiles.setResolutionFromRenderer(cam, offscreen);
@@ -329,20 +371,37 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   const startedAt = performance.now();
   let timedOut = false;
   const selectedTiles = new Set();
+  // Derived from the (AOI-dependent) station count; recomputed when the
+  // road pass appends stations mid-sweep.
+  let bakeBudgetMs = maxWaitMs ?? (120000 + stations.length * 25000);
 
   const waitForQuiet = (stationIdx) => new Promise((resolve, reject) => {
     let lastChange = performance.now();
     let lastVisible = -1;
+    // Stations served entirely from cache trigger no downloads — exit those
+    // after a short grace period instead of the full stability window
+    // (on a 70-station sweep that alone saves minutes of pure waiting).
+    let sawActivity = false;
+    const finish = (fn, arg) => { tickHandler = null; fn(arg); };
 
     const tick = () => {
-      if (updateError) { reject(updateError); return; }
+      if (updateError) { finish(reject, updateError); return; }
       try {
         tiles.update();
-      } catch (e) { reject(e); return; }
+      } catch (e) { finish(reject, e); return; }
+
+      // Pin every tile selected by ANY earlier station. update() only marks
+      // the CURRENT selection as used, so prior stations' tiles become
+      // evictable once the cache crosses its byte threshold mid-sweep —
+      // their scenes would be gone at merge time, leaving holes in the map.
+      // Pinned, the cache instead stalls NEW loads when full: later stations
+      // gracefully lose detail rather than earlier regions losing geometry.
+      for (const t of selectedTiles) tiles.lruCache.markUsed(t);
 
       const now = performance.now();
       const downloading = tiles.stats?.downloading ?? 0;
       const parsing = tiles.stats?.parsing ?? 0;
+      if (downloading + parsing > 0) sawActivity = true;
       let visible = 0;
       tiles.group.traverse((o) => { if (o.isMesh) visible++; });
 
@@ -360,15 +419,17 @@ export async function bakeGoogle3DTiles(data, options = {}) {
         stations: stations.length,
       });
 
-      const quiet = downloading === 0 && parsing === 0 && (now - lastChange) > stabilityMs;
-      if (quiet && visible > 0) { resolve(); return; }
-      if (now - startedAt > maxWaitMs) { timedOut = true; resolve(); return; }
-      requestAnimationFrame(tick);
+      const quietMs = sawActivity ? stabilityMs : 700;
+      const quiet = downloading === 0 && parsing === 0 && (now - lastChange) > quietMs;
+      if (quiet && visible > 0) { finish(resolve); return; }
+      if (now - startedAt > bakeBudgetMs) { timedOut = true; finish(resolve); return; }
     };
-    requestAnimationFrame(tick);
+    tickHandler = tick;
+    tick();
   });
 
   const lookTarget = new THREE.Vector3();
+  try {
   for (let s = 0; s < stations.length; s++) {
     cam.position.copy(centerEcef).add(stations[s].offset);
     lookTarget.copy(centerEcef);
@@ -386,7 +447,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     );
     if (timedOut) {
       console.warn(
-        `[google3dTiles] bake budget (${maxWaitMs / 1000}s) exhausted at station ` +
+        `[google3dTiles] bake budget (${Math.round(bakeBudgetMs / 1000)}s) exhausted at station ` +
         `${s + 1}/${stations.length} — skipping remaining stations`,
       );
       break;
@@ -427,20 +488,30 @@ export async function bakeGoogle3DTiles(data, options = {}) {
         const centerTerrain = sampleHeightAtScene(data, 0, 0);
         const groundAltAt = (e, n) =>
           centerGroundAlt + (sampleHeightAtScene(data, e * upm, -n * upm) - centerTerrain);
+        // Cap scales with AOI area so road coverage density stays constant
+        // (~40 stations per km², clamped) instead of thinning out on big maps.
+        const areaKm2 = (extentM / 1000) ** 2;
         const roadStations = buildRoadStations(data, {
           centerLat, centerLng, metersPerDegree, extentM, horiz, upDir, groundAltAt,
+          maxStations: Math.min(160, Math.max(40, Math.round(40 * areaKm2))),
         });
         if (roadStations.length === 0) {
           console.warn('[google3dTiles] road pass: no OSM roads found in the AOI — skipping street-level stations');
         } else {
           stations.push(...roadStations);
+          if (maxWaitMs == null) bakeBudgetMs = 120000 + stations.length * 25000;
           console.info(
             `[google3dTiles] road pass: ${roadStations.length} street-level stations queued ` +
-            `(ground ≈ ${centerGroundAlt.toFixed(1)}m ellipsoidal)`,
+            `(ground ≈ ${centerGroundAlt.toFixed(1)}m ellipsoidal, budget now ${Math.round(bakeBudgetMs / 1000)}s)`,
           );
         }
       }
     }
+  }
+
+  } finally {
+    // Always kill the worker ticker — also on bake errors mid-sweep.
+    stopTicker();
   }
 
   tiles.removeEventListener('load-error', onUpdateError);
@@ -464,14 +535,23 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     return !(kids.length > 0 && kids.every(coveredBySelection));
   });
 
-  // Resolve scenes; tiles can in principle drop out of the cache between
-  // stations (shouldn't happen below the LRU min thresholds, but be safe).
+  // Resolve scenes. With the per-tick markUsed pinning above, selected
+  // tiles should never be evicted — if scenes are missing anyway, say so
+  // LOUDLY: every missing scene is a visible hole in the map.
   const bakeScenes = [];
+  let missingScenes = 0;
   for (const tile of bakeTiles) {
     const scene = tile.cached?.scene;
-    if (!scene) continue;
+    if (!scene) { missingScenes++; continue; }
     scene.updateMatrixWorld(true);
     bakeScenes.push(scene);
+  }
+  if (missingScenes > 0) {
+    console.warn(
+      `[google3dTiles] ${missingScenes}/${bakeTiles.length} selected tiles lost their scenes ` +
+      '(LRU eviction under memory pressure) — the bake has coverage gaps. ' +
+      'Reduce the AOI size or quality tier, or raise lruCache.maxBytesSize.',
+    );
   }
   const forEachBakeMesh = (cb) => {
     for (const scene of bakeScenes) {
@@ -487,7 +567,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   console.info(
     `[google3dTiles] ${selectedTiles.size} tiles selected across ${stations.length} stations, ` +
     `${bakeTiles.length} kept after finest-covering dedup, in ${bakeSecs}s ` +
-    `(errorTarget=${errorTarget}, quality=${quality}, timedOut=${timedOut}, ` +
+    `(errorTarget=${errorTarget}, quality=${quality}, sensor=${sensorSize}px, timedOut=${timedOut}, ` +
     `cache=${(cacheBytes / 1024 ** 2).toFixed(0)}MB, cacheFull=${cacheFull})`,
   );
   if (cacheFull) {
@@ -742,11 +822,18 @@ let _bakeCache = null; // { key, promise }
 
 // Bump when the bake output format/semantics change — persisted bakes from
 // older versions are then simply never matched (and age out via LRU prune).
-const BAKE_FORMAT_VERSION = 2;
+const BAKE_FORMAT_VERSION = 4;
 
 const bakeCacheKey = (
   data,
-  { errorTarget = 5, stripGround = true, groundDistanceM = 2.5, cameraSweep = true, quality = 'standard' } = {},
+  {
+    errorTarget = 5,
+    stripGround = true,
+    groundDistanceM = 2.5,
+    cameraSweep = true,
+    quality = 'standard',
+    sensorSize = quality === 'standard' ? 1024 : 1536,
+  } = {},
 ) => {
   const b = data.bounds;
   // Round to ~1 cm so float formatting noise between sessions can't split
@@ -755,7 +842,7 @@ const bakeCacheKey = (
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
     `|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}` +
-    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}`
+    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}`
   );
 };
 

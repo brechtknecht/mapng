@@ -598,7 +598,14 @@ async function generateGoogleTilesGLB(terrainData, worldSize, googleOptions) {
   // into a few 4096² atlas sheets and remap the UVs into the atlas cells —
   // a handful of materials total.
   const ATLAS_SIZE = 4096;
-  const PAD = 2; // gutter between cells against bilinear bleed
+  // Each cell gets a GUTTER of edge-replicated pixels on all sides: BeamNG
+  // generates mipmaps, and by mip 3-4 a thin gap would average neighbouring
+  // cells together — visible as colour bleeding and seams on DISTANT
+  // surfaces. Edge replication keeps every mip level sampling "more of the
+  // same tile". PAD (= 2×GUTTER) is the spacing between cell rects so two
+  // neighbouring gutters never overlap.
+  const GUTTER = 8;
+  const PAD = GUTTER * 2;
 
   const entries = [];
   for (const mesh of googleMeshes) {
@@ -651,7 +658,24 @@ async function generateGoogleTilesGLB(terrainData, worldSize, googleOptions) {
     e.atlas = atlas;
     e.x = atlas.cursorX;
     e.y = atlas.cursorY;
-    if (e.img) atlas.ctx.drawImage(e.img, e.x, e.y, e.w, e.h);
+    if (e.img) {
+      const { ctx } = atlas;
+      const { img, x, y, w, h } = e;
+      ctx.drawImage(img, x, y, w, h);
+      const iw = img.width;
+      const ih = img.height;
+      // Edge replication into the gutter: stretch the outermost source
+      // pixel rows/columns (and corner pixels) outward so mip downsampling
+      // never mixes in a neighbouring tile.
+      ctx.drawImage(img, 0, 0, 1, ih, x - GUTTER, y, GUTTER, h);              // left
+      ctx.drawImage(img, iw - 1, 0, 1, ih, x + w, y, GUTTER, h);              // right
+      ctx.drawImage(img, 0, 0, iw, 1, x, y - GUTTER, w, GUTTER);              // top
+      ctx.drawImage(img, 0, ih - 1, iw, 1, x, y + h, w, GUTTER);              // bottom
+      ctx.drawImage(img, 0, 0, 1, 1, x - GUTTER, y - GUTTER, GUTTER, GUTTER);                 // top-left
+      ctx.drawImage(img, iw - 1, 0, 1, 1, x + w, y - GUTTER, GUTTER, GUTTER);                 // top-right
+      ctx.drawImage(img, 0, ih - 1, 1, 1, x - GUTTER, y + h, GUTTER, GUTTER);                 // bottom-left
+      ctx.drawImage(img, iw - 1, ih - 1, 1, 1, x + w, y + h, GUTTER, GUTTER);                 // bottom-right
+    }
     atlas.cursorX += e.w + PAD;
     atlas.shelfH = Math.max(atlas.shelfH, e.h);
     atlas.entries.push(e);
