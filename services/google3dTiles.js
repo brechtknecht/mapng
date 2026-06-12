@@ -395,9 +395,40 @@ export function getPreferredBakeQuality() {
   }
 }
 
+/**
+ * Persisted ground-stripping preference. true (default) = streets/ground
+ * near the mapng terrain are removed so the heightmap stays the driving
+ * surface; false = keep Google's full ground (visible when the tiles are
+ * lifted via the preview z-offset). Resolved centrally like the quality so
+ * preview and exports agree on the same cache key.
+ */
+export function getPreferredStripGround() {
+  try {
+    return localStorage.getItem('mapng_google_bake_stripground') !== 'false';
+  } catch (_) {
+    return true;
+  }
+}
+
+/**
+ * Manual vertical lift (real metres) set via the preview's z-offset slider.
+ * Display-side only — NOT part of the bake or its cache key — but the export
+ * paths apply it so what you aligned in the preview is what you get in the
+ * level/GLB/DAE.
+ */
+export function getGoogleTilesZOffset() {
+  try {
+    const v = Number(localStorage.getItem('mapng_google_bake_zoffset'));
+    return Number.isFinite(v) ? v : 0;
+  } catch (_) {
+    return 0;
+  }
+}
+
 const resolveBakeOptions = (options) => ({
   ...options,
   quality: options.quality ?? getPreferredBakeQuality(),
+  stripGround: options.stripGround ?? getPreferredStripGround(),
 });
 
 const disposeGroup = (group) => {

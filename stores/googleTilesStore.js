@@ -5,6 +5,7 @@ import {
   getOrBakeGoogle3DTiles,
   restoreBakedGoogle3DTiles,
   getPreferredBakeQuality,
+  getPreferredStripGround,
   refineGoogleTilesBake,
   disposeBakeGroup,
 } from '../services/google3dTiles.js';
@@ -32,6 +33,17 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   function setQuality(q) {
     quality.value = q === 'high' || q === 'roads' ? q : 'standard';
     try { localStorage.setItem('mapng_google_bake_quality', quality.value); } catch (_) { /* private mode */ }
+  }
+
+  // true (default): street-level ground tris are stripped so the mapng
+  // terrain shows through; false: keep Google's full ground (visible when
+  // lifting the tiles with the z-offset). Part of the bake cache key —
+  // persisted so preview and exports resolve identically.
+  const stripGround = ref(getPreferredStripGround());
+
+  function setStripGround(v) {
+    stripGround.value = !!v;
+    try { localStorage.setItem('mapng_google_bake_stripground', String(stripGround.value)); } catch (_) { /* private mode */ }
   }
 
   // Manual vertical nudge (real metres) applied to the previewed mesh only —
@@ -163,7 +175,8 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
 
   return {
     status, error, show, showCameras, progress, group, apiKey, quality, zOffset,
-    refining, refineError,
-    setQuality, setZOffset, bakeForPreview, rebake, reset, tryRestore, refineFromView,
+    refining, refineError, stripGround,
+    setQuality, setZOffset, setStripGround,
+    bakeForPreview, rebake, reset, tryRestore, refineFromView,
   };
 });

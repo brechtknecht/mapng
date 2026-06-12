@@ -113,6 +113,10 @@
           <input type="range" min="30" max="110" step="1" v-model.number="flyFov" class="w-20 accent-[#FF6600]" />
           <span class="w-6 text-right tabular-nums">{{ flyFov }}°</span>
         </label>
+        <label class="flex items-center gap-1.5 text-[10px] text-gray-300 cursor-pointer" :title="t('preview.flyAutoRefineHint')">
+          <input type="checkbox" v-model="autoRefine" class="accent-[#FF6600]" />
+          {{ t('preview.flyAutoRefine') }}
+        </label>
         <button
           @click="flyMode = false"
           class="px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] font-medium rounded-md transition-colors"
@@ -411,6 +415,24 @@
                 <span class="text-[10px] text-gray-400 dark:text-gray-500">m</span>
               </div>
 
+              <label class="flex items-center gap-2 cursor-pointer group/check" :title="t('preview.googleTilesStripGroundHint')">
+                <div class="relative">
+                  <input
+                    type="checkbox"
+                    :checked="googleTilesStore.stripGround"
+                    :disabled="googleTilesStore.status === 'baking'"
+                    @change="googleTilesStore.setStripGround($event.target.checked)"
+                    class="peer sr-only"
+                  />
+                  <div
+                    class="w-7 h-4 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-[#FF6600]"
+                  ></div>
+                </div>
+                <span class="text-[10px] text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">
+                  {{ t('preview.googleTilesStripGround') }}
+                </span>
+              </label>
+
               <button
                 v-if="googleTilesStore.status === 'idle' || googleTilesStore.status === 'error'"
                 @click="googleTilesStore.bakeForPreview(terrainData)"
@@ -507,7 +529,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, watch, onErrorCaptured } from "vue";
+import { ref, computed, reactive, watch, onErrorCaptured, onUnmounted } from "vue";
 import { useI18n } from 'vue-i18n';
 import * as THREE from "three";
 import { TresCanvas } from "@tresjs/core";
@@ -550,6 +572,13 @@ watch(() => props.terrainData, (data) => {
 // the caches for a bake of the newly selected quality (instant when cached,
 // otherwise the Load button reappears).
 watch(() => googleTilesStore.quality, () => {
+  if (googleTilesStore.status === 'baking') return;
+  googleTilesStore.reset();
+  if (props.terrainData) googleTilesStore.tryRestore(props.terrainData);
+});
+
+// Ground-strip toggle is part of the bake cache key — same probe dance.
+watch(() => googleTilesStore.stripGround, () => {
   if (googleTilesStore.status === 'baking') return;
   googleTilesStore.reset();
   if (props.terrainData) googleTilesStore.tryRestore(props.terrainData);
@@ -619,6 +648,26 @@ const refineFromHud = () => {
   const pose = flyRef.value?.getPose?.();
   if (pose) refineFromPose(pose);
 };
+
+// Capture mode: refine continuously from the current view while flying —
+// one station every ~3 s (skipped while a refinement is still running).
+const autoRefine = ref(false);
+let autoRefineTimer = null;
+watch([flyMode, autoRefine], ([fm, on]) => {
+  if (autoRefineTimer) {
+    clearInterval(autoRefineTimer);
+    autoRefineTimer = null;
+  }
+  if (!fm) autoRefine.value = false;
+  if (fm && on) {
+    autoRefineTimer = setInterval(() => {
+      if (!googleTilesStore.refining) refineFromHud();
+    }, 3000);
+  }
+});
+onUnmounted(() => {
+  if (autoRefineTimer) clearInterval(autoRefineTimer);
+});
 
 const webGLAvailable = (() => {
   try {

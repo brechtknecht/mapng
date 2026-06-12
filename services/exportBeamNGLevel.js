@@ -5,7 +5,7 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { exportTer } from './exportTer.js';
 import { buildTerrainMaterials } from './osmTerrainMaterials.js';
 import { createOSMGroup, createSurroundingMeshes, SCENE_SIZE } from './export3d.js';
-import { getOrBakeGoogle3DTiles } from './google3dTiles.js';
+import { getOrBakeGoogle3DTiles, getGoogleTilesZOffset } from './google3dTiles.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import beamngGlbToDaeScript from '../scripts/beamng_glb_to_dae.py?raw';
 import { prepareCroppedTerrainData } from './cropTerrain.js';
@@ -570,10 +570,15 @@ async function generateOSMObjectsDAE(terrainData, worldSize, { hideBuildingVisua
 async function generateGoogleTilesGLB(terrainData, worldSize, googleOptions) {
   // Cached bake shared with the 3D preview — a preview-then-export flow only
   // hits the Google API once.
+  // Pass stripGround ONLY when the caller explicitly chose — otherwise the
+  // persisted preference is resolved centrally (resolveBakeOptions), exactly
+  // like the preview. Hardcoding `!== false` here forced sg=true into the
+  // cache key and silently RE-BAKED whenever the preview was keeping the
+  // ground (different key → the user's refined bake never reached the zip).
   const googleGroup = await getOrBakeGoogle3DTiles(terrainData, {
     apiKey: googleOptions.apiKey,
     errorTarget: googleOptions.errorTarget,
-    stripGround: googleOptions.stripGround !== false,
+    ...(typeof googleOptions.stripGround === 'boolean' ? { stripGround: googleOptions.stripGround } : {}),
     onProgress: googleOptions.onProgress,
   });
 
@@ -589,7 +594,14 @@ async function generateGoogleTilesGLB(terrainData, worldSize, googleOptions) {
   // which must equal BeamNG's (s·x, -s·z, y). Hence simply gX = s·x,
   // gY = y (already metres), gZ = s·z — a plain scale matrix.
   const s = worldSize / SCENE_SIZE;
-  const transformMatrix = new THREE.Matrix4().makeScale(s, 1, s);
+  // The preview's manual z-offset (real metres) ships with the export — what
+  // the user aligned visually is what lands in BeamNG (gY is metres, so the
+  // lift is a plain translation after the scale).
+  const zOffsetM = getGoogleTilesZOffset();
+  if (zOffsetM !== 0) {
+    console.log(`[BeamNG export] applying Google tiles z-offset: ${zOffsetM} m`);
+  }
+  const transformMatrix = new THREE.Matrix4().makeScale(s, 1, s).setPosition(0, zOffsetM, 0);
 
   // Transform CLONES of the tile geometries — the source group is owned by
   // the bake cache and must survive untouched for the preview / next export.

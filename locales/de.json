@@ -247,7 +247,11 @@
     "flyRefining": "Verfeinern — {visible} Kacheln geladen, {inflight} in Arbeit…",
     "flyPreparing": "Bake-Sitzung wird neu aufgebaut (einmalig nach Neustart) — Durchlauf {station}/{stations}…",
     "flyExit": "Flugmodus beenden",
-    "flyFov": "Sichtfeld"
+    "flyFov": "Sichtfeld",
+    "flyAutoRefine": "Auto (3 s)",
+    "flyAutoRefineHint": "Aufnahmemodus: verfeinert beim Fliegen alle ~3 Sekunden aus der aktuellen Ansicht",
+    "googleTilesStripGround": "Boden/Straßen entfernen (Terrain scheint durch)",
+    "googleTilesStripGroundHint": "Aus = Googles kompletten Boden inkl. Straßen behalten — nützlich mit dem Z-Versatz. Änderung backt neu (eigener Cache)."
   },
   "exportPanel": {
     "osmMissing": "OSM-Daten fehlen",

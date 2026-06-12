@@ -6,7 +6,7 @@ import { textures } from "./textureGenerator.js";
 import { createMetricProjector } from "./geoUtils.js";
 import { fetchSurroundingTiles, POSITIONS } from "./surroundingTiles.js";
 import { ColladaExporter } from './ColladaExporter.js';
-import { getOrBakeGoogle3DTiles, computeUnitsPerMeter } from './google3dTiles.js';
+import { getOrBakeGoogle3DTiles, computeUnitsPerMeter, getGoogleTilesZOffset } from './google3dTiles.js';
 
 // --- Constants & Helpers ---
 export const SCENE_SIZE = 100;
@@ -1432,21 +1432,27 @@ export const exportToGLB = async (data, options = {}) => {
 
       if (useGoogle3DTiles) {
         onProgress?.('Fetching Google Photorealistic 3D Tiles...');
+        // stripGround only when explicitly chosen by the caller — otherwise
+        // the persisted preference resolves centrally, keeping the cache key
+        // identical to the preview's (a hardcoded value here silently
+        // re-baked under a different key).
         const googleGroup = await getOrBakeGoogle3DTiles(data, {
           apiKey: googleApiKey,
           errorTarget: google3DErrorTarget,
-          stripGround: stripGoogleGround !== false,
+          ...(typeof stripGoogleGround === 'boolean' ? { stripGround: stripGoogleGround } : {}),
           onProgress: (p) => onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`),
         });
         // Clone the mesh nodes (geometry/material stay shared) — the cached
         // group is owned by the bake cache and may be parented into the 3D
         // preview scene right now; scene.add() on it directly would steal it.
         // Bake Y is metres above the .ter datum; scale by unitsPerMeter to
-        // match the scene-unit terrain mesh.
+        // match the scene-unit terrain mesh. The preview's manual z-offset
+        // (metres) ships with the export.
         const googleWrapper = new THREE.Group();
         googleWrapper.name = 'GoogleTiles3D';
         for (const child of googleGroup.children) googleWrapper.add(child.clone());
         googleWrapper.scale.y = computeUnitsPerMeter(data);
+        googleWrapper.position.y = getGoogleTilesZOffset() * computeUnitsPerMeter(data);
         scene.add(googleWrapper);
       }
     }
@@ -1528,15 +1534,16 @@ export const exportToDAE = async (data, options = {}) => {
         const googleGroup = await getOrBakeGoogle3DTiles(data, {
           apiKey: googleApiKey,
           errorTarget: google3DErrorTarget,
-          stripGround: stripGoogleGround !== false,
+          ...(typeof stripGoogleGround === 'boolean' ? { stripGround: stripGoogleGround } : {}),
           onProgress: (p) => onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`),
         });
         // Same shared-cache handling as the GLB path above: clone the mesh
-        // nodes and scale metres-Y into scene units.
+        // nodes and scale metres-Y into scene units (+ the preview z-offset).
         const googleWrapper = new THREE.Group();
         googleWrapper.name = 'GoogleTiles3D';
         for (const child of googleGroup.children) googleWrapper.add(child.clone());
         googleWrapper.scale.y = computeUnitsPerMeter(data);
+        googleWrapper.position.y = getGoogleTilesZOffset() * computeUnitsPerMeter(data);
         scene.add(googleWrapper);
       }
     }

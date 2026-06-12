@@ -248,7 +248,11 @@
     "flyRefining": "Refining — {visible} tiles loaded, {inflight} in flight…",
     "flyPreparing": "Rebuilding bake session (one-time after a restart) — pass {station}/{stations}…",
     "flyExit": "Exit fly mode",
-    "flyFov": "FOV"
+    "flyFov": "FOV",
+    "flyAutoRefine": "Auto (3s)",
+    "flyAutoRefineHint": "Capture mode: refine from the current view every ~3 seconds while flying",
+    "googleTilesStripGround": "Remove ground/streets (terrain shows through)",
+    "googleTilesStripGroundHint": "Off = keep Google's full ground incl. streets — useful with the Z-offset lift. Changing this re-bakes (separate cache)."
   },
   "exportPanel": {
     "osmMissing": "OSM Data missing",

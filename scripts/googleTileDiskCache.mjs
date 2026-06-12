@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
-import { readFile, writeFile, rename, utimes, readdir, stat, unlink } from 'node:fs/promises';
+import { readFile, writeFile, rename, utimes, readdir, stat, unlink, statfs } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -35,6 +35,14 @@ const CACHE_DIR = path.resolve(
 const maxCacheBytes = () => {
   const env = Number(process.env.MAPNG_TILE_CACHE_MB);
   return (Number.isFinite(env) && env > 0 ? env : 8192) * 1024 * 1024;
+};
+
+// The cache must never starve the rest of the pipeline of disk: exports spool
+// multi-hundred-MB zips/DAEs to the same drive (observed: ENOSPC killed a
+// Blender conversion and a zip finalize while the cache sat at 7.8 GB).
+const minFreeBytes = () => {
+  const env = Number(process.env.MAPNG_TILE_CACHE_MIN_FREE_GB);
+  return (Number.isFinite(env) && env > 0 ? env : 6) * 1024 ** 3;
 };
 
 export class TileDiskCache {
@@ -163,7 +171,24 @@ export class TileDiskCache {
     entries = entries.filter((e) => !e.tmp);
 
     entries.sort((a, b) => b.mtimeMs - a.mtimeMs); // newest first
-    const cap = maxCacheBytes();
+
+    // Effective cap = configured cap, shrunk if the DRIVE is running out of
+    // headroom (free + what we could free must stay above the floor).
+    let cap = maxCacheBytes();
+    try {
+      const fs = await statfs(CACHE_DIR);
+      const free = fs.bavail * fs.bsize;
+      const total = entries.reduce((a, e) => a + e.size, 0);
+      const diskCap = Math.max(0, free + total - minFreeBytes());
+      if (diskCap < cap) {
+        console.warn(
+          `[tileCache] low disk space (${(free / 1024 ** 3).toFixed(1)} GB free) — ` +
+          `capping cache at ${(diskCap / 1024 ** 3).toFixed(1)} GB instead of ${(cap / 1024 ** 3).toFixed(1)} GB`,
+        );
+        cap = diskCap;
+      }
+    } catch { /* statfs unavailable — keep the configured cap */ }
+
     let bytes = 0;
     let pruned = 0;
     for (const e of entries) {
