@@ -75,6 +75,7 @@ export default function zipExportPlugin() {
       files: 0,
       bytesIn: 0,
       bytesOut: 0,
+      dirsSeen: new Set(), // dir entries already written (explicit + derived)
       error: null,
       finalize: null, // Promise resolved when the output stream closes
       createdAt: Date.now(),
@@ -97,6 +98,21 @@ export default function zipExportPlugin() {
 
     console.log(`[zip-export] job ${job.id} opened`);
     return job;
+  };
+
+  // Write a dir entry for `dir` and every missing ancestor. The in-browser
+  // JSZip auto-created parent folders for every file (createFolders:true) and
+  // BeamNG's FS:directoryExists() relies on those entries being present —
+  // without them e.g. art/shapes/google_tiles/ is invisible to the game and
+  // its shape/material lookups silently fail.
+  const addDirChain = (job, dir) => {
+    const parts = dir.replace(/\\/g, '/').split('/').filter(Boolean);
+    for (let i = 1; i <= parts.length; i += 1) {
+      const d = parts.slice(0, i).join('/');
+      if (job.dirsSeen.has(d)) continue;
+      job.dirsSeen.add(d);
+      job.zipfile.addEmptyDirectory(d);
+    }
   };
 
   const readBody = (req, cap) => new Promise((resolve, reject) => {
@@ -145,9 +161,17 @@ export default function zipExportPlugin() {
             return;
           }
 
-          // POST / — open a job
+          // POST / — open a job. Body (optional JSON): { dirs: string[] } —
+          // explicit directory entries (BeamNG's FS:directoryExists() needs
+          // them in the final archive).
           if (req.method === 'POST' && segments.length === 0) {
             const job = await startJob();
+            const raw = await readBody(req, 4 * 1024 * 1024);
+            if (raw.length > 0) {
+              let dirs = [];
+              try { dirs = JSON.parse(raw.toString('utf8'))?.dirs ?? []; } catch { /* no dirs */ }
+              for (const d of dirs) addDirChain(job, String(d));
+            }
             sendJson(res, 200, { jobId: job.id });
             return;
           }
@@ -163,12 +187,34 @@ export default function zipExportPlugin() {
             }
             const entryPath = url.searchParams.get('path');
             if (!entryPath) { sendJson(res, 400, { error: 'missing ?path=' }); return; }
+            job.lastActivity = Date.now();
+            // Match JSZip's createFolders: every parent of every entry gets a
+            // dir entry, or BeamNG can't see the folder (see addDirChain).
+            const parentDir = entryPath.replace(/\\/g, '/').split('/').slice(0, -1).join('/');
+            if (parentDir) addDirChain(job, parentDir);
+            // Buffer the body and addBuffer — NOT addReadStream. Streamed
+            // entries make yazl set general-purpose bit 3 (sizes/CRC live in a
+            // trailing data descriptor, the LOCAL header says 0), and BeamNG's
+            // Torque-derived zip reader fails to load shapes from such
+            // entries (the in-game "NO MESH" placeholder). addBuffer knows
+            // CRC/sizes upfront and writes complete local headers, exactly
+            // like the in-browser JSZip did. Node Buffers are off-heap, so a
+            // transient 1+ GB body is fine for the dev-server process.
             const buf = await readBody(req, MAX_FILE_BYTES);
-            // yazl wants forward slashes; normalize defensively.
+            const size = buf.byteLength;
             job.zipfile.addBuffer(buf, entryPath.replace(/\\/g, '/'));
             job.files += 1;
-            job.bytesIn += buf.byteLength;
+            job.bytesIn += size;
             job.lastActivity = Date.now();
+            // Log big entries (and a periodic heartbeat) so the terminal shows
+            // the job is alive — these uploads dominate the wall-clock.
+            if (size >= 16 * 1024 * 1024 || job.files % 50 === 0) {
+              console.log(
+                `[zip-export] job ${job.id.slice(0, 8)} +${entryPath} ` +
+                `(${(size / 1024 ** 2).toFixed(1)} MB, ${job.files} files, ` +
+                `${(job.bytesIn / 1024 ** 2).toFixed(0)} MB total)`,
+              );
+            }
             sendJson(res, 200, { ok: true, files: job.files, bytesIn: job.bytesIn });
             return;
           }
@@ -181,6 +227,7 @@ export default function zipExportPlugin() {
             }
             job.status = 'finalizing';
             job.lastActivity = Date.now();
+            console.log(`[zip-export] job ${job.id.slice(0, 8)} finalizing: ${job.files} files, ${(job.bytesIn / 1024 ** 2).toFixed(0)} MB in → DEFLATE…`);
             job.zipfile.end();
             try {
               await job.finalize;

@@ -4616,7 +4616,19 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   beginStep(`Assembling ZIP archive (${levelName})…`, 88);
   await yield_();
 
-  const zip = new JSZip();
+  // Assemble the archive as a plain path → content recorder, NOT a JSZip:
+  // JSZip eagerly reads every Blob into a JS-heap Uint8Array at file() time
+  // (FileReader in prepareContent), so a large level — e.g. a 1+ GB Google
+  // tiles DAE — blew the renderer heap during assembly, before compression
+  // even started. Here contents keep their original form (Blobs stay
+  // browser-managed/disk-backed); the sidecar uploads them as-is, and only
+  // the prod fallback materialises a real JSZip at the very end.
+  const zipDirs = [];
+  const zipEntries = new Map(); // path → string | Blob | TypedArray
+  const zip = {
+    folder: (p) => { zipDirs.push(p); },
+    file: (p, content) => { zipEntries.set(p, content); },
+  };
   const base = `levels/${levelName}`;
 
   // Explicit directory entries so BeamNG's FS:directoryExists() works correctly
@@ -5360,17 +5372,17 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   await yield_();
 
   // Offload compression to the Node sidecar when the dev server provides it:
-  // generateAsync() allocates the compressed archive on top of the already-held
-  // JSZip object and hangs the renderer on large maps. The sidecar streams each
-  // entry out (freeing it as it goes), DEFLATEs natively to a temp file, and
-  // hands back a GET URL the UI streams straight to disk. The in-browser path
-  // below stays as the prod-build fallback.
+  // the in-browser path materialises the whole archive in the renderer heap
+  // (JSZip assembly + pako DEFLATE) and hangs large maps. The sidecar receives
+  // each entry as-is (Blobs stream from browser storage, no JS-heap copy),
+  // DEFLATEs natively to a temp file, and hands back a GET URL the UI streams
+  // straight to disk. The in-browser path below stays as the prod fallback.
   const filename = `${levelName}.zip`;
   if (await zipSidecarAvailable()) {
-    const { url, jobId } = await compressZipViaSidecar(zip, {
+    const { url, jobId } = await compressZipViaSidecar({ dirs: zipDirs, entries: zipEntries }, {
       filename,
-      // Map the per-file upload progress onto the 94→99% window so the step
-      // visibly ticks instead of sitting opaque.
+      // Map the upload progress onto the 94→99% window; the step text carries
+      // the live file/byte counters so the UI visibly ticks.
       onProgress: ({ step, pct }) => report(step, 94 + Math.round((pct / 100) * 5)),
     });
     beginStep('Done', 100);
@@ -5380,7 +5392,12 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     return { download: { url, jobId }, filename };
   }
 
-  const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
+  // Prod fallback: materialise a real JSZip from the recorder and compress
+  // in-browser. This is where the old memory ceiling still applies.
+  const realZip = new JSZip();
+  for (const dir of zipDirs) realZip.folder(dir);
+  for (const [p, content] of zipEntries) realZip.file(p, content);
+  const zipBlob = await realZip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
   console.log(`${BEAMNG_EXPORT_SERVICE_LOG} ZIP generated:`, {
     filename,
     blobType: zipBlob?.type,

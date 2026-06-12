@@ -46,49 +46,70 @@ const postJson = async (path, init) => {
   return res.json();
 };
 
+const MB = (n) => (n / 1024 ** 2).toFixed(0);
+
 /**
- * Compress an assembled JSZip via the sidecar. Streams each entry's raw bytes
- * to Node one at a time, freeing it from `zip` as it goes (so renderer memory
- * falls during compression instead of spiking), then finalizes the archive.
+ * Compress a recorded archive ({ dirs, entries }) via the sidecar. Each entry
+ * is uploaded in its ORIGINAL form — Blobs stream from browser-managed (often
+ * disk-backed) storage straight into the request body, never copied through
+ * the JS heap. This is why the export records entries instead of building a
+ * JSZip: JSZip would have eagerly read every Blob into the heap on file().
  *
- * `onProgress({ step, pct })` fires once per file (pct 0..100 over the upload),
- * giving the previously-opaque "Compressing…" step real, visible motion.
+ * `onProgress({ step, pct })` fires once per file; pct is byte-weighted (a
+ * 1 GB DAE moves the bar like 1 GB, not like one file) and the step text
+ * carries live file/byte counters so the UI visibly ticks.
  *
  * Returns `{ url, jobId, filename }` — a same-origin GET URL the caller streams
  * straight to disk; the archive is never materialised as a blob in the renderer.
  *
- * @param {import('jszip')} zip assembled JSZip instance (mutated: entries are dropped)
+ * @param {{ dirs: string[], entries: Map<string, string|Blob|ArrayBufferView> }} archive
+ *   (mutated: entries are dropped as they upload)
  * @param {{ filename: string, onProgress?: (p:{step:string,pct:number}) => void }} opts
  */
-export async function compressZipViaSidecar(zip, { filename, onProgress }) {
-  const step = 'Compressing ZIP archive (DEFLATE)…';
-  const { jobId } = await postJson('/api/zip-export', { method: 'POST' });
+export async function compressZipViaSidecar({ dirs, entries }, { filename, onProgress }) {
+  const { jobId } = await postJson('/api/zip-export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    // Explicit directory entries ride along on the open call — BeamNG's
+    // FS:directoryExists() needs them in the final archive.
+    body: JSON.stringify({ dirs: dirs ?? [] }),
+  });
 
-  // Snapshot paths up front: we delete entries as we upload, and skip the
-  // directory placeholders JSZip adds via zip.folder() (yazl needs files only).
-  const paths = Object.keys(zip.files).filter((p) => !zip.files[p].dir);
+  const paths = [...entries.keys()];
   const total = paths.length;
-  onProgress?.({ step, pct: 0 });
+  const sizeOf = (c) => (c instanceof Blob ? c.size : (c?.byteLength ?? new Blob([c]).size));
+  let totalBytes = 0;
+  for (const p of paths) totalBytes += sizeOf(entries.get(p));
+  let sentBytes = 0;
+  onProgress?.({ step: `Compressing ZIP archive (0/${total} files)…`, pct: 0 });
 
   for (let i = 0; i < total; i += 1) {
     const p = paths[i];
-    const entry = zip.files[p];
-    if (!entry) continue;
-    let bytes = await entry.async('uint8array');
+    let body = entries.get(p);
+    if (body === undefined) continue;
+    // Strings / typed arrays get wrapped once; Blobs pass through untouched.
+    if (!(body instanceof Blob)) body = new Blob([body]);
+    if (body.size > 64 * 1024 * 1024) {
+      console.info(`[zip-export] uploading large entry "${p}" (${MB(body.size)} MB)`);
+    }
     const res = await fetch(`/api/zip-export/${jobId}/file?path=${encodeURIComponent(p)}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/octet-stream' },
-      body: bytes,
+      body,
     });
     if (!res.ok) {
       let detail = '';
       try { detail = (await res.json())?.error ?? ''; } catch (_) { /* noop */ }
       throw new Error(`zip sidecar rejected "${p}" (HTTP ${res.status}${detail ? `: ${detail}` : ''})`);
     }
-    // Drop the entry so its uncompressed bytes can be GC'd before the next one.
-    bytes = null;
-    delete zip.files[p];
-    onProgress?.({ step, pct: Math.round(((i + 1) / total) * 100) });
+    sentBytes += body.size;
+    body = null;
+    // Drop the entry so the renderer can release it before the next upload.
+    entries.delete(p);
+    onProgress?.({
+      step: `Compressing ZIP archive (${i + 1}/${total} files, ${MB(sentBytes)}/${MB(totalBytes)} MB)…`,
+      pct: totalBytes > 0 ? Math.round((sentBytes / totalBytes) * 100) : 100,
+    });
   }
 
   const { bytes } = await postJson(`/api/zip-export/${jobId}/finalize`, { method: 'POST' });
