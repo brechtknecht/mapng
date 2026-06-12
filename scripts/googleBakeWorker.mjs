@@ -11,25 +11,41 @@
 //     (spawned with --max-old-space-size, see the vite plugin)
 //
 // Usage:   node googleBakeWorker.mjs <job.json> <out.bin>
-// Protocol: NDJSON on stdout ({type:'progress'|'done'|'error'}); all
-// console logging (incl. the shared core's) is redirected to stderr.
+// Protocol: NDJSON on stdout ({type:'progress'|'done'|'refined'|
+// 'refine-error'|'error'}); all console logging (incl. the shared core's) is
+// redirected to stderr.
 //
 // job.json: {
 //   data: { bounds, width, height, minHeight, heightMap: <base64 Float32 LE>,
 //           osmFeatures?: [...] },   // roads only needed for quality='roads'
 //   options: { apiKey, errorTarget?, stripGround?, groundNormalThreshold?,
 //              groundDistanceM?, cameraSweep?, quality?, sensorSize?,
-//              maxWaitMs?, stabilityMs? }
+//              maxWaitMs?, stabilityMs?, session? }
 // }
 //
-// out.bin (format 'MBK1'): u32 magic | u32 headerLen | header JSON (utf8,
-// 4-byte padded) | payload. Header.meshes[*] reference payload ranges; the
-// records carry exactly the persisted-bake schema of
-// services/googleTilesPersistentCache.js (positions/uvs/index + compressed
-// texture bytes + sampler props), so the browser restores them through the
-// same deserializeGroup path as an IndexedDB hit.
+// BAKE SESSIONS: with options.session=true (the plugin always sets it), the
+// worker does NOT exit after the base bake. The TilesRenderer stays alive —
+// warm LRU cache, full selection set, vertical anchor — and stdin accepts
+// NDJSON refine commands:
+//   { type:'refine', revision, station:{ e, n, heightM, lookE, lookN,
+//     lookHeightM, fov?, label?, maxWaitMs? } }
+// Station coordinates are ENU metres from the AOI centre; heights are metres
+// above the .ter datum (exactly the preview's scene-Y ÷ unitsPerMeter), so
+// the browser needs no knowledge of the ellipsoidal anchor. The user station
+// is swept (pinning persists), finest-covering re-runs over the UNION of all
+// sweeps so far, only newly kept tiles are transformed, and the FULL result
+// container is rewritten to a new revision path:
+//   { type:'refined', revision, resultPath, meshes, added, removed, bytes }
+//
+// out.bin (format 'MBK1'): u32 magic | u32 UNPADDED headerLen | header JSON
+// (utf8, payload 4-byte aligned) | payload. Header.meshes[*] reference
+// payload ranges; the records carry exactly the persisted-bake schema of
+// services/googleTilesPersistentCache.js, so the browser restores them
+// through the same deserializeGroup path as an IndexedDB hit.
 
 import { readFileSync, createWriteStream } from 'node:fs';
+import { unlink } from 'node:fs/promises';
+import { createInterface } from 'node:readline';
 import * as THREE from 'three';
 import {
   TilesRenderer,
@@ -45,7 +61,10 @@ import {
   selectFinestCovering,
   probeGroundAltitude,
   createTileMeshTransformer,
+  sampleHeightAtScene,
+  computeUnitsPerMeter,
 } from '../services/googleBakeCore.js';
+import { TileDiskCache } from './googleTileDiskCache.mjs';
 
 // stdout is the NDJSON protocol channel — push ALL logging to stderr,
 // including console.info calls inside the shared core.
@@ -70,7 +89,176 @@ const writeAll = (stream, buf) => new Promise((resolve, reject) => {
   stream.write(buf, (err) => (err ? reject(err) : resolve()));
 });
 
-async function bake(data, options, outPath) {
+// Throttle progress over the pipe to ~4 Hz (the sweep ticks at ~30 Hz).
+let lastProgressAt = 0;
+const onProgress = (p) => {
+  const now = performance.now();
+  if (now - lastProgressAt < 250) return;
+  lastProgressAt = now;
+  emit({ type: 'progress', ...p });
+};
+
+const startTicker = (tick) => {
+  const iv = setInterval(tick, 33);
+  return () => clearInterval(iv);
+};
+
+// Refinement pulls Google's DEEPEST tiles for ONE camera frustum, so it can
+// afford settings far more aggressive than the whole-AOI base bake — whose
+// errorTarget=5 / sensor=1024 exist only to bound TOTAL memory across every
+// station. errorTarget is the screen-space-error cap in pixels: 5 = "stop
+// when error drops below 5 px" (visibly soft + edgy vs Google Maps, which
+// renders at ~1 px on a high-res buffer). A close street-level camera plus
+// errorTarget≈1 and a 2048 px sensor is what reaches Google's finest LOD —
+// sharper textures AND finer mesh, both being functions of tile depth.
+// Tune without editing via env vars (restart the dev server to apply).
+const REFINE_ERROR_TARGET = Number(process.env.MAPNG_REFINE_ERROR_TARGET) || 1;
+const REFINE_SENSOR = Number(process.env.MAPNG_REFINE_SENSOR) || 2048;
+const REFINE_MAX_WAIT_MS = Number(process.env.MAPNG_REFINE_MAX_WAIT_MS) || 180000;
+
+/**
+ * Transform every mesh of a kept tile into result records. Buffers stay in
+ * memory for the session's lifetime so refinements never re-transform old
+ * tiles and the full container can be rewritten cheaply.
+ */
+const buildTileRecords = (session, tile) => {
+  const scene = tile.cached?.scene;
+  if (!scene) return null; // caller counts the gap
+  scene.updateMatrixWorld(true);
+  const records = [];
+  scene.traverse((node) => {
+    if (!node.isMesh || !node.geometry) return;
+    const geom = session.transformMesh(node);
+    if (!geom) return;
+
+    const srcMat = Array.isArray(node.material) ? node.material[0] : node.material;
+    const map = srcMat?.map ?? null;
+    const captured = getCapturedImage(map);
+    if (map && !captured) session.texturesMissing++;
+
+    records.push({
+      name: `google_tile_${session.recordCounter++}`,
+      positions: geom.attributes.position.array,
+      uvs: geom.attributes.uv.array,
+      index: geom.index ? geom.index.array : null,
+      texture: captured, // {bytes, mimeType} | null
+      flipY: map?.flipY ?? true,
+      wrapS: map?.wrapS ?? THREE.ClampToEdgeWrapping,
+      wrapT: map?.wrapT ?? THREE.ClampToEdgeWrapping,
+      colorSpace: map?.colorSpace ?? '',
+    });
+  });
+  return records;
+};
+
+/**
+ * Sync session.outputs (Map<tile, records[]>) with the current finest
+ * covering of the union selection. Only tiles not already in the map get
+ * transformed. Returns the diff for logging/protocol.
+ */
+const rebuildOutputs = (session) => {
+  const keep = new Set(selectFinestCovering(session.selectedTiles));
+  let added = 0;
+  let removed = 0;
+  let missingScenes = 0;
+  for (const tile of [...session.outputs.keys()]) {
+    if (!keep.has(tile)) {
+      session.outputs.delete(tile);
+      removed++;
+    }
+  }
+  for (const tile of keep) {
+    if (session.outputs.has(tile)) continue;
+    const records = buildTileRecords(session, tile);
+    if (records === null) { missingScenes++; continue; }
+    if (records.length > 0) {
+      session.outputs.set(tile, records);
+      added++;
+    }
+  }
+  if (missingScenes > 0) {
+    console.warn(
+      `[bakeWorker] ${missingScenes}/${keep.size} kept tiles lost their scenes ` +
+      '(LRU eviction) — the bake has coverage gaps.',
+    );
+  }
+  return { added, removed, kept: keep.size, missingScenes };
+};
+
+/** Rewrite the full MBK1 container from the session's current records. */
+const writeContainer = async (session, outPath) => {
+  const parts = [];
+  let payloadOffset = 0;
+  const pushPart = (bytes) => {
+    const buf = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+    const ref = { offset: payloadOffset, byteLength: buf.byteLength };
+    parts.push(buf);
+    payloadOffset += buf.byteLength;
+    const pad = (4 - (payloadOffset % 4)) % 4;
+    if (pad) {
+      parts.push(Buffer.alloc(pad));
+      payloadOffset += pad;
+    }
+    return ref;
+  };
+
+  const meshes = [];
+  for (const records of session.outputs.values()) {
+    for (const r of records) {
+      meshes.push({
+        name: r.name,
+        positions: pushPart(r.positions),
+        uvs: pushPart(r.uvs),
+        index: r.index
+          ? { ...pushPart(r.index), kind: r.index instanceof Uint32Array ? 'u32' : 'u16' }
+          : null,
+        texture: r.texture
+          ? { ...pushPart(r.texture.bytes), mimeType: r.texture.mimeType }
+          : null,
+        flipY: r.flipY,
+        wrapS: r.wrapS,
+        wrapT: r.wrapT,
+        colorSpace: r.colorSpace,
+      });
+    }
+  }
+
+  const header = Buffer.from(JSON.stringify({
+    format: 1,
+    revision: session.revision,
+    bakeStations: session.stations.map((st) => st.viz).filter(Boolean),
+    anchor: {
+      googleGroundAlt: session.googleGroundAlt,
+      mapngGroundY: session.transformMesh.mapngGroundY,
+      minHeight: session.transformMesh.minH,
+    },
+    stats: {
+      selected: session.selectedTiles.size,
+      kept: session.outputs.size,
+      stations: session.stations.length,
+      timedOut: session.lastTimedOut,
+      elapsedMs: Math.round(session.lastElapsedMs),
+    },
+    meshes,
+  }), 'utf8');
+  const headerPad = (4 - ((8 + header.byteLength) % 4)) % 4;
+
+  const fixed = Buffer.alloc(8);
+  fixed.writeUInt32LE(0x4d424b31, 0); // 'MBK1'
+  // UNPADDED length — readers align the payload start to 4 bytes themselves.
+  fixed.writeUInt32LE(header.byteLength, 4);
+
+  const stream = createWriteStream(outPath);
+  await writeAll(stream, fixed);
+  await writeAll(stream, header);
+  if (headerPad) await writeAll(stream, Buffer.alloc(headerPad));
+  for (const part of parts) await writeAll(stream, part);
+  await new Promise((resolve, reject) => stream.end((err) => (err ? reject(err) : resolve())));
+
+  return { meshes: meshes.length, bytes: 8 + header.byteLength + headerPad + payloadOffset };
+};
+
+async function startBake(data, options, outPath) {
   const {
     apiKey,
     errorTarget = 5,
@@ -102,7 +290,18 @@ async function bake(data, options, outPath) {
   const frame = computeAoiFrame(data, WGS84_ELLIPSOID);
 
   const tiles = new TilesRenderer();
-  tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: apiKey }));
+  const auth = new GoogleCloudAuthPlugin({ apiToken: apiKey });
+  // GLB content is content-addressed — serve repeat downloads (session
+  // rebuilds after a restart, quality re-bakes) from local disk.
+  const tileCache = new TileDiskCache();
+  const cacheState = await tileCache.prune();
+  console.info(
+    `[bakeWorker] tile disk cache: ${cacheState.files} files, ` +
+    `${(cacheState.bytes / 1024 ** 2).toFixed(0)} MB (${cacheState.pruned} pruned)`,
+  );
+  tileCache.wrapPlugin(auth);
+  tileCache.attach(tiles);
+  tiles.registerPlugin(auth);
   tiles.errorTarget = errorTarget;
 
   // Budgets for a dedicated child process with a multi-GB heap. Note the
@@ -133,65 +332,40 @@ async function bake(data, options, outPath) {
   tiles.setCamera(cam);
   tiles.setResolution(cam, sensorSize, sensorSize);
 
-  const startTicker = (tick) => {
-    const iv = setInterval(tick, 33);
-    return () => clearInterval(iv);
-  };
-
-  // Throttle progress over the pipe to ~4 Hz (the sweep ticks at ~30 Hz).
-  let lastProgressAt = 0;
-  const onProgress = (p) => {
-    const now = performance.now();
-    if (now - lastProgressAt < 250) return;
-    lastProgressAt = now;
-    emit({ type: 'progress', ...p });
-  };
-
-  const { selectedTiles, timedOut, elapsedMs } = await runStationSweep({
+  const selectedTiles = new Set();
+  const { timedOut, elapsedMs } = await runStationSweep({
     tiles, cam, data, frame, stations,
     ellipsoid: WGS84_ELLIPSOID,
     quality, maxWaitMs, stabilityMs,
-    startTicker, onProgress,
+    startTicker, onProgress, selectedTiles,
   });
 
-  const bakeTiles = selectFinestCovering(selectedTiles);
-
-  const bakeScenes = [];
-  let missingScenes = 0;
-  for (const tile of bakeTiles) {
-    const scene = tile.cached?.scene;
-    if (!scene) { missingScenes++; continue; }
-    scene.updateMatrixWorld(true);
-    bakeScenes.push(scene);
-  }
-  if (missingScenes > 0) {
-    console.warn(
-      `[bakeWorker] ${missingScenes}/${bakeTiles.length} selected tiles lost their scenes ` +
-      '(LRU eviction) — the bake has coverage gaps.',
-    );
-  }
-  const forEachBakeMesh = (cb) => {
-    for (const scene of bakeScenes) {
-      scene.traverse((node) => {
-        if (node.isMesh && node.geometry) cb(node);
-      });
-    }
-  };
-
   const cacheFull = typeof tiles.lruCache?.isFull === 'function' ? tiles.lruCache.isFull() : false;
+  const cs = tileCache.stats();
   console.info(
-    `[bakeWorker] ${selectedTiles.size} tiles selected across ${stations.length} stations, ` +
-    `${bakeTiles.length} kept after finest-covering dedup, in ${(elapsedMs / 1000).toFixed(1)}s ` +
-    `(errorTarget=${errorTarget}, quality=${quality}, sensor=${sensorSize}px, timedOut=${timedOut}, cacheFull=${cacheFull})`,
+    `[bakeWorker] ${selectedTiles.size} tiles selected across ${stations.length} stations ` +
+    `in ${(elapsedMs / 1000).toFixed(1)}s (errorTarget=${errorTarget}, quality=${quality}, ` +
+    `sensor=${sensorSize}px, timedOut=${timedOut}, cacheFull=${cacheFull}, ` +
+    `diskCache=${cs.hits} hits/${cs.misses} misses/${cs.unkeyed} unkeyed/${cs.hitMB} MB served locally)`,
   );
-  if (bakeScenes.length === 0) {
+  if (selectedTiles.size === 0) {
     throw new Error(
       `bake worker: 0 tiles loaded after ${(elapsedMs / 1000).toFixed(1)}s. ` +
       'Camera/LOD selection found nothing — check the API key and the AOI bounds.',
     );
   }
 
-  let googleGroundAlt = probeGroundAltitude(forEachBakeMesh, frame, WGS84_ELLIPSOID);
+  // Vertical anchor: probe over the kept tiles' scenes.
+  const keptForProbe = selectFinestCovering(selectedTiles);
+  const forEachKeptMesh = (cb) => {
+    for (const tile of keptForProbe) {
+      const scene = tile.cached?.scene;
+      if (!scene) continue;
+      scene.updateMatrixWorld(true);
+      scene.traverse((node) => { if (node.isMesh && node.geometry) cb(node); });
+    }
+  };
+  let googleGroundAlt = probeGroundAltitude(forEachKeptMesh, frame, WGS84_ELLIPSOID);
   if (googleGroundAlt === null) {
     console.warn('[bakeWorker] ground probe found no vertices near the AOI centre — vertical anchor defaults to 0');
     googleGroundAlt = 0;
@@ -205,106 +379,127 @@ async function bake(data, options, outPath) {
     `mapngGroundY=${transformMesh.mapngGroundY.toFixed(1)}m, minHeight=${transformMesh.minH.toFixed(1)}m`,
   );
 
-  // Transform every kept mesh and pack the result records. Buffers are
-  // collected with payload offsets first, then streamed to disk — no
-  // Buffer.concat of a multi-GB result.
-  const parts = [];
-  let payloadOffset = 0;
-  const pushPart = (typedArray) => {
-    const buf = Buffer.from(typedArray.buffer, typedArray.byteOffset, typedArray.byteLength);
-    const ref = { offset: payloadOffset, byteLength: buf.byteLength };
-    parts.push(buf);
-    payloadOffset += buf.byteLength;
-    const pad = (4 - (payloadOffset % 4)) % 4;
-    if (pad) {
-      parts.push(Buffer.alloc(pad));
-      payloadOffset += pad;
-    }
-    return ref;
+  const session = {
+    data, options, tiles, cam, frame, stations, selectedTiles,
+    quality, stabilityMs, tileCache,
+    googleGroundAlt, transformMesh,
+    outputs: new Map(),       // tile → records[]
+    recordCounter: 0,
+    texturesMissing: 0,
+    revision: 0,
+    lastTimedOut: timedOut,
+    lastElapsedMs: elapsedMs,
+    outBase: outPath,
+    currentResultPath: outPath,
   };
 
-  const meshes = [];
-  let texturesMissing = 0;
-  forEachBakeMesh((node) => {
-    const geom = transformMesh(node);
-    if (!geom) return;
-
-    const name = `google_tile_${meshes.length}`;
-    const srcMat = Array.isArray(node.material) ? node.material[0] : node.material;
-    const map = srcMat?.map ?? null;
-    const captured = getCapturedImage(map);
-    if (map && !captured) texturesMissing++;
-
-    const index = geom.index ? geom.index.array : null;
-    meshes.push({
-      name,
-      positions: pushPart(geom.attributes.position.array),
-      uvs: pushPart(geom.attributes.uv.array),
-      index: index
-        ? { ...pushPart(index), kind: index instanceof Uint32Array ? 'u32' : 'u16' }
-        : null,
-      texture: captured
-        ? { ...pushPart(captured.bytes), mimeType: captured.mimeType }
-        : null,
-      flipY: map?.flipY ?? true,
-      wrapS: map?.wrapS ?? THREE.ClampToEdgeWrapping,
-      wrapT: map?.wrapT ?? THREE.ClampToEdgeWrapping,
-      colorSpace: map?.colorSpace ?? '',
-    });
-  });
-
-  if (texturesMissing > 0) {
-    console.warn(`[bakeWorker] ${texturesMissing} meshes had a material map but no captured image bytes`);
+  const diff = rebuildOutputs(session);
+  if (session.texturesMissing > 0) {
+    console.warn(`[bakeWorker] ${session.texturesMissing} meshes had a material map but no captured image bytes`);
   }
-  if (meshes.length === 0) {
-    throw new Error(
-      `bake worker: ${bakeScenes.length} tiles loaded but none survived AOI clipping/ground stripping.`,
-    );
+  if (session.outputs.size === 0) {
+    throw new Error('bake worker: tiles loaded but none survived AOI clipping/ground stripping.');
   }
 
-  try { tiles.dispose(); } catch (_) { /* noop */ }
-
-  const header = Buffer.from(JSON.stringify({
-    format: 1,
-    bakeStations: stations.map((st) => st.viz).filter(Boolean),
-    stats: {
-      selected: selectedTiles.size,
-      kept: bakeTiles.length,
-      stations: stations.length,
-      timedOut,
-      cacheFull,
-      elapsedMs: Math.round(elapsedMs),
-    },
-    meshes,
-  }), 'utf8');
-  const headerPad = (4 - ((8 + header.byteLength) % 4)) % 4;
-
-  const fixed = Buffer.alloc(8);
-  fixed.writeUInt32LE(0x4d424b31, 0); // 'MBK1'
-  // UNPADDED length — readers align the payload start to 4 bytes themselves
-  // ((8 + headerLen + 3) & ~3). Padding bytes inside the parsed range would
-  // be NULs that break JSON.parse.
-  fixed.writeUInt32LE(header.byteLength, 4);
-
-  const stream = createWriteStream(outPath);
-  await writeAll(stream, fixed);
-  await writeAll(stream, header);
-  if (headerPad) await writeAll(stream, Buffer.alloc(headerPad));
-  for (const part of parts) await writeAll(stream, part);
-  await new Promise((resolve, reject) => stream.end((err) => (err ? reject(err) : resolve())));
-
-  const totalBytes = 8 + header.byteLength + headerPad + payloadOffset;
+  const { meshes, bytes } = await writeContainer(session, outPath);
   console.info(
-    `[bakeWorker] ${meshes.length} tile meshes written, ${(totalBytes / 1024 ** 2).toFixed(0)} MB, ` +
+    `[bakeWorker] ${meshes} tile meshes written (${diff.kept} tiles), ${(bytes / 1024 ** 2).toFixed(0)} MB, ` +
     `rss=${(process.memoryUsage().rss / 1024 ** 2).toFixed(0)}MB`,
   );
   emit({
     type: 'done',
-    meshes: meshes.length,
-    bytes: totalBytes,
+    meshes,
+    bytes,
     selected: selectedTiles.size,
-    kept: bakeTiles.length,
+    kept: diff.kept,
     stations: stations.length,
+    timedOut,
+    elapsedMs: Math.round(elapsedMs),
+    session: options.session === true,
+  });
+  return session;
+}
+
+/**
+ * Build a sweep station from a user camera pose. ENU metres + heights above
+ * the .ter datum come straight from the preview; the ellipsoidal conversion
+ * happens HERE with the session's anchor, so refined geometry can never
+ * float relative to the base bake.
+ */
+const buildUserStation = (session, s, revision) => {
+  const { frame, transformMesh, googleGroundAlt, data } = session;
+  for (const k of ['e', 'n', 'heightM', 'lookE', 'lookN', 'lookHeightM']) {
+    if (!Number.isFinite(s?.[k])) throw new Error(`refine station: missing/invalid '${k}'`);
+  }
+  const datumToEllipsoid = (m) => googleGroundAlt + (m - (transformMesh.mapngGroundY - transformMesh.minH));
+  const upm = computeUnitsPerMeter(data);
+  const terrainM = sampleHeightAtScene(data, s.e * upm, -s.n * upm) - transformMesh.minH;
+  return {
+    label: s.label ?? `user-${revision}`,
+    offset: frame.horiz(s.e, s.n).addScaledVector(frame.upDir, datumToEllipsoid(s.heightM)),
+    target: frame.horiz(s.lookE, s.lookN).addScaledVector(frame.upDir, datumToEllipsoid(s.lookHeightM)),
+    fov: Number.isFinite(s.fov) ? Math.min(120, Math.max(20, s.fov)) : undefined,
+    viz: { kind: 'user', e: s.e, n: s.n, aglM: s.heightM - terrainM },
+  };
+};
+
+async function refine(session, revision, stationSpec) {
+  const station = buildUserStation(session, stationSpec, revision);
+  session.stations.push(station);
+
+  // Aggressive LOD for this one frustum (see REFINE_* above). Applied to the
+  // shared tiles instance — only the user station is swept afterwards, so
+  // only its frustum refines deep; off-frustum tiles aren't visible and
+  // stay put. Persists across refinements (every refine wants max detail).
+  const errorTarget = Number.isFinite(stationSpec.errorTarget) ? stationSpec.errorTarget : REFINE_ERROR_TARGET;
+  const sensor = Number.isFinite(stationSpec.sensorSize) ? stationSpec.sensorSize : REFINE_SENSOR;
+  session.tiles.errorTarget = errorTarget;
+  session.tiles.setResolution(session.cam, sensor, sensor);
+
+  const { timedOut, elapsedMs } = await runStationSweep({
+    tiles: session.tiles,
+    cam: session.cam,
+    data: session.data,
+    frame: session.frame,
+    stations: [station],
+    ellipsoid: WGS84_ELLIPSOID,
+    quality: session.quality,
+    maxWaitMs: Number.isFinite(stationSpec.maxWaitMs) ? stationSpec.maxWaitMs : REFINE_MAX_WAIT_MS,
+    stabilityMs: session.stabilityMs,
+    startTicker,
+    onProgress,
+    selectedTiles: session.selectedTiles, // union — earlier tiles stay pinned
+    enableRoadPass: false,
+  });
+  session.lastTimedOut = timedOut;
+  session.lastElapsedMs = elapsedMs;
+  session.revision = revision;
+
+  const diff = rebuildOutputs(session);
+  const resultPath = `${session.outBase}.rev${revision}`;
+  const { meshes, bytes } = await writeContainer(session, resultPath);
+  const previous = session.currentResultPath;
+  session.currentResultPath = resultPath;
+  await unlink(previous).catch(() => { /* may be mid-download; tmp dir is cleaned with the job */ });
+
+  const cs = session.tileCache.stats();
+  console.info(
+    `[bakeWorker] refine rev${revision} (${station.label}): +${diff.added}/-${diff.removed} tiles, ` +
+    `${meshes} meshes, ${(bytes / 1024 ** 2).toFixed(0)} MB, ${(elapsedMs / 1000).toFixed(1)}s, ` +
+    `errorTarget=${errorTarget}, sensor=${sensor}px, fov=${station.fov ?? 'base'}, ` +
+    `rss=${(process.memoryUsage().rss / 1024 ** 2).toFixed(0)}MB, ` +
+    `diskCache=${cs.hits} hits/${cs.misses} misses`,
+  );
+  emit({
+    type: 'refined',
+    revision,
+    resultPath,
+    meshes,
+    bytes,
+    added: diff.added,
+    removed: diff.removed,
+    selected: session.selectedTiles.size,
+    kept: diff.kept,
     timedOut,
     elapsedMs: Math.round(elapsedMs),
   });
@@ -316,13 +511,38 @@ if (!jobPath || !outPath) {
   process.exit(2);
 }
 
+let session = null;
 try {
   const job = JSON.parse(readFileSync(jobPath, 'utf8'));
   const data = { ...job.data, heightMap: decodeFloat32(job.data.heightMap) };
-  await bake(data, job.options ?? {}, outPath);
-  process.exit(0);
+  session = await startBake(data, job.options ?? {}, outPath);
 } catch (err) {
   console.error('[bakeWorker] bake failed:', err?.stack ?? err);
   emit({ type: 'error', message: err?.message ?? String(err) });
   process.exit(1);
 }
+
+if (session.options.session !== true) {
+  process.exit(0);
+}
+
+// --- session mode: serve refine commands until stdin closes ------------------
+console.info('[bakeWorker] session alive — awaiting refine commands on stdin');
+let chain = Promise.resolve(); // refines run strictly sequentially
+const rl = createInterface({ input: process.stdin });
+rl.on('line', (line) => {
+  let cmd;
+  try { cmd = JSON.parse(line); } catch { return; }
+  if (cmd.type !== 'refine') return;
+  chain = chain.then(async () => {
+    try {
+      await refine(session, cmd.revision, cmd.station ?? {});
+    } catch (err) {
+      console.error(`[bakeWorker] refine rev${cmd.revision} failed:`, err?.stack ?? err);
+      emit({ type: 'refine-error', revision: cmd.revision, message: err?.message ?? String(err) });
+    }
+  });
+});
+rl.on('close', () => {
+  chain.then(() => process.exit(0));
+});

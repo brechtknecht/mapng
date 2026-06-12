@@ -48,7 +48,7 @@ const toBase64 = (f32) => {
 
 // Only what the worker consumes goes over the wire — never onProgress/
 // forceRebake, and osmFeatures only when the road pass will use them.
-const buildJobBody = (data, options, key, force) => {
+const buildJobBody = (data, options, key, force, ensureSession = false) => {
   const {
     apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
     cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
@@ -59,6 +59,7 @@ const buildJobBody = (data, options, key, force) => {
   return {
     key,
     force,
+    ensureSession,
     data: {
       bounds: data.bounds,
       width: data.width,
@@ -76,45 +77,61 @@ const buildJobBody = (data, options, key, force) => {
   };
 };
 
-/** Subscribe to a job's SSE stream until it reports done or error. */
-const waitForJob = (jobId, key, onProgress) => new Promise((resolve, reject) => {
-  const es = new EventSource(`/api/google-bake/${jobId}/events`);
-  let settled = false;
-  const settle = (fn, arg) => {
-    if (settled) return;
-    settled = true;
-    es.close();
-    fn(arg);
-  };
-  es.onmessage = (e) => {
-    let msg;
-    try { msg = JSON.parse(e.data); } catch { return; }
-    if (msg.type === 'progress') {
-      onProgress?.(msg);
-    } else if (msg.type === 'log') {
-      console.debug(`[google-bake] ${msg.line}`);
-    } else if (msg.type === 'done') {
-      settle(resolve, msg);
-    } else if (msg.type === 'error') {
-      settle(reject, new Error(msg.message ?? 'bake worker failed'));
-    }
-  };
-  // The stream ends without a done/error message if we subscribed after the
-  // job finished mid-replay, or the dev server restarted — check the job's
-  // terminal status before declaring the connection lost.
-  es.onerror = async () => {
-    if (settled || es.readyState !== EventSource.CLOSED) return;
-    try {
-      const res = await fetch(`/api/google-bake/jobs?key=${encodeURIComponent(key)}`);
-      const json = res.ok ? await res.json() : null;
-      if (json?.jobId === jobId && json.status === 'done') {
-        settle(resolve, { type: 'done' });
+/**
+ * Subscribe to a job's SSE stream until `terminal(msg)` classifies an event
+ * as the end of THIS wait: return {resolve: msg} or {reject: Error} to
+ * settle, undefined to keep listening. `checkAfterDrop(probe)` decides the
+ * outcome when the stream drops (dev server restart, subscribed too late).
+ */
+const waitForJobEvent = (jobId, key, onProgress, terminal, checkAfterDrop) =>
+  new Promise((resolve, reject) => {
+    const es = new EventSource(`/api/google-bake/${jobId}/events`);
+    let settled = false;
+    const settle = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      es.close();
+      fn(arg);
+    };
+    es.onmessage = (e) => {
+      let msg;
+      try { msg = JSON.parse(e.data); } catch { return; }
+      if (msg.type === 'progress') {
+        onProgress?.(msg);
         return;
       }
-    } catch (_) { /* fall through */ }
-    settle(reject, new Error('lost connection to the bake sidecar (dev server restarted?)'));
-  };
-});
+      if (msg.type === 'log') {
+        console.debug(`[google-bake] ${msg.line}`);
+        return;
+      }
+      const verdict = terminal(msg);
+      if (verdict && 'resolve' in verdict) settle(resolve, verdict.resolve);
+      else if (verdict && 'reject' in verdict) settle(reject, verdict.reject);
+    };
+    es.onerror = async () => {
+      if (settled || es.readyState !== EventSource.CLOSED) return;
+      try {
+        const res = await fetch(`/api/google-bake/jobs?key=${encodeURIComponent(key)}`);
+        const probe = res.ok ? await res.json() : null;
+        if (probe?.jobId === jobId && checkAfterDrop(probe)) {
+          settle(resolve, null);
+          return;
+        }
+      } catch (_) { /* fall through */ }
+      settle(reject, new Error('lost connection to the bake sidecar (dev server restarted?)'));
+    };
+  });
+
+/** Wait for the base bake of a job. */
+const waitForJob = (jobId, key, onProgress) => waitForJobEvent(
+  jobId, key, onProgress,
+  (msg) => {
+    if (msg.type === 'done') return { resolve: msg };
+    if (msg.type === 'error') return { reject: new Error(msg.message ?? 'bake worker failed') };
+    return undefined;
+  },
+  (probe) => probe.status === 'done',
+);
 
 const fetchAndDecodeResult = async (jobId) => {
   const res = await fetch(`/api/google-bake/${jobId}/result`);
@@ -199,6 +216,94 @@ export async function bakeViaSidecar(data, options, key, { force = false } = {})
   if (status !== 'done') {
     await waitForJob(jobId, key, options.onProgress);
   }
+  return buildGroup(key, await fetchAndDecodeResult(jobId));
+}
+
+/**
+ * Make sure a LIVE worker session exists for this key, re-baking if needed.
+ *
+ * A bake restored from IndexedDB (or whose worker was reaped/restarted away)
+ * has no session to refine against — the worker needs its warm tile cache and
+ * selection state, which only a sweep produces. This re-runs the base bake in
+ * that case (progress flows through `onProgress`, station counts > 1 reveal
+ * it's the base sweep) but never downloads the result: the displayed group is
+ * already identical, only the session state matters.
+ */
+export async function ensureSidecarSession(data, options, key, onProgress) {
+  try {
+    const probeRes = await fetch(`/api/google-bake/jobs?key=${encodeURIComponent(key)}`);
+    if (probeRes.ok && (await probeRes.json()).sessionAlive) return;
+  } catch (_) { /* fall through to POST */ }
+
+  console.info('[google-bake] no live session for this bake — re-baking once to enable refinement');
+  const body = buildJobBody(data, options, key, false, true);
+  const res = await fetch('/api/google-bake', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json())?.error ?? ''; } catch (_) { /* noop */ }
+    throw new Error(`bake sidecar rejected the session re-bake (HTTP ${res.status}${detail ? `: ${detail}` : ''})`);
+  }
+  const { jobId, status } = await res.json();
+  if (status !== 'done') {
+    await waitForJob(jobId, key, onProgress);
+  }
+}
+
+/**
+ * Refine an existing bake from a user camera station. Requires the job's
+ * worker session to still be alive (it stays resident after the base bake,
+ * holding the warm tile cache + selection state). The station is in
+ * preview-friendly units — ENU metres from the AOI centre, heights in metres
+ * above the .ter datum (scene-Y ÷ unitsPerMeter), plus the camera FOV — and
+ * the worker converts via the bake's own vertical anchor.
+ *
+ * Returns the FULL updated group (decoded from the rewritten container) and
+ * persists it to IndexedDB under the same key.
+ *
+ * @param {string} key bake cache key (same as the base bake)
+ * @param {{e:number,n:number,heightM:number,lookE:number,lookN:number,lookHeightM:number,fov?:number}} station
+ */
+export async function bakeRefinementViaSidecar(key, station, onProgress) {
+  const probeRes = await fetch(`/api/google-bake/jobs?key=${encodeURIComponent(key)}`);
+  if (!probeRes.ok) {
+    throw new Error('no bake session for this AOI — run a bake first (sessions end on dev-server restart)');
+  }
+  const { jobId, sessionAlive } = await probeRes.json();
+  if (!sessionAlive) {
+    throw new Error('the bake session has ended (dev-server restart or idle timeout) — re-bake to refine');
+  }
+
+  const res = await fetch(`/api/google-bake/${jobId}/refine`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ station }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json())?.error ?? ''; } catch (_) { /* noop */ }
+    throw new Error(`refine rejected (HTTP ${res.status}${detail ? `: ${detail}` : ''})`);
+  }
+  const { revision } = await res.json();
+
+  await waitForJobEvent(
+    jobId, key, onProgress,
+    (msg) => {
+      if (msg.type === 'refined' && msg.revision === revision) return { resolve: msg };
+      if (msg.type === 'refine-error' && msg.revision === revision) {
+        return { reject: new Error(msg.message ?? 'refinement failed') };
+      }
+      if (msg.type === 'error' || msg.type === 'session-ended') {
+        return { reject: new Error(msg.message ?? 'bake session ended during refinement') };
+      }
+      return undefined;
+    },
+    (probe) => probe.status === 'done' && probe.revision >= revision,
+  );
+
   return buildGroup(key, await fetchAndDecodeResult(jobId));
 }
 

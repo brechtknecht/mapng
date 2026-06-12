@@ -25,6 +25,7 @@ const MARKER_COLORS = {
   oblique: '#a855f7',
   grid: '#3b82f6',
   road: '#FF6600',
+  user: '#22d3ee', // fly-mode refinement stations
 };
 
 // Camera-station overlay: the bake records each station's ENU footprint
@@ -45,7 +46,7 @@ const cameraMarkers = computed(() => {
       position: [x, ((terrain - minH) + s.aglM) * u, z],
       color: MARKER_COLORS[s.kind] ?? '#ffffff',
       // Distant overview/oblique cameras get bigger dots so they stay visible.
-      radius: s.kind === 'road' ? 0.35 : s.kind === 'grid' ? 0.5 : 1.0,
+      radius: s.kind === 'road' || s.kind === 'user' ? 0.35 : s.kind === 'grid' ? 0.5 : 1.0,
     };
   });
 });

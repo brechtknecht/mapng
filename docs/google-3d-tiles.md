@@ -196,6 +196,98 @@ Properties worth knowing:
   before — in-tab bake with the old limits. Same graceful-degradation pattern
   as the Blender DAE bridge.
 
+### Fly-mode refinement (bake sessions)
+
+After the base bake the worker process **stays resident** ("bake session"):
+warm LRU cache, full selection set, vertical anchor. The 3D preview's fly
+mode turns that into interactive quality painting — fly anywhere
+first-person, press **R**, and the sidecar sweeps ONE station at your exact
+camera pose (position, direction, **your FOV**), re-runs the finest-covering
+dedup over the union of all sweeps so far, transforms only the newly kept
+tiles and rewrites the result. A refinement takes ~15–25 s instead of a full
+re-bake; superseded coarser parents are dropped, so no double geometry.
+
+#### Tutorial
+
+1. `npm run dev`, open the app, pick an AOI, generate the 3D preview.
+2. Scene Settings → *Google 3D Tiles* → **Load** (any quality tier). Wait for
+   ready.
+3. Click **Fly mode: refine by view**. Click into the scene to capture the
+   mouse: **WASD** moves, **E/Q** up/down, **Shift** boosts, **mouse wheel**
+   changes speed, the HUD slider sets your **FOV**, **ESC** releases the
+   mouse.
+4. Fly to a spot that looks mushy, frame it, press **R** (or the HUD button).
+   The HUD shows the sweep; when it finishes the group swaps in place —
+   sharper tiles exactly in that frustum. Keep flying, refine as often as
+   you like; each pass costs seconds because the session cache is warm.
+5. "Show camera positions" displays your refinement stations as **cyan**
+   markers next to the automatic ones.
+6. Exports pick up the refined bake automatically — it's the same cached
+   group, persisted to IndexedDB under the same key.
+
+Notes:
+- If the tiles came from the IndexedDB cache (page reload, dev-server
+  restart), there's no live session — the first refine transparently re-runs
+  the base sweep once (HUD: "Rebuilding bake session…"), then refines. With
+  the tile disk cache (below) that rebuild downloads NOTHING from Google.
+- Sessions are reaped after 15 min idle (`MAPNG_BAKE_SESSION_IDLE_MS`); each
+  one parks a multi-GB worker process. The bake itself survives reaping.
+- `node scripts/smokeRefineSession.mjs` exercises the whole protocol
+  headlessly (bake → 2 refines → container/anchor assertions).
+
+#### Tile disk cache
+
+The worker caches every fetched GLB under
+`node_modules/.cache/mapng-google-tiles/` (LRU, `MAPNG_TILE_CACHE_MB`,
+default 8 GB), so session rebuilds, quality switches and force re-bakes
+replay from local disk: a 1 km² standard rebuild serves ~6.8k tiles / 650 MB
+with zero Google requests, cutting the sweep from ~50 s to ~30 s (the rest is
+quiet-window detection, not I/O).
+
+**The cache canNOT key on URLs** — Google's `/files/<blob>.glb` path is an
+opaque per-session token; two sessions over the same AOI share zero paths
+(verified empirically). Keys are the tile's geometric identity instead:
+dataset id + ECEF bounding box (cm-rounded) + geometricError, which the
+tileset reproduces exactly across sessions. The URI→key mapping is recorded
+in a `requestTileContents` hook (the only place the tile object and its
+content URL meet) and consumed by the `fetchData` wrapper
+(`scripts/googleTileDiskCache.mjs`).
+
+#### Refinement reaches Google's FINEST LOD — it's not the base bake's depth
+
+The base bake runs at `errorTarget=5` / `sensor=1024–1536` — values chosen to
+bound TOTAL memory across every station over the whole AOI. A refinement
+sweeps ONE frustum, so it runs FAR more aggressively: `errorTarget=1`,
+`sensor=2048` (env-tunable, see below). That difference is the whole point —
+at `errorTarget=5` a close-up street camera pulls only *somewhat* deeper
+tiles (soft textures, edgy silhouettes vs Google Maps); `errorTarget=1` on a
+high-res buffer reaches Google's deepest tiles, sharpening textures AND mesh
+(both are functions of tile depth). The cost stays bounded because only the
+user's frustum refines — off-frustum tiles aren't visible and stay put.
+
+Tune without code edits (restart the dev server to apply):
+
+| env var | default | effect |
+|---|---|---|
+| `MAPNG_REFINE_ERROR_TARGET` | `1` | screen-space-error cap (px). Lower = deeper, until Google's max LOD floor. |
+| `MAPNG_REFINE_SENSOR` | `2048` | virtual sensor px for the refine frustum. Higher = deeper. |
+| `MAPNG_REFINE_MAX_WAIT_MS` | `180000` | per-refine budget (deep frustums download a lot cold; the disk cache makes repeats fast). |
+
+The refine log line reports the actual `errorTarget`/`sensor`/`fov` and the
+`+added/-removed` tile delta — a big `+added` confirms it reached deeper.
+
+#### Wire format
+
+`POST /api/google-bake/<id>/refine` with `{station: {e, n, heightM, lookE,
+lookN, lookHeightM, fov, errorTarget?, sensorSize?, maxWaitMs?}}` — ENU
+metres from the AOI centre, heights in metres above the `.ter` datum
+(= preview scene-Y ÷ `unitsPerMeter`); the optional last three override the
+aggressiveness per-refine. The worker converts to ECEF with the session's
+stored `googleGroundAlt`, so refined geometry can never float relative to the
+base bake. Completion is the `refined` SSE event carrying the revision;
+`GET /<id>/result` then serves the rewritten container (header `revision` +
+`anchor` fields).
+
 ### Headless-Node gotchas (the sidecar's own lessons)
 
 - **Never import the `3d-tiles-renderer` package indices in Node.** Both the

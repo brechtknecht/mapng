@@ -11,7 +11,13 @@ import {
   computeUnitsPerMeter,
 } from './googleBakeCore.js';
 import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTilesPersistentCache.js';
-import { sidecarAvailable, bakeViaSidecar, restoreSidecarBake } from './googleBakeSidecar.js';
+import {
+  sidecarAvailable,
+  bakeViaSidecar,
+  restoreSidecarBake,
+  bakeRefinementViaSidecar,
+  ensureSidecarSession,
+} from './googleBakeSidecar.js';
 
 // The geometry/station/sweep machinery lives in googleBakeCore.js (shared
 // with the headless Node bake worker). This module is the BROWSER
@@ -519,6 +525,34 @@ export async function restoreBakedGoogle3DTiles(data, options = {}) {
     `[google3dTiles] restored ${group.children.length} tile meshes from IndexedDB — no Google refetch`,
   );
   return group;
+}
+
+/**
+ * Refine the current bake from a user camera station (fly mode in the 3D
+ * preview). Requires a live sidecar bake session for this AOI/options key —
+ * the worker sweeps the station with its warm cache, merges via
+ * finest-covering and rewrites the result; we decode the full update here.
+ *
+ * Returns the NEW group and installs it as the in-memory cache entry. The
+ * caller owns the swap in the UI and must dispose the previous group
+ * afterwards via disposeBakeGroup() — disposing here would yank textures out
+ * from under the still-rendering preview.
+ */
+export async function refineGoogleTilesBake(data, options, station) {
+  const { forceRebake: _ignored, onProgress, ...bakeOptions } = resolveBakeOptions(options);
+  const key = bakeCacheKey(data, bakeOptions);
+  // A bake restored from cache has no live worker session (dev-server
+  // restart, idle reap) — transparently re-bake once to rebuild it. The
+  // result content is identical, so only the session state is fetched.
+  await ensureSidecarSession(data, bakeOptions, key, onProgress);
+  const group = await bakeRefinementViaSidecar(key, station, onProgress);
+  _bakeCache = { key, promise: Promise.resolve(group) };
+  return group;
+}
+
+/** Dispose a bake group's geometries, materials and textures (see refineGoogleTilesBake). */
+export function disposeBakeGroup(group) {
+  if (group) disposeGroup(group);
 }
 
 /** Dispose the cached bake (geometries, materials, canvas textures), if any. */

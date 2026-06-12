@@ -516,6 +516,7 @@ import { exportGeoTiff } from '../../services/exportGeoTiff';
 import { buildCommonTraceMetadata, downloadJsonFile } from '../../services/traceability';
 import { createWGS84ToLocal } from '../../services/geoUtils';
 import { exportBeamNGLevel } from '../../services/exportBeamNGLevel';
+import { disposeSidecarZip } from '../../services/zipExportSidecar';
 import { prepareCroppedTerrainData } from '../../services/cropTerrain';
 import { getBeamNGFlavorOptions } from '../../services/beamngFlavorCatalog.js';
 import { reverseLocationName } from '../../services/nominatim';
@@ -594,8 +595,10 @@ const canUseGpxzBackdrop = computed(() => props.elevationSource === 'gpxz' && !!
 const beamNGPendingDownloadUrl = ref('');
 const beamNGPendingDownloadName = ref('');
 
+// The pending URL is either a blob: URL (in-browser fallback) or a same-origin
+// sidecar result URL streamed straight to disk. Only blob: URLs need revoking.
 const clearPendingBeamNGDownload = () => {
-  if (beamNGPendingDownloadUrl.value) {
+  if (beamNGPendingDownloadUrl.value.startsWith('blob:')) {
     const urlToRevoke = beamNGPendingDownloadUrl.value;
     setTimeout(() => URL.revokeObjectURL(urlToRevoke), 120_000);
   }
@@ -1318,7 +1321,7 @@ const handleBeamNGLevelExport = async () => {
       requestedResolution: props.resolution,
     });
 
-    const { blob, filename } = await exportBeamNGLevel(td, props.center, {
+    const exportResult = await exportBeamNGLevel(td, props.center, {
       baseTexture: effectiveBaseTexture,
       includeBackdrop: effectiveIncludeBackdrop,
       backdropElevationSource: effectiveBackdropSource,
@@ -1347,27 +1350,49 @@ const handleBeamNGLevelExport = async () => {
       console.warn(`${BEAMNG_EXPORT_UI_LOG} GPXZ backdrop selected but no GPXZ key was passed to export.`);
     }
 
+    // The export returns either { download: { url, jobId }, filename } when the
+    // sidecar compressed it (stream GET → disk, never a renderer-held blob), or
+    // { blob, filename } from the in-browser fallback.
+    const { blob, download, filename } = exportResult ?? {};
     console.log(`${BEAMNG_EXPORT_UI_LOG} Export returned payload:`, {
       filename,
-      blobType: blob?.type,
+      via: download ? 'sidecar' : 'in-browser',
       blobSize: blob?.size,
-      isBlob: blob instanceof Blob,
+      downloadUrl: download?.url,
     });
 
-    if (!(blob instanceof Blob)) {
-      throw new Error('BeamNG export did not return a Blob payload.');
-    }
     if (!filename || typeof filename !== 'string') {
       throw new Error('BeamNG export did not return a valid filename.');
     }
+    if (!download && !(blob instanceof Blob)) {
+      throw new Error('BeamNG export did not return a Blob or download URL.');
+    }
 
-    console.log(`${BEAMNG_EXPORT_UI_LOG} Triggering browser download...`, {
-      filename,
-      blobType: blob.type,
-      blobSize: blob.size,
-    });
+    console.log(`${BEAMNG_EXPORT_UI_LOG} Triggering browser download...`, { filename, via: download ? 'sidecar' : 'in-browser' });
 
-    if (beamNGSaveHandle) {
+    if (download) {
+      // Sidecar path: stream the finished .zip from the dev server straight to
+      // the save location — the renderer never holds the compressed archive.
+      if (beamNGSaveHandle) {
+        try {
+          const res = await fetch(download.url);
+          if (!res.ok || !res.body) {
+            throw new Error(`sidecar result unavailable (HTTP ${res.status})`);
+          }
+          await res.body.pipeTo(await beamNGSaveHandle.createWritable());
+          console.log(`${BEAMNG_EXPORT_UI_LOG} Download streamed to disk via File System Access API.`);
+          notifyExportSuccess('beamng_level_zip', filename);
+        } finally {
+          disposeSidecarZip(download.jobId);
+        }
+      } else {
+        // No FSA: point the anchor at the same-origin result URL. The browser
+        // streams it to disk on click; the sidecar TTL-reaps the temp file.
+        beamNGPendingDownloadUrl.value = download.url;
+        beamNGPendingDownloadName.value = filename;
+        console.warn(`${BEAMNG_EXPORT_UI_LOG} Awaiting explicit anchor click for sidecar download.`);
+      }
+    } else if (beamNGSaveHandle) {
       const writable = await beamNGSaveHandle.createWritable();
       await writable.write(blob);
       await writable.close();
@@ -1407,10 +1432,13 @@ const handleBeamNGPendingDownloadClick = () => {
     urlLength: beamNGPendingDownloadUrl.value.length,
   });
 
-  // Do not clear immediately; allow browser to fully consume the blob URL.
+  // Do not clear immediately; allow the browser to fully consume the URL.
+  // A sidecar result URL is same-origin (streamed to disk) — no blob to revoke;
+  // just clear our refs. A blob: URL (in-browser fallback) must be revoked.
   const urlToRevoke = beamNGPendingDownloadUrl.value;
+  const isBlobUrl = urlToRevoke.startsWith('blob:');
   setTimeout(() => {
-    URL.revokeObjectURL(urlToRevoke);
+    if (isBlobUrl) URL.revokeObjectURL(urlToRevoke);
     if (beamNGPendingDownloadUrl.value === urlToRevoke) {
       beamNGPendingDownloadUrl.value = '';
       beamNGPendingDownloadName.value = '';

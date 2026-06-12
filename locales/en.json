@@ -237,8 +237,17 @@
     "googleTilesQualityHighHint": "25 camera stations incl. low-altitude grid — much sharper, 3-10× time/memory/requests",
     "googleTilesQualityRoads": "+Roads",
     "googleTilesShowCameras": "Show camera positions",
-    "googleTilesCamerasLegend": "white = overview · purple = oblique · blue = grid · orange = road",
-    "googleTilesQualityRoadsHint": "Ultra plus up to 40 street-level cameras along the OSM roads — Google's deepest detail in the driving corridor"
+    "googleTilesCamerasLegend": "white = overview · purple = oblique · blue = grid · orange = road · cyan = fly mode",
+    "googleTilesQualityRoadsHint": "Ultra plus up to 40 street-level cameras along the OSM roads — Google's deepest detail in the driving corridor",
+    "googleTilesFly": "Fly mode: refine by view",
+    "googleTilesFlyHint": "Fly through the scene first-person and pull Google's deepest tiles exactly where you point the camera",
+    "flyClickToLook": "Click the scene to capture the mouse",
+    "flyHudHint": "WASD move · E/Q up/down · Shift fast · wheel speed · ESC release mouse",
+    "flyRefine": "Refine this view (R)",
+    "flyRefining": "Refining — {visible} tiles loaded, {inflight} in flight…",
+    "flyPreparing": "Rebuilding bake session (one-time after a restart) — pass {station}/{stations}…",
+    "flyExit": "Exit fly mode",
+    "flyFov": "FOV"
   },
   "exportPanel": {
     "osmMissing": "OSM Data missing",

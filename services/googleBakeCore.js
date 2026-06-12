@@ -295,6 +295,12 @@ export const probeGroundAltitude = (forEachMesh, frame, ellipsoid, { stride = 1,
  *     environment's update scheduler calling `tick` (~30 Hz); returns a stop
  *     function. Browser: Web-Worker ticker (rAF is throttled in background
  *     tabs); Node: plain setInterval.
+ *   @param {Set} [params.selectedTiles] selection set from a previous sweep —
+ *     a refinement pass reuses it so earlier tiles stay pinned and the
+ *     finest-covering dedup runs over the full union.
+ *   @param {boolean} [params.enableRoadPass] append road stations after the
+ *     first station (quality 'roads' only). Refinement sweeps pass false —
+ *     their station 0 is a user camera, not the overview.
  * @returns {Promise<{selectedTiles: Set, timedOut: boolean, elapsedMs: number}>}
  */
 export async function runStationSweep({
@@ -304,10 +310,11 @@ export async function runStationSweep({
   stabilityMs = 2500,
   startTicker,
   onProgress,
+  selectedTiles = new Set(),
+  enableRoadPass = true,
 }) {
   const startedAt = performance.now();
   let timedOut = false;
-  const selectedTiles = new Set();
   // Derived from the (AOI-dependent) station count; recomputed when the
   // road pass appends stations mid-sweep.
   let bakeBudgetMs = maxWaitMs ?? (120000 + stations.length * 25000);
@@ -371,12 +378,19 @@ export async function runStationSweep({
   });
 
   const lookTarget = new THREE.Vector3();
+  const baseFov = cam.isPerspectiveCamera ? cam.fov : null;
   try {
     for (let s = 0; s < stations.length; s++) {
       cam.position.copy(frame.centerEcef).add(stations[s].offset);
       lookTarget.copy(frame.centerEcef);
       if (stations[s].target) lookTarget.add(stations[s].target);
       cam.lookAt(lookTarget);
+      // User-placed refinement stations carry their preview camera's FOV so
+      // "what you see is what gets refined" holds literally.
+      if (baseFov !== null) {
+        cam.fov = stations[s].fov ?? baseFov;
+        cam.updateProjectionMatrix();
+      }
       cam.updateMatrixWorld(true);
 
       await waitForQuiet(s);
@@ -400,7 +414,7 @@ export async function runStationSweep({
       // tiles — probe now and append the road pass to the sweep. Per-station
       // street height = centre altitude + the mapng heightmap's relative
       // elevation (the geoid offset is locally constant).
-      if (s === 0 && quality === 'roads') {
+      if (s === 0 && quality === 'roads' && enableRoadPass) {
         tiles.group.updateMatrixWorld(true);
         const centerGroundAlt = probeGroundAltitude(
           (cb) => tiles.group.traverse(cb),

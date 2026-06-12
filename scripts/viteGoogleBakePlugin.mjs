@@ -20,15 +20,22 @@ import { fileURLToPath } from 'node:url';
 //          body: { key, force?, data:{...}, options:{...} } — see the worker
 //          header. Jobs are deduped by `key` (the browser's bakeCacheKey):
 //          posting an already-running key joins that job, force kills it.
-//   GET    /jobs?key=<key>    → { jobId, status } | 404        (reattach probe)
+//   GET    /jobs?key=<key>    → { jobId, status, sessionAlive, revision } | 404
 //   GET    /<id>/events       → SSE; replays buffered events, then live.
-//          event types: progress | log | done | error
-//   GET    /<id>/result       → binary MBK1 container (see the worker)
+//          event types: progress | log | done | refined | refine-error | error
+//   GET    /<id>/result       → binary MBK1 container (latest revision)
+//   POST   /<id>/refine       → { revision }; body { station } — forwards a
+//          refine command to the job's LIVE worker session (the worker stays
+//          resident after the base bake, warm cache + selection state). The
+//          'refined' SSE event with that revision signals completion; fetch
+//          /result again for the updated container.
 //   DELETE /<id>              → kill the job's child process
 //
 // A bake job survives browser page reloads (dev HMR): the client reattaches
 // by key via /jobs and re-subscribes to /events — something the in-browser
-// bake could never do.
+// bake could never do. Idle sessions are reaped after
+// MAPNG_BAKE_SESSION_IDLE_MS (default 15 min); the result file outlives the
+// session, so restore keeps working — only refinement needs a re-bake.
 
 const WORKER_SCRIPT = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -45,6 +52,11 @@ const heapMb = () => {
 
 const MAX_BODY_BYTES = 512 * 1024 * 1024;
 const MAX_FINISHED_JOBS = 3; // result files in tmp are big — prune like the IndexedDB cache
+const MAX_BUFFERED_EVENTS = 1500; // SSE replay buffer cap per job
+const SESSION_IDLE_MS = (() => {
+  const env = Number(process.env.MAPNG_BAKE_SESSION_IDLE_MS);
+  return Number.isFinite(env) && env > 0 ? env : 15 * 60 * 1000;
+})();
 
 const sendJson = (res, status, obj) => {
   res.statusCode = status;
@@ -60,6 +72,7 @@ export default function googleBakePlugin() {
 
   const pushEvent = (job, event) => {
     job.events.push(event);
+    if (job.events.length > MAX_BUFFERED_EVENTS) job.events.splice(0, 500);
     const line = `data: ${JSON.stringify(event)}\n\n`;
     for (const res of job.listeners) res.write(line);
   };
@@ -76,8 +89,9 @@ export default function googleBakePlugin() {
   };
 
   const pruneFinished = () => {
+    // Live sessions are exempt — their worker holds the warm bake state.
     const finished = [...jobs.values()]
-      .filter((j) => j.status !== 'running')
+      .filter((j) => j.status !== 'running' && !j.sessionAlive)
       .sort((a, b) => a.finishedAt - b.finishedAt);
     while (finished.length > MAX_FINISHED_JOBS) {
       const oldest = finished.shift();
@@ -99,6 +113,11 @@ export default function googleBakePlugin() {
       error: null,
       startedAt: Date.now(),
       finishedAt: 0,
+      // Live-session state (worker stays resident after the base bake).
+      sessionAlive: false,
+      revision: 0,
+      refineRevision: 0,
+      lastActivity: Date.now(),
     };
     jobs.set(job.id, job);
     byKey.set(job.key, job.id);
@@ -106,14 +125,24 @@ export default function googleBakePlugin() {
     job.workDir = await mkdtemp(path.join(tmpdir(), 'mapng-google-bake-'));
     const jobPath = path.join(job.workDir, 'job.json');
     job.outPath = path.join(job.workDir, 'out.bin');
-    await writeFile(jobPath, JSON.stringify({ data: body.data, options: body.options ?? {} }));
+    await writeFile(jobPath, JSON.stringify({
+      data: body.data,
+      // session:true keeps the worker alive for refine commands.
+      options: { ...(body.options ?? {}), session: true },
+    }));
 
     const heap = heapMb();
     console.log(`[google-bake] job ${job.id} starting (heap=${heap}MB, key=${job.key})`);
+    // Clean env: tooling that wraps the dev server (preview harnesses,
+    // debuggers) injects NODE_OPTIONS/inspect flags that can crash or hang a
+    // plain Node child — the worker needs none of it.
+    const childEnv = { ...process.env };
+    delete childEnv.NODE_OPTIONS;
+    delete childEnv.NODE_INSPECT_RESUME_ON_START;
     const child = spawn(
       process.execPath,
       [`--max-old-space-size=${heap}`, WORKER_SCRIPT, jobPath, job.outPath],
-      { stdio: ['ignore', 'pipe', 'pipe'] },
+      { stdio: ['pipe', 'pipe', 'pipe'], env: childEnv },
     );
     job.child = child;
 
@@ -129,15 +158,37 @@ export default function googleBakePlugin() {
         let msg;
         try { msg = JSON.parse(line); } catch { continue; }
         if (msg.type === 'done') {
+          // In session mode the worker stays alive after 'done' — flip the
+          // job state NOW, not on child exit.
           job.stats = msg;
+          job.status = 'done';
+          job.finishedAt = Date.now();
+          job.lastActivity = Date.now();
+          job.sessionAlive = msg.session === true;
+          pushEvent(job, msg);
+          console.log(
+            `[google-bake] job ${job.id} done: ${msg.meshes} meshes, ` +
+            `${(msg.bytes / 1024 ** 2).toFixed(0)} MB${job.sessionAlive ? ' (session alive)' : ''}`,
+          );
+          pruneFinished();
+        } else if (msg.type === 'refined') {
+          job.revision = msg.revision;
+          job.outPath = msg.resultPath;
+          job.lastActivity = Date.now();
+          pushEvent(job, msg);
+          console.log(
+            `[google-bake] job ${job.id} refined rev${msg.revision}: ` +
+            `+${msg.added}/-${msg.removed} tiles, ${msg.meshes} meshes, ${(msg.bytes / 1024 ** 2).toFixed(0)} MB`,
+          );
+        } else if (msg.type === 'refine-error') {
+          job.lastActivity = Date.now();
+          pushEvent(job, msg);
+          console.warn(`[google-bake] job ${job.id} refine rev${msg.revision} failed: ${msg.message}`);
         } else if (msg.type === 'error') {
           job.error = msg.message;
-        }
-        if (msg.type === 'progress') {
+        } else if (msg.type === 'progress') {
           pushEvent(job, msg);
         }
-        // done/error events are pushed from the 'close' handler below, once
-        // the exit code confirms them.
       }
     });
 
@@ -167,18 +218,19 @@ export default function googleBakePlugin() {
     });
 
     child.on('close', (code) => {
-      if (job.status !== 'running') return; // spawn error already handled
-      job.finishedAt = Date.now();
-      if (code === 0 && job.stats) {
-        job.status = 'done';
-        pushEvent(job, { ...job.stats }); // type:'done'
-        console.log(`[google-bake] job ${job.id} done: ${job.stats.meshes} meshes, ${(job.stats.bytes / 1024 ** 2).toFixed(0)} MB`);
-      } else {
+      const wasSession = job.sessionAlive;
+      job.sessionAlive = false;
+      if (job.status === 'running') {
+        // Worker died before reporting done.
+        job.finishedAt = Date.now();
         job.status = 'error';
         job.error ??= `bake worker exited with code ${code}` +
           (stderrTail ? ` — last output:${stderrTail.slice(-1500)}` : '');
         pushEvent(job, { type: 'error', message: job.error });
         console.warn(`[google-bake] job ${job.id} failed: ${job.error.slice(0, 300)}`);
+      } else if (wasSession) {
+        console.log(`[google-bake] job ${job.id} session ended (exit ${code}) — result stays restorable`);
+        pushEvent(job, { type: 'session-ended' });
       }
       finishListeners(job);
       pruneFinished();
@@ -188,14 +240,20 @@ export default function googleBakePlugin() {
   };
 
   const killJob = (job, reason) => {
-    if (job.status === 'running' && job.child) {
+    if (job.status === 'running') {
       console.log(`[google-bake] killing job ${job.id} (${reason})`);
       job.status = 'error';
       job.error = `cancelled (${reason})`;
       job.finishedAt = Date.now();
       pushEvent(job, { type: 'error', message: job.error });
       finishListeners(job);
-      try { job.child.kill(); } catch { /* already gone */ }
+      try { job.child?.kill(); } catch { /* already gone */ }
+    } else if (job.sessionAlive) {
+      // Finished bake with a live session — end the worker; the 'close'
+      // handler flips sessionAlive and notifies subscribers.
+      console.log(`[google-bake] ending session of job ${job.id} (${reason})`);
+      try { job.child?.stdin?.end(); } catch { /* noop */ }
+      try { job.child?.kill(); } catch { /* already gone */ }
     }
   };
 
@@ -220,8 +278,21 @@ export default function googleBakePlugin() {
     configureServer(server) {
       // Kill bake children when the dev server shuts down/restarts.
       server.httpServer?.on('close', () => {
+        clearInterval(reaper);
         for (const job of jobs.values()) killJob(job, 'dev server shutdown');
       });
+
+      // Reap idle sessions — each holds a multi-GB worker process. The
+      // result file survives, so restores keep working; only refinement
+      // needs a fresh bake afterwards.
+      const reaper = setInterval(() => {
+        for (const job of jobs.values()) {
+          if (job.sessionAlive && Date.now() - job.lastActivity > SESSION_IDLE_MS) {
+            killJob(job, `idle ${Math.round(SESSION_IDLE_MS / 60000)} min`);
+          }
+        }
+      }, 60000);
+      reaper.unref?.();
 
       server.middlewares.use('/api/google-bake', (req, res) => {
         const url = new URL(req.url, 'http://localhost');
@@ -240,19 +311,32 @@ export default function googleBakePlugin() {
             const jobId = key && byKey.get(key);
             const job = jobId && jobs.get(jobId);
             if (!job) { sendJson(res, 404, { error: 'no job for key' }); return; }
-            sendJson(res, 200, { jobId: job.id, status: job.status });
+            sendJson(res, 200, {
+              jobId: job.id,
+              status: job.status,
+              sessionAlive: job.sessionAlive,
+              revision: job.revision,
+            });
             return;
           }
 
-          // POST / — start or join a job
+          // POST / — start or join a job. body.ensureSession=true means the
+          // caller needs a LIVE session (fly-mode refinement): a finished job
+          // whose worker has died is then re-baked instead of joined.
           if (req.method === 'POST' && segments.length === 0) {
             const body = JSON.parse((await readBody(req)).toString('utf8'));
             const existingId = body.key && byKey.get(body.key);
             const existing = existingId && jobs.get(existingId);
             if (existing && !body.force) {
-              if (existing.status === 'running' || existing.status === 'done') {
+              const joinable = existing.status === 'running' ||
+                (existing.status === 'done' && (existing.sessionAlive || !body.ensureSession));
+              if (joinable) {
                 sendJson(res, 200, { jobId: existing.id, status: existing.status, joined: true });
                 return;
+              }
+              if (existing.status === 'done') {
+                console.log(`[google-bake] job ${existing.id} has no live session — re-baking for refinement`);
+                await cleanupJob(existing);
               }
             }
             if (existing && body.force) {
@@ -275,7 +359,9 @@ export default function googleBakePlugin() {
             res.setHeader('Connection', 'keep-alive');
             res.write(':ok\n\n');
             for (const event of job.events) res.write(`data: ${JSON.stringify(event)}\n\n`);
-            if (job.status !== 'running') { res.end(); return; }
+            // Keep the stream open while the worker can still emit — i.e.
+            // while the bake runs OR a live session may produce refinements.
+            if (job.status !== 'running' && !job.sessionAlive) { res.end(); return; }
             job.listeners.add(res);
             const heartbeat = setInterval(() => res.write(':hb\n\n'), 15000);
             req.on('close', () => {
@@ -285,17 +371,36 @@ export default function googleBakePlugin() {
             return;
           }
 
-          // GET /<id>/result — stream the MBK1 container
+          // GET /<id>/result — stream the MBK1 container (latest revision)
           if (req.method === 'GET' && segments[1] === 'result') {
             if (job.status !== 'done') {
               sendJson(res, job.status === 'running' ? 409 : 410, { error: `job is ${job.status}`, detail: job.error });
               return;
             }
+            job.lastActivity = Date.now();
             const size = statSync(job.outPath).size;
             res.statusCode = 200;
             res.setHeader('Content-Type', 'application/octet-stream');
             res.setHeader('Content-Length', String(size));
             createReadStream(job.outPath).pipe(res);
+            return;
+          }
+
+          // POST /<id>/refine — forward a user station to the live session
+          if (req.method === 'POST' && segments[1] === 'refine') {
+            if (!job.sessionAlive || !job.child?.stdin?.writable) {
+              sendJson(res, 409, {
+                error: 'no live bake session for this job — re-bake to refine ' +
+                  '(sessions end on dev-server restart or after idling)',
+              });
+              return;
+            }
+            const body = JSON.parse((await readBody(req)).toString('utf8'));
+            const revision = ++job.refineRevision;
+            job.lastActivity = Date.now();
+            job.child.stdin.write(`${JSON.stringify({ type: 'refine', revision, station: body.station ?? {} })}\n`);
+            console.log(`[google-bake] job ${job.id} refine rev${revision} queued (${JSON.stringify(body.station ?? {}).slice(0, 120)})`);
+            sendJson(res, 200, { revision });
             return;
           }
 

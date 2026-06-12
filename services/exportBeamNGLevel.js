@@ -29,6 +29,7 @@ import {
 } from './junctionGeometry.js';
 import { generateJunctionsDAE } from './junctionMesh.js';
 import { detectGapJunctions } from './junctionRaster.js';
+import { zipSidecarAvailable, compressZipViaSidecar } from './zipExportSidecar.js';
 import {
   getBeamNGFlavorById,
   getGlobalEnvironmentMap,
@@ -5357,9 +5358,31 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
 
   beginStep('Compressing ZIP archive (DEFLATE)…', 94);
   await yield_();
+
+  // Offload compression to the Node sidecar when the dev server provides it:
+  // generateAsync() allocates the compressed archive on top of the already-held
+  // JSZip object and hangs the renderer on large maps. The sidecar streams each
+  // entry out (freeing it as it goes), DEFLATEs natively to a temp file, and
+  // hands back a GET URL the UI streams straight to disk. The in-browser path
+  // below stays as the prod-build fallback.
+  const filename = `${levelName}.zip`;
+  if (await zipSidecarAvailable()) {
+    const { url, jobId } = await compressZipViaSidecar(zip, {
+      filename,
+      // Map the per-file upload progress onto the 94→99% window so the step
+      // visibly ticks instead of sitting opaque.
+      onProgress: ({ step, pct }) => report(step, 94 + Math.round((pct / 100) * 5)),
+    });
+    beginStep('Done', 100);
+    finishProcessingLog();
+    console.log(`${BEAMNG_EXPORT_SERVICE_LOG} ZIP compressed via sidecar:`, { filename, jobId, url });
+    console.log(`${BEAMNG_EXPORT_SERVICE_LOG} Completed exportBeamNGLevel`);
+    return { download: { url, jobId }, filename };
+  }
+
   const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
   console.log(`${BEAMNG_EXPORT_SERVICE_LOG} ZIP generated:`, {
-    filename: `${levelName}.zip`,
+    filename,
     blobType: zipBlob?.type,
     blobSize: zipBlob?.size,
     levelName,
@@ -5367,5 +5390,5 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
   beginStep('Done', 100);
   finishProcessingLog();
   console.log(`${BEAMNG_EXPORT_SERVICE_LOG} Completed exportBeamNGLevel`);
-  return { blob: zipBlob, filename: `${levelName}.zip` };
+  return { blob: zipBlob, filename };
 }

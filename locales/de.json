@@ -236,8 +236,17 @@
     "googleTilesQualityHighHint": "25 Kamera-Stationen inkl. Tiefflug-Raster — deutlich schärfer, 3–10× Zeit/Speicher/Anfragen",
     "googleTilesQualityRoads": "+Straßen",
     "googleTilesShowCameras": "Kamerapositionen anzeigen",
-    "googleTilesCamerasLegend": "weiß = Übersicht · lila = schräg · blau = Raster · orange = Straße",
-    "googleTilesQualityRoadsHint": "Ultra plus bis zu 40 Straßenkameras entlang der OSM-Straßen — Googles höchstes Detail im Fahrkorridor"
+    "googleTilesCamerasLegend": "weiß = Übersicht · lila = schräg · blau = Raster · orange = Straße · cyan = Flugmodus",
+    "googleTilesQualityRoadsHint": "Ultra plus bis zu 40 Straßenkameras entlang der OSM-Straßen — Googles höchstes Detail im Fahrkorridor",
+    "googleTilesFly": "Flugmodus: Ansicht verfeinern",
+    "googleTilesFlyHint": "In Ego-Perspektive durch die Szene fliegen und Googles tiefste Kacheln genau dort laden, wohin die Kamera zeigt",
+    "flyClickToLook": "In die Szene klicken, um die Maus zu fangen",
+    "flyHudHint": "WASD bewegen · E/Q hoch/runter · Shift schnell · Mausrad Tempo · ESC gibt Maus frei",
+    "flyRefine": "Diese Ansicht verfeinern (R)",
+    "flyRefining": "Verfeinern — {visible} Kacheln geladen, {inflight} in Arbeit…",
+    "flyPreparing": "Bake-Sitzung wird neu aufgebaut (einmalig nach Neustart) — Durchlauf {station}/{stations}…",
+    "flyExit": "Flugmodus beenden",
+    "flyFov": "Sichtfeld"
   },
   "exportPanel": {
     "osmMissing": "OSM-Daten fehlen",

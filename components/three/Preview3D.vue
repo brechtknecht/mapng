@@ -63,6 +63,7 @@
             />
 
             <OrbitControls
+              v-if="!flyMode"
               ref="controlsRef"
               make-default
               :min-distance="1"
@@ -72,6 +73,13 @@
               :enable-damping="true"
               :damping-factor="0.05"
             />
+            <FlyControls3D
+              v-if="flyMode"
+              ref="flyRef"
+              :fov="flyFov"
+              @refine="refineFromPose"
+              @locked-change="flyLocked = $event"
+            />
           </TresGroup>
         </template>
         <template #fallback>
@@ -79,6 +87,55 @@
         </template>
       </Suspense>
     </TresCanvas>
+
+    <!-- Fly-mode HUD -->
+    <div
+      v-if="flyMode"
+      class="absolute top-4 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 pointer-events-none"
+    >
+      <div
+        v-if="!flyLocked"
+        class="px-3 py-1.5 bg-black/70 backdrop-blur rounded-md text-xs text-white font-medium pointer-events-none"
+      >
+        {{ t('preview.flyClickToLook') }}
+      </div>
+      <div class="flex items-center gap-3 px-4 py-2.5 bg-black/70 backdrop-blur rounded-lg shadow-xl pointer-events-auto">
+        <button
+          @click="refineFromHud"
+          :disabled="googleTilesStore.refining"
+          class="flex items-center gap-1.5 px-3 py-1.5 bg-[#FF6600] hover:bg-[#e65c00] disabled:bg-gray-600 disabled:cursor-wait text-white text-xs font-bold rounded-md transition-colors"
+        >
+          <Crosshair :size="13" />
+          {{ t('preview.flyRefine') }}
+        </button>
+        <label class="flex items-center gap-1.5 text-[10px] text-gray-300">
+          {{ t('preview.flyFov') }}
+          <input type="range" min="30" max="110" step="1" v-model.number="flyFov" class="w-20 accent-[#FF6600]" />
+          <span class="w-6 text-right tabular-nums">{{ flyFov }}°</span>
+        </label>
+        <button
+          @click="flyMode = false"
+          class="px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] font-medium rounded-md transition-colors"
+        >
+          {{ t('preview.flyExit') }}
+        </button>
+      </div>
+      <div class="px-3 py-1 bg-black/50 backdrop-blur rounded text-[10px] text-gray-300 pointer-events-none">
+        <template v-if="googleTilesStore.refining">
+          <!-- stations > 1 = the one-time base re-sweep that rebuilds a dead
+               worker session; a refinement sweep is always a single station -->
+          {{ googleTilesStore.progress.stations > 1
+            ? t('preview.flyPreparing', { station: googleTilesStore.progress.station, stations: googleTilesStore.progress.stations })
+            : t('preview.flyRefining', { visible: googleTilesStore.progress.visible, inflight: googleTilesStore.progress.inflight }) }}
+        </template>
+        <template v-else-if="googleTilesStore.refineError">
+          <span class="text-red-400">{{ googleTilesStore.refineError }}</span>
+        </template>
+        <template v-else>
+          {{ t('preview.flyHudHint') }}
+        </template>
+      </div>
+    </div>
 
     <!-- Toggle Tab -->
     <button
@@ -388,6 +445,19 @@
                   {{ t('preview.googleTilesCamerasLegend') }}
                 </p>
                 <button
+                  @click="flyMode = !flyMode"
+                  :title="t('preview.googleTilesFlyHint')"
+                  :class="[
+                    'w-full flex items-center justify-center gap-2 py-1.5 text-xs font-bold rounded-md transition-colors',
+                    flyMode
+                      ? 'bg-gray-900 dark:bg-gray-700 hover:bg-black dark:hover:bg-gray-600 text-white'
+                      : 'bg-[#FF6600] hover:bg-[#e65c00] text-white',
+                  ]"
+                >
+                  <Plane :size="14" />
+                  {{ flyMode ? t('preview.flyExit') : t('preview.googleTilesFly') }}
+                </button>
+                <button
                   @click="googleTilesStore.rebake(terrainData)"
                   class="text-[10px] text-gray-400 dark:text-gray-500 hover:text-[#FF6600] underline"
                 >
@@ -425,6 +495,8 @@ import {
   RotateCcw,
   ChevronLeft,
   ChevronRight,
+  Plane,
+  Crosshair,
 } from "lucide-vue-next";
 
 const { t } = useI18n({ useScope: 'global' });
@@ -432,9 +504,11 @@ import TerrainMesh from "./TerrainMesh.vue";
 import MapngFlag3D from "./MapngFlag3D.vue";
 import OSMFeatures3D from "./OSMFeatures3D.vue";
 import GoogleTiles3D from "./GoogleTiles3D.vue";
+import FlyControls3D from "./FlyControls3D.vue";
 import CSMLight from "./CSMLight.vue";
 import SurroundingTerrain3D from "./SurroundingTerrain3D.vue";
 import { useGoogleTilesStore } from "../../stores/googleTilesStore.js";
+import { computeUnitsPerMeter } from "../../services/google3dTiles.js";
 
 const props = defineProps(["terrainData"]);
 
@@ -476,6 +550,51 @@ watch(
 );
 
 const controlsRef = ref(null);
+
+// --- Fly mode: ego-camera refinement of the Google tiles bake --------------
+const flyMode = ref(false);
+const flyLocked = ref(false);
+const flyFov = ref(70);
+const flyRef = ref(null);
+
+// Leaving the ready state (re-bake, AOI change) ends fly mode.
+watch(() => googleTilesStore.status, (s) => {
+  if (s !== 'ready') flyMode.value = false;
+});
+
+/**
+ * Camera pose (scene coords) → refinement station (worker wire format):
+ * ENU metres from the AOI centre + heights in metres above the .ter datum.
+ * The preview scene is metrically uniform at `unitsPerMeter` (X/Z native
+ * scene units, Y pre-scaled), so it's a pure division; north is -Z.
+ */
+const refineFromPose = (pose) => {
+  const data = props.terrainData;
+  if (!data?.bounds || googleTilesStore.refining) return;
+  const upm = computeUnitsPerMeter(data);
+  const [px, py, pz] = pose.position;
+  const [dx, dy, dz] = pose.direction;
+  // Aim point ~60 m ahead — far enough that the frustum, not the point,
+  // defines what refines.
+  const aheadScene = 60 * upm;
+  const lx = px + dx * aheadScene;
+  const ly = py + dy * aheadScene;
+  const lz = pz + dz * aheadScene;
+  googleTilesStore.refineFromView(data, {
+    e: px / upm,
+    n: -pz / upm,
+    heightM: py / upm,
+    lookE: lx / upm,
+    lookN: -lz / upm,
+    lookHeightM: ly / upm,
+    fov: pose.fov,
+  });
+};
+
+const refineFromHud = () => {
+  const pose = flyRef.value?.getPose?.();
+  if (pose) refineFromPose(pose);
+};
 
 const webGLAvailable = (() => {
   try {
