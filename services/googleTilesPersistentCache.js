@@ -96,7 +96,10 @@ const serializeGroup = async (group) => {
   });
 };
 
-const deserializeGroup = async (meshes) => {
+// Exported: the Node bake sidecar produces these same records (compressed
+// texture blob + raw attribute arrays), so its results restore through this
+// exact path too.
+export const deserializeGroup = async (meshes) => {
   const out = new THREE.Group();
   out.name = 'GoogleTiles3D';
   const built = await mapLimit(meshes, 16, async (m) => {
@@ -154,15 +157,17 @@ export async function loadPersistedBake(key) {
   return group;
 }
 
-/** Persist a baked group. Returns the approximate payload size in bytes. */
-export async function persistBake(key, group) {
+/**
+ * Persist pre-serialized mesh records (the schema serializeGroup produces and
+ * the bake sidecar emits). Returns the approximate payload size in bytes.
+ */
+export async function persistBakeRecords(key, meshes, stations = null) {
   if (!hasIdb()) return null;
-  const meshes = await serializeGroup(group);
   await idbPut(key, {
     createdAt: Date.now(),
     meshes,
     // Camera-station footprints for the preview overlay.
-    stations: group.userData?.bakeStations ?? null,
+    stations,
   });
 
   let bytes = 0;
@@ -182,6 +187,13 @@ export async function persistBake(key, group) {
   }
   await idbPut(META_KEY, meta);
   return bytes;
+}
+
+/** Persist a baked group. Returns the approximate payload size in bytes. */
+export async function persistBake(key, group) {
+  if (!hasIdb()) return null;
+  const meshes = await serializeGroup(group);
+  return persistBakeRecords(key, meshes, group.userData?.bakeStations ?? null);
 }
 
 /** Drop one persisted bake (used by force re-bake). */

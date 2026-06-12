@@ -3,6 +3,7 @@ import vue from '@vitejs/plugin-vue';
 import { templateCompilerOptions } from '@tresjs/core';
 import { execSync } from 'child_process';
 import blenderDaePlugin from './scripts/viteBlenderDaePlugin.mjs';
+import googleBakePlugin from './scripts/viteGoogleBakePlugin.mjs';
 
 const commitHash = (() => {
   try {
@@ -20,7 +21,11 @@ export default defineConfig({
     }),
     // POST /api/convert-dae: GLB → BeamNG .dae via headless Blender, so the
     // BeamNG export can bundle the final google_tiles.dae automatically.
-    blenderDaePlugin()
+    blenderDaePlugin(),
+    // /api/google-bake/*: Google 3D Tiles bake sidecar — runs heavy bakes in
+    // a Node child process with a multi-GB heap instead of the 4 GB-capped
+    // browser tab. The browser falls back to the in-tab bake when absent.
+    googleBakePlugin()
   ],
   optimizeDeps: {
     exclude: ['geotiff'],

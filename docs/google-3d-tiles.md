@@ -102,7 +102,13 @@ script for the manual command.
 
 | File | Responsibility |
 |---|---|
-| `services/google3dTiles.js` | Headless tile fetcher. Sweeps a virtual camera through 5 stations, snapshots each tile's texture to a standalone canvas before disposing the renderer, transforms ECEF → mapng coords, clips to AOI, strips street-level ground tris. Owns the bake caches (in-memory + IndexedDB). |
+| `services/googleBakeCore.js` | **Shared, DOM-free bake core** (browser + Node): AOI frame, sweep stations (incl. road pass), the station sweep engine (pinning, quiet detection, budgets), finest-covering dedup, ground probes, ECEF→mapng vertex transform + AOI clip + ground strip. The hard-won bake semantics live HERE, once. |
+| `services/google3dTiles.js` | Browser orchestrator around the core: Web-Worker ticker (anti-throttling), decoded-texture canvas snapshots, bake caches (in-memory + IndexedDB), and the routing front-end `getOrBakeGoogle3DTiles()` (sidecar when reachable, in-tab bake otherwise). |
+| `services/googleBakeSidecar.js` | Browser client for the bake sidecar: health probe, job POST (joins running jobs by cache key), SSE progress, MBK1 result decode → `deserializeGroup()`, IndexedDB persist. |
+| `scripts/googleBakeWorker.mjs` | Headless Node bake worker (child process): same shared-core pipeline, no texture decode — raw JPEG bytes pass from Google's GLB straight into the result. NDJSON protocol on stdout. Also runnable standalone for debugging. |
+| `scripts/viteGoogleBakePlugin.mjs` | Vite dev-server job API `/api/google-bake/*`: spawns the worker with a multi-GB heap, dedupes jobs by bake key, relays progress via SSE, streams results. Jobs survive page reloads. |
+| `scripts/headlessTilesEnv.mjs` + `scripts/headlessTilesHooks.mjs` | Make `3d-tiles-renderer` importable in Node: DOM polyfills, a resolve hook around the WebGL-at-module-scope plugins index, deep file imports, and the texture-capture GLTFLoader. |
+| `scripts/spikeHeadlessTiles.mjs` | Standalone headless smoke test (`node scripts/spikeHeadlessTiles.mjs [lat lng extentM]`) — two-station selection + texture capture against the live API. |
 | `services/exportBeamNGLevel.js` | `generateGoogleTilesGLB()` (atlas + chunking + GLTFExporter) + zip-writer wiring for the `art/shapes/google_tiles/` folder; hides OSM building visuals (keeps their collision) when Google tiles are on. |
 | `scripts/beamng_glb_to_dae.py` | Headless Blender (≤4.2!) converter: sanitizes names, builds `base00 > start01`, exports the BeamNG-proven Collada. Shipped in the zip when the bridge is unavailable. |
 | `scripts/viteBlenderDaePlugin.mjs` | Vite dev-server middleware `POST /api/convert-dae` — runs the converter automatically during export. |
@@ -135,7 +141,7 @@ Errors render inline with a retry button; without `VITE_GOOGLE_MAPS_API_KEY` the
 shows a setup hint instead.
 
 The preview, the BeamNG export and the GLB/DAE exports all go through
-`getOrBakeGoogle3DTiles()`, which layers two caches:
+`getOrBakeGoogle3DTiles()`, which layers two caches and then routes the bake:
 
 1. **In-memory** (single entry, keyed by AOI bounds + resolution + bake options) —
    shared within the session; preview-then-export bakes once.
@@ -147,6 +153,66 @@ The preview, the BeamNG export and the GLB/DAE exports all go through
    "Re-bake" purges both layers for the current key.
    ⚠️ This persists Google-derived content on disk — personal/dev use only, in line
    with the fork-only scope above.
+3. **On miss, the bake routes by environment** — see the next section.
+
+## Node bake sidecar (dev server)
+
+The in-browser bake dies at the renderer process's ~4 GB ceiling — heavy tiers
+always, and even `standard` on large AOIs. When the Vite dev server is running,
+`getOrBakeGoogle3DTiles()` therefore routes **every** bake (all quality tiers)
+through `/api/google-bake`:
+
+```
+browser                       vite dev server               bake worker (child process)
+getOrBakeGoogle3DTiles()      viteGoogleBakePlugin.mjs      googleBakeWorker.mjs
+  memory → IndexedDB →   POST   job registry (dedupe   spawn  --max-old-space-size=<RAM/2>
+  sidecar health? ───────────▶  by bake key), SSE  ──────────▶ shared-core sweep, JPEG
+    │ unreachable (prod)        relay, result stream          pass-through (NO decode)
+    ▼                                │     ◀─────────────────  MBK1 container
+  in-tab bake (unchanged)            ▼
+                              deserializeGroup() ← same path as an IndexedDB restore
+```
+
+Why the worker fits where the browser didn't: the child gets a configurable
+multi-GB heap (`MAPNG_BAKE_HEAP_MB`, default half the machine's RAM), and it
+**never decodes textures** — the capture loader keeps Google's compressed JPEG
+bytes, ~10× smaller than the RGBA bitmaps + canvas snapshots the browser pays
+for. A 1 km² standard bake also runs ~3× faster (no tab throttling, no GPU).
+
+Properties worth knowing:
+
+- **Jobs are keyed by the bake cache key** and survive page reloads: re-posting
+  the same key joins the running job; `restoreBakedGoogle3DTiles()` also probes
+  for a *finished* job (covers "reloaded before the IndexedDB persist landed").
+- The result is the **persisted-bake record schema** in a binary container
+  (`MBK1`: u32 magic, u32 unpadded header length, JSON header, 4-byte-aligned
+  payload), decoded by `googleBakeSidecar.js` and fed through the exact same
+  `deserializeGroup()` as an IndexedDB hit — downstream consumers can't tell
+  the difference.
+- Worker stdout is NDJSON protocol; ALL logging (including the shared core's
+  `console.info`) goes to stderr and is relayed to the vite terminal and the
+  browser console (`console.debug`).
+- In prod builds (Cloudflare) the health probe fails and everything behaves as
+  before — in-tab bake with the old limits. Same graceful-degradation pattern
+  as the Blender DAE bridge.
+
+### Headless-Node gotchas (the sidecar's own lessons)
+
+- **Never import the `3d-tiles-renderer` package indices in Node.** Both the
+  root index and `/plugins` transitively evaluate the glTF-metadata
+  `TextureReadUtility`, which constructs a `WebGLRenderer` at module scope →
+  `document is not defined`. `headlessTilesEnv.mjs` deep-imports the needed
+  modules by file path and `headlessTilesHooks.mjs` (a Node resolve hook)
+  redirects the one shim import baked into `GLTFExtensionLoader`.
+- Remaining DOM surface is tiny and polyfilled in `headlessTilesEnv.mjs`:
+  `window.location.href`, `requestAnimationFrame`, `ImageBitmap`.
+- **Texture capture**: `GLTFExtensionLoader` checks `manager.getHandler()`
+  before building its own decoding loader — `addHandler(/\.(glb|gltf)$/i, …)`
+  injects a GLTFLoader whose `loadTexture` plugin returns stub `Texture`s
+  carrying the raw image bytes (non-enumerable property, NOT `userData`:
+  `Texture.copy()` round-trips userData through JSON and would corrupt them).
+- `tiles.setResolution(cam, w, h)` replaces the offscreen-renderer dance; the
+  browser bake now uses it too.
 
 While the tiles are visible, the preview auto-hides the OSM-extruded buildings
 (`featureVisibility.buildings`) and restores the previous setting when the tiles are
@@ -183,7 +249,9 @@ Rough estimates (1 km² dense urban AOI):
 **Billing:** Google charges per **root tileset request** (a ~3 h session), *not* per tile —
 $6 per 1,000 root requests after 1,000 free per month. One bake ≈ 2 root requests
 (preflight + session) ≈ $0.01; the per-tile request counts above are quota, not cost.
-The practical ceiling is browser memory (snapshot canvases), not the bill.
+The practical ceiling used to be browser memory (snapshot canvases) — with the Node
+sidecar (see above) the dev-time ceiling is the worker heap, leaving room to push
+`errorTarget`/quality further; the browser limits only apply to prod builds.
 
 ## Layout in the level zip
 
