@@ -289,7 +289,7 @@ export async function bakeRefinementViaSidecar(key, station, onProgress) {
   }
   const { revision } = await res.json();
 
-  await waitForJobEvent(
+  const refinedMsg = await waitForJobEvent(
     jobId, key, onProgress,
     (msg) => {
       if (msg.type === 'refined' && msg.revision === revision) return { resolve: msg };
@@ -304,7 +304,19 @@ export async function bakeRefinementViaSidecar(key, station, onProgress) {
     (probe) => probe.status === 'done' && probe.revision >= revision,
   );
 
-  return buildGroup(key, await fetchAndDecodeResult(jobId));
+  const group = await buildGroup(key, await fetchAndDecodeResult(jobId));
+  // Where the refine landed (scene-space tile footprints + the frustum
+  // parameters the worker used) — the preview overlays this so a "nothing
+  // changed in front of me" report is debuggable at a glance.
+  if (refinedMsg?.debug) {
+    group.userData.lastRefineDebug = refinedMsg.debug;
+    console.info(
+      `[google-bake] refine debug: +${refinedMsg.added} tiles (${refinedMsg.debug.addedRects?.length ?? 0} rects), ` +
+      `recarved=${refinedMsg.recarved}, fov=${refinedMsg.debug.fov}, aspect=${refinedMsg.debug.aspect}, ` +
+      `far=${Math.round(refinedMsg.debug.far)}m, errorTarget=${refinedMsg.debug.errorTarget}`,
+    );
+  }
+  return group;
 }
 
 /**

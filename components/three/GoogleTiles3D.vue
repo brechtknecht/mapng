@@ -9,7 +9,7 @@ const props = defineProps({
 });
 
 const store = useGoogleTilesStore();
-const { group, show, showCameras, status } = storeToRefs(store);
+const { group, show, showCameras, status, zOffset } = storeToRefs(store);
 
 // Bake output Y is in real metres above the .ter datum; the preview terrain
 // mesh uses (h - minHeight) * unitsPerMeter scene units. Scaling Y by
@@ -51,19 +51,49 @@ const cameraMarkers = computed(() => {
   });
 });
 
+// Manual vertical lift: zOffset is real metres; the group's Y is scaled by upm
+// (TresGroup scale below), so the parent-space offset is metres·upm.
+const offsetY = computed(() => zOffset.value * upm.value);
+
+// Debug overlay for the LAST refinement: the worker reports the scene-space
+// footprints of every tile the refine actually ADDED (rects are already in
+// scene units, X/Z; the rect's "key" question is WHERE, not how tall). Shown
+// with the camera-position overlay so a "nothing changed in front of me"
+// report becomes a 5-second diagnosis: the boxes are where new detail landed.
+const refineRects = computed(() => {
+  const data = props.terrainData;
+  const dbg = group.value?.userData?.lastRefineDebug;
+  if (!data?.heightMap || !Array.isArray(dbg?.addedRects)) return [];
+  const u = upm.value;
+  const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
+  return dbg.addedRects.map((r) => {
+    const cx = (r.minX + r.maxX) / 2;
+    const cz = (r.minZ + r.maxZ) / 2;
+    const terrain = sampleHeightAtScene(data, cx, cz);
+    return {
+      position: [cx, ((terrain - minH) + 15) * u, cz],
+      size: [Math.max(0.3, r.maxX - r.minX), 30 * u, Math.max(0.3, r.maxZ - r.minZ)],
+    };
+  });
+});
+
 // NOTE: no dispose-on-unmount here, unlike OSMFeatures3D — the group is owned
 // by the bake cache in services/google3dTiles.js and must survive detach so
 // the export paths (and re-toggling) can reuse it.
 </script>
 
 <template>
-  <TresGroup v-if="status === 'ready' && show && group" :scale="[1, upm, 1]">
+  <TresGroup v-if="status === 'ready' && show && group" :position="[0, offsetY, 0]" :scale="[1, upm, 1]">
     <primitive :object="group" />
   </TresGroup>
   <TresGroup v-if="status === 'ready' && showCameras">
     <TresMesh v-for="(m, i) in cameraMarkers" :key="i" :position="m.position">
       <TresSphereGeometry :args="[m.radius, 10, 8]" />
       <TresMeshBasicMaterial :color="m.color" />
+    </TresMesh>
+    <TresMesh v-for="(r, i) in refineRects" :key="`rr-${i}`" :position="r.position">
+      <TresBoxGeometry :args="r.size" />
+      <TresMeshBasicMaterial color="#22d3ee" wireframe :depth-test="false" transparent :opacity="0.8" />
     </TresMesh>
   </TresGroup>
 </template>

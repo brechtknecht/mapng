@@ -230,6 +230,7 @@
     "googleTilesBaking": "Pasada {station}/{stations} — {visible} teselas cargadas, {inflight} en curso…",
     "googleTilesShow": "Mostrar teselas de Google",
     "googleTilesRebake": "Rehacer teselas",
+    "googleTilesZOffset": "Desplazamiento Z",
     "googleTilesQualityStandard": "Estándar",
     "googleTilesQualityHigh": "Ultra",
     "googleTilesQualityStandardHint": "5 estaciones de cámara — minutos, memoria moderada",

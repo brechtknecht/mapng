@@ -230,6 +230,7 @@
     "googleTilesBaking": "Проход {station}/{stations} — загружено плиток: {visible}, в работе: {inflight}…",
     "googleTilesShow": "Показать плитки Google",
     "googleTilesRebake": "Пересчитать плитки",
+    "googleTilesZOffset": "Смещение по Z",
     "googleTilesQualityStandard": "Стандарт",
     "googleTilesQualityHigh": "Ультра",
     "googleTilesQualityStandardHint": "5 позиций камеры — минуты, умеренная память",

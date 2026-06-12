@@ -34,6 +34,23 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     try { localStorage.setItem('mapng_google_bake_quality', quality.value); } catch (_) { /* private mode */ }
   }
 
+  // Manual vertical nudge (real metres) applied to the previewed mesh only —
+  // lets the user lift/lower the Google tiles to line them up with the terrain.
+  // Preview-only: does not affect the bake or its cache key.
+  function loadZOffset() {
+    try {
+      const v = Number(localStorage.getItem('mapng_google_bake_zoffset'));
+      return Number.isFinite(v) ? v : 0;
+    } catch (_) { return 0; }
+  }
+  const zOffset = ref(loadZOffset());
+
+  function setZOffset(m) {
+    const v = Number(m);
+    zOffset.value = Number.isFinite(v) ? v : 0;
+    try { localStorage.setItem('mapng_google_bake_zoffset', String(zOffset.value)); } catch (_) { /* private mode */ }
+  }
+
   const apiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
 
   async function bakeForPreview(terrainData, forceRebake = false) {
@@ -145,8 +162,8 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   }
 
   return {
-    status, error, show, showCameras, progress, group, apiKey, quality,
+    status, error, show, showCameras, progress, group, apiKey, quality, zOffset,
     refining, refineError,
-    setQuality, bakeForPreview, rebake, reset, tryRestore, refineFromView,
+    setQuality, setZOffset, bakeForPreview, rebake, reset, tryRestore, refineFromView,
   };
 });

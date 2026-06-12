@@ -63,7 +63,9 @@ import {
   createTileMeshTransformer,
   sampleHeightAtScene,
   computeUnitsPerMeter,
+  SCENE_SIZE,
 } from '../services/googleBakeCore.js';
+import { createMetricProjector } from '../services/geoUtils.js';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
 // stdout is the NDJSON protocol channel — push ALL logging to stderr,
@@ -117,19 +119,90 @@ const REFINE_SENSOR = Number(process.env.MAPNG_REFINE_SENSOR) || 2048;
 const REFINE_MAX_WAIT_MS = Number(process.env.MAPNG_REFINE_MAX_WAIT_MS) || 180000;
 
 /**
+ * Scene-space XZ footprint rect of a tile's OBB, shrunk by ~2 m so carving a
+ * parent under it leaves a sliver of overlap at the seams instead of
+ * hairline holes. Cached per tile (footprints never change).
+ */
+const footprintRect = (session, tile) => {
+  if (session.footprints.has(tile)) return session.footprints.get(tile);
+  let rect = null;
+  const box = tile.boundingVolume?.box;
+  if (Array.isArray(box) && box.length === 12) {
+    const { projector, dataWidth, dataHeight, upm } = session.fp;
+    const tmp = new THREE.Vector3();
+    const cart = {};
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (let sx = -1; sx <= 1; sx += 2) {
+      for (let sy = -1; sy <= 1; sy += 2) {
+        for (let sz = -1; sz <= 1; sz += 2) {
+          tmp.set(
+            box[0] + sx * box[3] + sy * box[6] + sz * box[9],
+            box[1] + sx * box[4] + sy * box[7] + sz * box[10],
+            box[2] + sx * box[5] + sy * box[8] + sz * box[11],
+          );
+          WGS84_ELLIPSOID.getPositionToCartographic(tmp, cart);
+          const p = projector((cart.lat * 180) / Math.PI, (cart.lon * 180) / Math.PI);
+          const sceneX = (p.x / (dataWidth - 1)) * SCENE_SIZE - SCENE_SIZE / 2;
+          const sceneZ = (p.y / (dataHeight - 1)) * SCENE_SIZE - SCENE_SIZE / 2;
+          if (sceneX < minX) minX = sceneX;
+          if (sceneX > maxX) maxX = sceneX;
+          if (sceneZ < minZ) minZ = sceneZ;
+          if (sceneZ > maxZ) maxZ = sceneZ;
+        }
+      }
+    }
+    const shrink = 2 * upm; // ≈2 m
+    if (maxX - minX > 3 * shrink && maxZ - minZ > 3 * shrink) {
+      rect = {
+        minX: minX + shrink, maxX: maxX - shrink,
+        minZ: minZ + shrink, maxZ: maxZ - shrink,
+        key: `${minX.toFixed(2)},${maxX.toFixed(2)},${minZ.toFixed(2)},${maxZ.toFixed(2)}`,
+      };
+    }
+  }
+  session.footprints.set(tile, rect);
+  return rect;
+};
+
+/**
  * Transform every mesh of a kept tile into result records. Buffers stay in
  * memory for the session's lifetime so refinements never re-transform old
  * tiles and the full container can be rewritten cheaply.
+ *
+ * `carveRects`: footprints of FINER kept descendants — triangles whose
+ * centroid falls inside one are dropped, so the fine geometry replaces the
+ * coarse surface instead of z-fighting it (a single-frustum refinement only
+ * partially covers its parents, so the dedup can never drop them outright).
  */
-const buildTileRecords = (session, tile) => {
+const buildTileRecords = (session, tile, carveRects = []) => {
   const scene = tile.cached?.scene;
   if (!scene) return null; // caller counts the gap
   scene.updateMatrixWorld(true);
+  const inAnyRect = (x, z) => {
+    for (const r of carveRects) {
+      if (x >= r.minX && x <= r.maxX && z >= r.minZ && z <= r.maxZ) return true;
+    }
+    return false;
+  };
   const records = [];
   scene.traverse((node) => {
     if (!node.isMesh || !node.geometry) return;
     const geom = session.transformMesh(node);
     if (!geom) return;
+
+    if (carveRects.length > 0) {
+      const pos = geom.attributes.position.array;
+      const idx = geom.index.array;
+      const keptIdx = [];
+      for (let t = 0; t < idx.length; t += 3) {
+        const a = idx[t] * 3, b = idx[t + 1] * 3, c = idx[t + 2] * 3;
+        const cx = (pos[a] + pos[b] + pos[c]) / 3;
+        const cz = (pos[a + 2] + pos[b + 2] + pos[c + 2]) / 3;
+        if (!inAnyRect(cx, cz)) keptIdx.push(idx[t], idx[t + 1], idx[t + 2]);
+      }
+      if (keptIdx.length === 0) return; // fully carved away
+      geom.setIndex(keptIdx);
+    }
 
     const srcMat = Array.isArray(node.material) ? node.material[0] : node.material;
     const map = srcMat?.map ?? null;
@@ -156,33 +229,145 @@ const buildTileRecords = (session, tile) => {
  * covering of the union selection. Only tiles not already in the map get
  * transformed. Returns the diff for logging/protocol.
  */
+const tileDepth = (tile) => {
+  let d = 0;
+  for (let p = tile.parent; p; p = p.parent) d++;
+  return d;
+};
+
+/**
+ * Sync session.outputs (Map<tile, {records, carveSig}>) with the current
+ * finest covering of the union selection.
+ *
+ * Tiles are processed DEEPEST FIRST: each tile that produces geometry
+ * registers its footprint with every kept ancestor, and ancestors are then
+ * (re)built with those rects carved out — fine geometry replaces the coarse
+ * surface underneath instead of z-fighting it. A parent is only
+ * re-transformed when its carve set actually changed (carveSig).
+ */
 const rebuildOutputs = (session) => {
   const keep = new Set(selectFinestCovering(session.selectedTiles));
   let added = 0;
   let removed = 0;
+  let recarved = 0;
   let missingScenes = 0;
+  let newInAoi = 0;
+  let newOutsideAoi = 0;
+  let newZeroInAoi = 0;
+  let newZeroOutside = 0;
+  const zeroSamples = [];
+  const addedRects = []; // scene-space footprints of added tiles — debug overlay
+  const insideAoi = (tile) => {
+    // Cheap AOI proximity via the footprint rect (scene units: AOI = ±50).
+    const r = footprintRect(session, tile);
+    if (!r) return false;
+    return r.minX <= 55 && r.maxX >= -55 && r.minZ <= 55 && r.maxZ >= -55;
+  };
+
   for (const tile of [...session.outputs.keys()]) {
     if (!keep.has(tile)) {
       session.outputs.delete(tile);
       removed++;
     }
   }
-  for (const tile of keep) {
-    if (session.outputs.has(tile)) continue;
-    const records = buildTileRecords(session, tile);
-    if (records === null) { missingScenes++; continue; }
-    if (records.length > 0) {
-      session.outputs.set(tile, records);
-      added++;
+
+  const carveRectsFor = new Map(); // kept ancestor → finer kept footprints
+  const byDepth = [...keep].sort((a, b) => tileDepth(b) - tileDepth(a));
+  for (const tile of byDepth) {
+    const rects = carveRectsFor.get(tile) ?? [];
+    const carveSig = rects.map((r) => r.key).sort().join(';');
+    const existing = session.outputs.get(tile);
+    let entry = existing;
+
+    // Tiles that produced zero geometry once (clipped/stripped) stay zero —
+    // carving only ever REMOVES triangles. Skip the re-transform; without
+    // this every merge re-processed ~3k known-empty tiles.
+    if (!existing && session.zeroTiles.has(tile)) continue;
+
+    if (!existing || existing.carveSig !== carveSig) {
+      const records = buildTileRecords(session, tile, rects);
+      if (records === null) {
+        missingScenes++; // scene lost — keep whatever we had
+      } else if (records.length > 0) {
+        entry = { records, carveSig };
+        session.outputs.set(tile, entry);
+        if (!existing) {
+          added++;
+          if (insideAoi(tile)) newInAoi++; else newOutsideAoi++;
+          if (addedRects.length < 300) {
+            const r = footprintRect(session, tile);
+            if (r) addedRects.push({ minX: r.minX, maxX: r.maxX, minZ: r.minZ, maxZ: r.maxZ });
+          }
+        } else {
+          recarved++;
+        }
+      } else if (existing) {
+        session.outputs.delete(tile);
+        entry = null;
+        removed++;
+      } else {
+        // Brand-new kept tile, ZERO geometry survived clip+strip — the
+        // numbers that matter when a refine looks like a no-op.
+        session.zeroTiles.add(tile);
+        const inside = insideAoi(tile);
+        if (inside) newZeroInAoi++; else newZeroOutside++;
+        if (inside && zeroSamples.length < 3) {
+          const r = footprintRect(session, tile);
+          zeroSamples.push(
+            `depth=${tileDepth(tile)} ge=${(tile.geometricError ?? -1).toFixed(2)} ` +
+            `rect=${r ? `x[${r.minX.toFixed(1)},${r.maxX.toFixed(1)}] z[${r.minZ.toFixed(1)},${r.maxZ.toFixed(1)}]` : 'none'}`,
+          );
+        }
+      }
+    }
+
+    // Geometry exists here — carve it out of every kept ancestor.
+    if (entry?.records?.length) {
+      const rect = footprintRect(session, tile);
+      if (rect) {
+        for (let p = tile.parent; p; p = p.parent) {
+          if (!keep.has(p)) continue;
+          const list = carveRectsFor.get(p);
+          if (list) list.push(rect); else carveRectsFor.set(p, [rect]);
+        }
+      }
     }
   }
+
   if (missingScenes > 0) {
     console.warn(
       `[bakeWorker] ${missingScenes}/${keep.size} kept tiles lost their scenes ` +
       '(LRU eviction) — the bake has coverage gaps.',
     );
   }
-  return { added, removed, kept: keep.size, missingScenes };
+  console.info(
+    `[bakeWorker] merge: keep=${keep.size}, added=${added} (in-AOI=${newInAoi}, outside=${newOutsideAoi}), ` +
+    `zero-record new: in-AOI=${newZeroInAoi}, outside=${newZeroOutside}, ` +
+    `recarved=${recarved}, removed=${removed}, missingScenes=${missingScenes}`,
+  );
+  // LOD histogram of what the OUTPUT actually contains inside the AOI —
+  // geometricError ≈ 2 is the public API's deepest level. If mass sits at
+  // ge ≥ 8, the bake is levels above the ceiling and selection is at fault;
+  // if it sits at ge ≤ 2–4, we ARE at the API max (Google Maps' own renderer
+  // still shows ~one LOD more — known public-API limitation).
+  {
+    const hist = { 'ge>=32': 0, 'ge16': 0, 'ge8': 0, 'ge4': 0, 'ge2': 0, 'ge<2': 0 };
+    for (const tile of session.outputs.keys()) {
+      if (!insideAoi(tile)) continue;
+      const ge = tile.geometricError ?? 0;
+      if (ge >= 32) hist['ge>=32']++;
+      else if (ge >= 16) hist.ge16++;
+      else if (ge >= 8) hist.ge8++;
+      else if (ge >= 4) hist.ge4++;
+      else if (ge >= 2) hist.ge2++;
+      else hist['ge<2']++;
+    }
+    console.info(`[bakeWorker] in-AOI output LOD histogram: ${JSON.stringify(hist)}`);
+  }
+  if (zeroSamples.length > 0) {
+    console.info(`[bakeWorker] zero-record in-AOI samples: ${zeroSamples.join(' | ')}`);
+  }
+  return { added, removed, recarved, kept: keep.size, missingScenes, addedRects };
 };
 
 /** Rewrite the full MBK1 container from the session's current records. */
@@ -203,8 +388,8 @@ const writeContainer = async (session, outPath) => {
   };
 
   const meshes = [];
-  for (const records of session.outputs.values()) {
-    for (const r of records) {
+  for (const entry of session.outputs.values()) {
+    for (const r of entry.records) {
       meshes.push({
         name: r.name,
         positions: pushPart(r.positions),
@@ -383,7 +568,16 @@ async function startBake(data, options, outPath) {
     data, options, tiles, cam, frame, stations, selectedTiles,
     quality, stabilityMs, tileCache,
     googleGroundAlt, transformMesh,
-    outputs: new Map(),       // tile → records[]
+    outputs: new Map(),       // tile → { records, carveSig }
+    zeroTiles: new Set(),     // kept tiles known to clip/strip to nothing
+    footprints: new Map(),    // tile → scene-XZ rect | null (stable, cached)
+    // Projection context for footprintRect — same math as the transformer.
+    fp: {
+      projector: createMetricProjector(data.bounds, data.width, data.height),
+      dataWidth: data.width,
+      dataHeight: data.height,
+      upm: computeUnitsPerMeter(data),
+    },
     recordCounter: 0,
     texturesMissing: 0,
     revision: 0,
@@ -453,8 +647,59 @@ async function refine(session, revision, stationSpec) {
   // stay put. Persists across refinements (every refine wants max detail).
   const errorTarget = Number.isFinite(stationSpec.errorTarget) ? stationSpec.errorTarget : REFINE_ERROR_TARGET;
   const sensor = Number.isFinite(stationSpec.sensorSize) ? stationSpec.sensorSize : REFINE_SENSOR;
+  // Match the user's REAL frustum: THREE fov is vertical, so without the
+  // preview's aspect the refine covers a square column — on a widescreen
+  // canvas the left/right thirds of what the user SEES were never refined.
+  const aspect = Number.isFinite(stationSpec.aspect)
+    ? Math.min(3, Math.max(0.5, stationSpec.aspect))
+    : 1;
   session.tiles.errorTarget = errorTarget;
-  session.tiles.setResolution(session.cam, sensor, sensor);
+  session.cam.aspect = aspect;
+  session.tiles.setResolution(session.cam, Math.round(sensor * Math.sqrt(aspect)), Math.round(sensor / Math.sqrt(aspect)));
+
+  // The fly camera looks HORIZONTALLY, and only frustum ∩ AOI matters — the
+  // transform clips everything else. A corner-distance far plane was not
+  // enough: on a 512 m AOI with the camera looking toward a nearby edge, the
+  // frustum still swept ~2 km of outside world and the selector spent the
+  // whole budget there (observed: 4.9k outside-AOI tiles united, +10 kept).
+  // Clamp the far plane to where the VIEW RAY exits the AOI square instead
+  // (slab test in ENU), padded for the FOV spread and tall geometry; fall
+  // back to the farthest corner when looking across the whole AOI.
+  const half = session.frame.extentM / 2;
+  const maxCornerDist = Math.max(
+    Math.hypot(stationSpec.e - half, stationSpec.n - half),
+    Math.hypot(stationSpec.e - half, stationSpec.n + half),
+    Math.hypot(stationSpec.e + half, stationSpec.n - half),
+    Math.hypot(stationSpec.e + half, stationSpec.n + half),
+  );
+  let far = maxCornerDist;
+  {
+    const de = stationSpec.lookE - stationSpec.e;
+    const dn = stationSpec.lookN - stationSpec.n;
+    const len = Math.hypot(de, dn);
+    if (len > 1e-6) {
+      const slab = (p, d, h) => {
+        if (Math.abs(d) < 1e-9) return Math.abs(p) <= h ? [-Infinity, Infinity] : null;
+        const t0 = (-h - p) / d;
+        const t1 = (h - p) / d;
+        return t0 < t1 ? [t0, t1] : [t1, t0];
+      };
+      const a = slab(stationSpec.e, de / len, half);
+      const b = slab(stationSpec.n, dn / len, half);
+      if (a && b) {
+        const tMin = Math.max(a[0], b[0]);
+        const tMax = Math.min(a[1], b[1]);
+        // tMax = where the centre ray leaves the AOI (camera inside: tMin<0).
+        if (tMax > Math.max(0, tMin)) far = Math.min(maxCornerDist, tMax);
+        else far = 400; // looking away from the AOI — only near geometry matters
+      } else {
+        far = 400;
+      }
+    }
+  }
+  session.cam.far = far * 1.4 + 250; // FOV spread + tall photogrammetry slack
+  session.cam.near = 1;
+  session.cam.updateProjectionMatrix();
 
   const { timedOut, elapsedMs } = await runStationSweep({
     tiles: session.tiles,
@@ -498,10 +743,21 @@ async function refine(session, revision, stationSpec) {
     bytes,
     added: diff.added,
     removed: diff.removed,
+    recarved: diff.recarved,
     selected: session.selectedTiles.size,
     kept: diff.kept,
     timedOut,
     elapsedMs: Math.round(elapsedMs),
+    // Debug overlay payload: where the refine actually landed, plus the
+    // frustum parameters the worker used (mismatches show up immediately).
+    debug: {
+      addedRects: diff.addedRects,
+      station: { e: stationSpec.e, n: stationSpec.n, heightM: stationSpec.heightM },
+      fov: station.fov ?? null,
+      aspect,
+      far: session.cam.far,
+      errorTarget,
+    },
   });
 }
 

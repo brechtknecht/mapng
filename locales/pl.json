@@ -230,6 +230,7 @@
     "googleTilesBaking": "Przebieg {station}/{stations} — {visible} kafelków wczytanych, {inflight} w toku…",
     "googleTilesShow": "Pokaż kafelki Google",
     "googleTilesRebake": "Przelicz kafelki",
+    "googleTilesZOffset": "Przesunięcie Z",
     "googleTilesQualityStandard": "Standard",
     "googleTilesQualityHigh": "Ultra",
     "googleTilesQualityStandardHint": "5 stanowisk kamery — minuty, umiarkowana pamięć",

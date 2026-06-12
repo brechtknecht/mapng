@@ -230,6 +230,7 @@
     "googleTilesBaking": "Passata {station}/{stations} — {visible} tasselli caricati, {inflight} in corso…",
     "googleTilesShow": "Mostra tasselli Google",
     "googleTilesRebake": "Rigenera tasselli",
+    "googleTilesZOffset": "Offset Z",
     "googleTilesQualityStandard": "Standard",
     "googleTilesQualityHigh": "Ultra",
     "googleTilesQualityStandardHint": "5 stazioni camera — minuti, memoria moderata",

@@ -44,6 +44,9 @@ const getPose = () => {
     position: position.toArray(),
     direction: direction.toArray(),
     fov: cam.fov,
+    // The refine frustum must match the REAL view: fov is vertical only,
+    // aspect carries the horizontal extent of what the user sees.
+    aspect: cam.aspect ?? 1,
   };
 };
 defineExpose({ getPose });
@@ -128,8 +131,48 @@ watch(() => props.fov, (fov) => {
   }
 });
 
+// --- gamepad (standard mapping) ---------------------------------------------
+// Left stick: move · right stick: look · RT/LT: up/down · RB: boost ·
+// A: refine this view. Needs NO pointer lock — plug in and fly.
+let prevButtonA = false;
+const deadzone = (v) => (Math.abs(v) < 0.15 ? 0 : v);
+const pollGamepad = (delta) => {
+  const cam = camera.value;
+  if (!cam || typeof navigator.getGamepads !== 'function') return;
+  const gp = [...navigator.getGamepads()].find((p) => p?.connected);
+  if (!gp) return;
+
+  const lx = deadzone(gp.axes[0] ?? 0);
+  const ly = deadzone(gp.axes[1] ?? 0);
+  const rx = deadzone(gp.axes[2] ?? 0);
+  const ry = deadzone(gp.axes[3] ?? 0);
+  const upDown = (gp.buttons[7]?.value ?? 0) - (gp.buttons[6]?.value ?? 0); // RT − LT
+
+  if (rx || ry) {
+    euler.setFromQuaternion(cam.quaternion);
+    euler.y -= rx * 2.2 * delta;
+    euler.x -= ry * 1.8 * delta;
+    euler.x = Math.max(-Math.PI / 2 + 0.01, Math.min(Math.PI / 2 - 0.01, euler.x));
+    cam.quaternion.setFromEuler(euler);
+  }
+  if (lx || ly || upDown) {
+    moveDir.set(lx, 0, ly).applyQuaternion(cam.quaternion);
+    moveDir.y += upDown; // world-space vertical
+    const boost = gp.buttons[5]?.pressed ? 4 : 1;
+    cam.position.addScaledVector(moveDir, speed.value * boost * Math.min(delta, 0.1));
+  }
+
+  const buttonA = gp.buttons[0]?.pressed ?? false;
+  if (buttonA && !prevButtonA) {
+    const pose = getPose();
+    if (pose) emit('refine', pose);
+  }
+  prevButtonA = buttonA;
+};
+
 const { onLoop } = useRenderLoop();
 onLoop(({ delta }) => {
+  pollGamepad(delta);
   const cam = camera.value;
   if (!cam || !locked.value || keys.size === 0) return;
   moveDir.set(0, 0, 0);

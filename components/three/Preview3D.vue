@@ -388,6 +388,29 @@
                 </button>
               </div>
 
+              <div class="flex items-center gap-2">
+                <label class="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                  {{ t('preview.googleTilesZOffset') }}
+                </label>
+                <input
+                  type="range"
+                  min="-50"
+                  max="50"
+                  step="0.5"
+                  :value="googleTilesStore.zOffset"
+                  @input="googleTilesStore.setZOffset($event.target.valueAsNumber)"
+                  class="flex-1 accent-[#FF6600]"
+                />
+                <input
+                  type="number"
+                  step="0.5"
+                  :value="googleTilesStore.zOffset"
+                  @change="googleTilesStore.setZOffset($event.target.valueAsNumber)"
+                  class="w-14 text-[10px] text-right tabular-nums px-1 py-0.5 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300"
+                />
+                <span class="text-[10px] text-gray-400 dark:text-gray-500">m</span>
+              </div>
+
               <button
                 v-if="googleTilesStore.status === 'idle' || googleTilesStore.status === 'error'"
                 @click="googleTilesStore.bakeForPreview(terrainData)"
@@ -588,6 +611,7 @@ const refineFromPose = (pose) => {
     lookN: -lz / upm,
     lookHeightM: ly / upm,
     fov: pose.fov,
+    aspect: pose.aspect,
   });
 };
 

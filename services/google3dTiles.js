@@ -285,10 +285,13 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     // BeamNG materials.json defines an unlit-equivalent so visual result matches.
     const srcMat = Array.isArray(node.material) ? node.material[0] : node.material;
     const matName = `google_tile_${outputMeshIdx}`;
+    // Unlit display via emissive routing — see deserializeGroup in
+    // googleTilesPersistentCache.js for the full rationale.
     const standard = new THREE.MeshStandardMaterial({
-      color: 0xffffff,
+      color: 0x000000,
       roughness: 1,
       metalness: 0,
+      emissive: 0xffffff,
     });
     // Explicit assignment — Material constructor param sometimes drops `name`
     // depending on Three.js version, and BeamNG resolves materials by the DAE's
@@ -312,7 +315,9 @@ export async function bakeGoogle3DTiles(data, options = {}) {
         snap.wrapS = srcMat.map.wrapS;
         snap.wrapT = srcMat.map.wrapT;
         snap.colorSpace = srcMat.map.colorSpace;
+        snap.anisotropy = 16;
         standard.map = snap;
+        standard.emissiveMap = snap;
       }
     }
     const newMesh = new THREE.Mesh(newGeom, standard);

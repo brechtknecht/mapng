@@ -262,8 +262,14 @@ sweeps ONE frustum, so it runs FAR more aggressively: `errorTarget=1`,
 at `errorTarget=5` a close-up street camera pulls only *somewhat* deeper
 tiles (soft textures, edgy silhouettes vs Google Maps); `errorTarget=1` on a
 high-res buffer reaches Google's deepest tiles, sharpening textures AND mesh
-(both are functions of tile depth). The cost stays bounded because only the
-user's frustum refines — off-frustum tiles aren't visible and stay put.
+(both are functions of tile depth). The cost stays bounded for two reasons:
+only the user's frustum refines (off-frustum tiles aren't visible and stay
+put), and the camera's far plane is clamped to the farthest AOI corner — a
+street-level camera looks horizontally, and with the default far plane
+(1e9) the frustum reaches the horizon, making the selector refine vast
+areas outside the AOI first (observed: ~28k downloads, budget burned, +4
+kept tiles, the wanted near tiles never loaded). Past-AOI geometry is
+clipped by the transform anyway.
 
 Tune without code edits (restart the dev server to apply):
 
@@ -275,6 +281,26 @@ Tune without code edits (restart the dev server to apply):
 
 The refine log line reports the actual `errorTarget`/`sensor`/`fov` and the
 `+added/-removed` tile delta — a big `+added` confirms it reached deeper.
+
+**Know the data ceiling.** Google's tree bottoms out around `geometricError≈2`
+(~50 m leaf tiles, depth 20 in Berlin — probe any spot with
+`node scripts/probeTilesetDepth.mjs <lat> <lng> [groundAltEll]`). On SMALL
+AOIs (≤~512 m) the BASE bake already selects those leaves, so a refine
+reports `added (in-AOI)=0` — correct, there is nothing deeper to pull. The
+perceived sharpness gap vs Google Maps on identical tiles was RENDERING, not
+LOD, and is fixed in the preview materials: textures get `anisotropy=16`
+(grazing street-level angles blurred at the default of 1) and tiles render
+UNLIT via emissive routing (black diffuse + texture as `emissiveMap` on the
+same MeshStandardMaterial — scene lighting + tone mapping on pre-lit
+photogrammetry was what made the mesh look faceted/"edgy"; the material TYPE
+must stay Standard for lesson 2). Refinement pays off on LARGER AOIs (≥~1 km)
+and heavy tiers, where the base bake stops well above the leaves.
+
+The merge log line (`merge: keep=…, added=… (in-AOI=…, outside=…),
+zero-record new: …, recarved=…`) is the refine debugging tool: in-AOI added
+is what lands in the map; recarved counts coarse parents whose triangles were
+re-cut under finer tiles (without carving, parents z-fight their refined
+children and coarse wins — refinements existed but were INVISIBLE).
 
 #### Wire format
 

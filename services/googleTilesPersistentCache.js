@@ -113,7 +113,16 @@ export const deserializeGroup = async (meshes) => {
     if (m.index) geom.setIndex(new THREE.BufferAttribute(m.index, 1));
     geom.computeVertexNormals();
 
-    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, metalness: 0 });
+    // UNLIT shading via MeshStandardMaterial: Google's photogrammetry ships
+    // with lighting baked into the textures (KHR_materials_unlit). Scene
+    // lights + tone mapping on top of that accentuate every polygon facet
+    // ("edgy" look vs Google Maps). Route the texture through emissiveMap
+    // (black diffuse, white emission) — renders pre-lit like Maps — while
+    // .map stays set for the exporters (the ColladaExporter refuses textures
+    // on MeshBasicMaterial, lesson 2, so the TYPE must stay Standard).
+    const mat = new THREE.MeshStandardMaterial({
+      color: 0x000000, roughness: 1, metalness: 0, emissive: 0xffffff,
+    });
     mat.name = m.name;
     if (m.texture) {
       const bitmap = await createImageBitmap(m.texture);
@@ -130,7 +139,11 @@ export const deserializeGroup = async (meshes) => {
       tex.wrapS = m.wrapS;
       tex.wrapT = m.wrapT;
       if (m.colorSpace) tex.colorSpace = m.colorSpace;
+      // Street-level views hit textures at grazing angles — without
+      // anisotropic filtering they blur into mush (the default is 1).
+      tex.anisotropy = 16;
       mat.map = tex;
+      mat.emissiveMap = tex;
     }
     const mesh = new THREE.Mesh(geom, mat);
     mesh.name = m.name;
