@@ -10,6 +10,7 @@ import {
   createTileMeshTransformer,
   sampleHeightAtScene,
   computeUnitsPerMeter,
+  stripSeamRisers,
 } from './googleBakeCore.js';
 import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTilesPersistentCache.js';
 import {
@@ -29,6 +30,13 @@ export { sidecarAvailable as googleBakeSidecarAvailable };
 // preview/export paths, and the bake caches. Re-export the shared helpers
 // the rest of the app imports from here.
 export { sampleHeightAtScene, computeUnitsPerMeter };
+
+// Kill switch for the seam-riser strip (parity with the worker's
+// MAPNG_STRIP_RISERS env). Set localStorage mapng_strip_risers='0' to disable
+// if it ever clips real geometry on a tricky map.
+const riserStripEnabled = () => {
+  try { return localStorage.getItem('mapng_strip_risers') !== '0'; } catch (_) { return true; }
+};
 
 /**
  * Fetch Google Photorealistic 3D Tiles covering the AOI in `data.bounds`, transform
@@ -211,9 +219,11 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     );
   }
   const forEachBakeMesh = (cb) => {
-    for (const scene of bakeScenes) {
-      scene.traverse((node) => {
-        if (node.isMesh && node.geometry) cb(node);
+    for (let s = 0; s < bakeScenes.length; s++) {
+      bakeScenes[s].traverse((node) => {
+        // Pass the source-tile index so the output meshes can be grouped by
+        // owning tile for the cross-tile seam-riser strip.
+        if (node.isMesh && node.geometry) cb(node, s);
       });
     }
   };
@@ -268,7 +278,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   out.userData.bakeStations = stations.map((st) => st.viz).filter(Boolean);
 
   let outputMeshIdx = 0;
-  forEachBakeMesh((node) => {
+  forEachBakeMesh((node, sceneIdx) => {
     const newGeom = transformMesh(node);
     if (!newGeom) return;
 
@@ -319,11 +329,33 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     const newMesh = new THREE.Mesh(newGeom, standard);
     newMesh.name = matName;
     newMesh.userData.isGoogleTile = true;
+    // Owning source tile — groups the soup for the seam-riser strip so a
+    // tile's own vertical detail is never treated as the neighbour's ground.
+    newMesh.userData.riserGroup = sceneIdx;
     out.add(newMesh);
     outputMeshIdx++;
   });
 
   try { tiles.dispose(); } catch (_) { /* noop */ }
+
+  // Cross-tile seam-riser strip — remove the LOD-transition tile-edge walls.
+  // The SAME shared pass the headless export runs, so preview and export match.
+  if (riserStripEnabled()) {
+    const soup = out.children.map((m) => ({
+      positions: m.geometry.attributes.position.array,
+      index: m.geometry.index?.array,
+      groupId: m.userData.riserGroup ?? -1,
+    }));
+    const { indices, removed, candidates } = stripSeamRisers(soup, {
+      unitsPerMeter: computeUnitsPerMeter(data),
+    });
+    for (let i = 0; i < out.children.length; i++) {
+      if (indices[i] && indices[i] !== soup[i].index) {
+        out.children[i].geometry.setIndex(Array.from(indices[i]));
+      }
+    }
+    console.info(`[google3dTiles] seam-riser strip: removed ${removed}/${candidates} candidate tris`);
+  }
 
   console.info(
     `[google3dTiles] ${outputMeshIdx} tile meshes (from ${bakeScenes.length} tiles) survived AOI clip + ground strip`,
@@ -353,7 +385,8 @@ let _bakeCache = null; // { key, promise }
 
 // Bump when the bake output format/semantics change — persisted bakes from
 // older versions are then simply never matched (and age out via LRU prune).
-const BAKE_FORMAT_VERSION = 4;
+// v5: cross-tile seam-riser strip (removes the LOD-transition tile-edge walls).
+const BAKE_FORMAT_VERSION = 5;
 
 const bakeCacheKey = (
   data,

@@ -66,6 +66,7 @@ import {
   createTileMeshTransformer,
   sampleHeightAtScene,
   computeUnitsPerMeter,
+  stripSeamRisers,
   SCENE_SIZE,
 } from '../services/googleBakeCore.js';
 import { createMetricProjector } from '../services/geoUtils.js';
@@ -120,6 +121,50 @@ const startTicker = (tick) => {
 const REFINE_ERROR_TARGET = Number(process.env.MAPNG_REFINE_ERROR_TARGET) || 1;
 const REFINE_SENSOR = Number(process.env.MAPNG_REFINE_SENSOR) || 2048;
 const REFINE_MAX_WAIT_MS = Number(process.env.MAPNG_REFINE_MAX_WAIT_MS) || 180000;
+
+// Seam-riser strip (removes the LOD-transition tile-edge walls). Kill switch +
+// per-threshold overrides via env (restart the dev server to apply). Set
+// MAPNG_STRIP_RISERS=0 to disable entirely if it ever clips real geometry.
+const STRIP_RISERS = process.env.MAPNG_STRIP_RISERS !== '0';
+const RISER_OPTS = {
+  ...(process.env.MAPNG_RISER_MAX_HEIGHT_M ? { riserMaxHeightM: Number(process.env.MAPNG_RISER_MAX_HEIGHT_M) } : {}),
+  ...(process.env.MAPNG_RISER_VERTICAL_NY ? { verticalNormalY: Number(process.env.MAPNG_RISER_VERTICAL_NY) } : {}),
+  ...(process.env.MAPNG_RISER_PROBE_M ? { neighborProbeM: Number(process.env.MAPNG_RISER_PROBE_M) } : {}),
+  ...(process.env.MAPNG_RISER_BAND_M ? { bandM: Number(process.env.MAPNG_RISER_BAND_M) } : {}),
+  ...(process.env.MAPNG_RISER_DROP_M ? { dropM: Number(process.env.MAPNG_RISER_DROP_M) } : {}),
+};
+
+/**
+ * Run the shared cross-tile seam-riser strip over the session's current output
+ * records and write the trimmed indices back. Same function the browser preview
+ * calls, so preview and export are identical. Mutates record.index in place.
+ */
+const applyRiserStrip = (session) => {
+  if (!STRIP_RISERS) return;
+  const upm = computeUnitsPerMeter(session.data);
+  // groupId = owning TILE (not record/mesh) so a tile's own internal vertical
+  // detail is never treated as the neighbour's ground.
+  const tileId = new Map();
+  const soup = [];
+  const recs = [];
+  for (const [tile, entry] of session.outputs) {
+    let gid = tileId.get(tile);
+    if (gid === undefined) { gid = tileId.size; tileId.set(tile, gid); }
+    for (const r of entry.records) {
+      if (!r.index) continue;
+      recs.push(r);
+      soup.push({ positions: r.positions, index: r.index, groupId: gid });
+    }
+  }
+  if (soup.length === 0) return;
+  const t0 = performance.now();
+  const { indices, removed, candidates } = stripSeamRisers(soup, { unitsPerMeter: upm, ...RISER_OPTS });
+  for (let i = 0; i < recs.length; i++) recs[i].index = indices[i];
+  console.info(
+    `[bakeWorker] seam-riser strip: removed ${removed}/${candidates} candidate tris across ` +
+    `${tileId.size} tiles in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
+};
 
 /**
  * Scene-space XZ footprint rect of a tile's OBB, shrunk by ~2 m so carving a
@@ -590,6 +635,7 @@ async function startBake(data, options, outPath) {
   if (session.outputs.size === 0) {
     throw new Error('bake worker: tiles loaded but none survived AOI clipping/ground stripping.');
   }
+  applyRiserStrip(session);
 
   const { meshes, bytes } = await writeContainer(session, outPath);
   console.info(
@@ -717,6 +763,7 @@ async function refine(session, revision, stationSpec) {
   session.revision = revision;
 
   const diff = rebuildOutputs(session);
+  applyRiserStrip(session);
   const resultPath = `${session.outBase}.rev${revision}`;
   const { meshes, bytes } = await writeContainer(session, resultPath);
   const previous = session.currentResultPath;
