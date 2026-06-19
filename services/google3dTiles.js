@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { TilesRenderer, GoogleCloudAuthPlugin, WGS84_ELLIPSOID } from '3d-tiles-renderer';
+import { registerTilesAuth, preflightTilesAuth } from './tilesAuth.js';
 import {
   computeAoiFrame,
   buildSweepStations,
@@ -97,24 +98,16 @@ export async function bakeGoogle3DTiles(data, options = {}) {
 
   // Preflight the root tileset. 3d-tiles-renderer 0.3.46 dispatches no
   // 'load-error' event — a failed root fetch (key restrictions, API
-  // disabled, billing) would otherwise leave the bake polling 0 tiles
-  // until maxWaitMs. Fail fast with the actual Google error instead.
-  // Note: a 404 "Requested entity was not found" means the Map Tiles API
-  // is not enabled / not allowed for this key's project.
-  const probe = await fetch(`https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`);
-  if (!probe.ok) {
-    let detail = '';
-    try { detail = (await probe.json())?.error?.message ?? ''; } catch (_) { /* noop */ }
-    throw new Error(
-      `Google Map Tiles API rejected the request (HTTP ${probe.status}${detail ? `: ${detail}` : ''}). ` +
-      'Check that the Map Tiles API is enabled for the project, the API key allows it, and billing is active.',
-    );
-  }
+  // disabled, billing, or EEA 403) would otherwise leave the bake polling
+  // 0 tiles until maxWaitMs. Fail fast with the actual upstream error.
+  // `apiKey` carries either a Google key or a Cesium ion token — see
+  // tilesAuth.js; preflightTilesAuth routes to the right endpoint.
+  await preflightTilesAuth(apiKey);
 
   const frame = computeAoiFrame(data, WGS84_ELLIPSOID);
 
   const tiles = new TilesRenderer();
-  tiles.registerPlugin(new GoogleCloudAuthPlugin({ apiToken: apiKey }));
+  await registerTilesAuth(tiles, apiKey, { GoogleCloudAuthPlugin });
   tiles.errorTarget = errorTarget;
 
   // The library refuses to load new tiles while lruCache.isFull()

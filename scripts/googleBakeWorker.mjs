@@ -56,6 +56,7 @@ import {
   installCaptureLoader,
   getCapturedImage,
 } from './headlessTilesEnv.mjs';
+import { registerTilesAuth, preflightTilesAuth } from '../services/tilesAuth.js';
 import {
   computeAoiFrame,
   buildSweepStations,
@@ -462,24 +463,18 @@ async function startBake(data, options, outPath) {
   if (!apiKey) throw new Error('bake worker: missing apiKey');
   if (!data?.bounds || !data?.heightMap) throw new Error('bake worker: invalid terrain data');
 
-  // Preflight the root tileset — fail fast with Google's actual error
-  // (key restrictions, API disabled, billing) instead of polling 0 tiles.
-  const probe = await fetch(`https://tile.googleapis.com/v1/3dtiles/root.json?key=${apiKey}`);
-  if (!probe.ok) {
-    let detail = '';
-    try { detail = (await probe.json())?.error?.message ?? ''; } catch (_) { /* noop */ }
-    throw new Error(
-      `Google Map Tiles API rejected the request (HTTP ${probe.status}${detail ? `: ${detail}` : ''}). ` +
-      'Check that the Map Tiles API is enabled for the project, the API key allows it, and billing is active.',
-    );
-  }
+  // Preflight the root tileset — fail fast with the actual upstream error
+  // (key restrictions, API disabled, billing, or EEA 403) instead of polling
+  // 0 tiles. `apiKey` carries either a Google key or a Cesium ion token.
+  await preflightTilesAuth(apiKey);
 
   const frame = computeAoiFrame(data, WGS84_ELLIPSOID);
 
   const tiles = new TilesRenderer();
-  const auth = new GoogleCloudAuthPlugin({ apiToken: apiKey });
+  const auth = await registerTilesAuth(tiles, apiKey, { GoogleCloudAuthPlugin });
   // GLB content is content-addressed — serve repeat downloads (session
-  // rebuilds after a restart, quality re-bakes) from local disk.
+  // rebuilds after a restart, quality re-bakes) from local disk. Content URLs
+  // stay on tile.googleapis.com for both auth modes, so the cache is mode-agnostic.
   const tileCache = new TileDiskCache();
   const cacheState = await tileCache.prune();
   console.info(
@@ -488,7 +483,6 @@ async function startBake(data, options, outPath) {
   );
   tileCache.wrapPlugin(auth);
   tileCache.attach(tiles);
-  tiles.registerPlugin(auth);
   tiles.errorTarget = errorTarget;
 
   // Budgets for a dedicated child process with a multi-GB heap. Note the
