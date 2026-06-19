@@ -46,7 +46,9 @@
 import { readFileSync, createWriteStream } from 'node:fs';
 import { unlink } from 'node:fs/promises';
 import { createInterface } from 'node:readline';
+import path from 'node:path';
 import * as THREE from 'three';
+import { assembleGoogleTilesExport } from './googleExportAssembly.mjs';
 import {
   TilesRenderer,
   GoogleCloudAuthPlugin,
@@ -761,6 +763,38 @@ async function refine(session, revision, stationSpec) {
   });
 }
 
+/**
+ * Server-side BeamNG export assembly: atlas PNGs + chunked GLB straight from
+ * the session's records (see googleExportAssembly.mjs). The browser never
+ * touches the heavy artifacts — it gets file PATHS, which the Blender bridge
+ * and the zip sidecar (same machine) consume directly.
+ */
+async function exportAssembly(session, revision, spec) {
+  if (!Number.isFinite(spec?.worldSize) || spec.worldSize <= 0) {
+    throw new Error('export: missing/invalid worldSize');
+  }
+  const records = [];
+  for (const entry of session.outputs.values()) records.push(...entry.records);
+  console.info(`[bakeWorker] export rev${revision}: assembling ${records.length} records (worldSize=${spec.worldSize}, zOffset=${spec.zOffsetM ?? 0}m)…`);
+  const result = await assembleGoogleTilesExport(records, {
+    worldSize: spec.worldSize,
+    sceneSize: SCENE_SIZE,
+    zOffsetM: Number.isFinite(spec.zOffsetM) ? spec.zOffsetM : 0,
+    outDir: path.dirname(session.outBase),
+    log: console.info,
+  });
+  if (!result) throw new Error('export: no google tile geometry to assemble');
+  emit({
+    type: 'exported',
+    revision,
+    glbPath: result.glbPath,
+    glbBytes: result.glbBytes,
+    textures: result.textures,
+    materialNames: result.materialNames,
+    meshes: result.meshCount,
+  });
+}
+
 const [jobPath, outPath] = process.argv.slice(2);
 if (!jobPath || !outPath) {
   emit({ type: 'error', message: 'usage: node googleBakeWorker.mjs <job.json> <out.bin>' });
@@ -789,15 +823,25 @@ const rl = createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   let cmd;
   try { cmd = JSON.parse(line); } catch { return; }
-  if (cmd.type !== 'refine') return;
-  chain = chain.then(async () => {
-    try {
-      await refine(session, cmd.revision, cmd.station ?? {});
-    } catch (err) {
-      console.error(`[bakeWorker] refine rev${cmd.revision} failed:`, err?.stack ?? err);
-      emit({ type: 'refine-error', revision: cmd.revision, message: err?.message ?? String(err) });
-    }
-  });
+  if (cmd.type === 'refine') {
+    chain = chain.then(async () => {
+      try {
+        await refine(session, cmd.revision, cmd.station ?? {});
+      } catch (err) {
+        console.error(`[bakeWorker] refine rev${cmd.revision} failed:`, err?.stack ?? err);
+        emit({ type: 'refine-error', revision: cmd.revision, message: err?.message ?? String(err) });
+      }
+    });
+  } else if (cmd.type === 'export') {
+    chain = chain.then(async () => {
+      try {
+        await exportAssembly(session, cmd.revision, cmd.spec ?? {});
+      } catch (err) {
+        console.error(`[bakeWorker] export rev${cmd.revision} failed:`, err?.stack ?? err);
+        emit({ type: 'export-error', revision: cmd.revision, message: err?.message ?? String(err) });
+      }
+    });
+  }
 });
 rl.on('close', () => {
   chain.then(() => process.exit(0));

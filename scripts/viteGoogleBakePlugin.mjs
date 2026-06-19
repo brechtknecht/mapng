@@ -184,6 +184,17 @@ export default function googleBakePlugin() {
           job.lastActivity = Date.now();
           pushEvent(job, msg);
           console.warn(`[google-bake] job ${job.id} refine rev${msg.revision} failed: ${msg.message}`);
+        } else if (msg.type === 'exported') {
+          job.lastActivity = Date.now();
+          pushEvent(job, msg);
+          console.log(
+            `[google-bake] job ${job.id} export rev${msg.revision}: ${msg.meshes} meshes, ` +
+            `${msg.materialNames?.length ?? 0} atlases → ${msg.glbPath}`,
+          );
+        } else if (msg.type === 'export-error') {
+          job.lastActivity = Date.now();
+          pushEvent(job, msg);
+          console.warn(`[google-bake] job ${job.id} export rev${msg.revision} failed: ${msg.message}`);
         } else if (msg.type === 'error') {
           job.error = msg.message;
         } else if (msg.type === 'progress') {
@@ -383,6 +394,25 @@ export default function googleBakePlugin() {
             res.setHeader('Content-Type', 'application/octet-stream');
             res.setHeader('Content-Length', String(size));
             createReadStream(job.outPath).pipe(res);
+            return;
+          }
+
+          // POST /<id>/export — assemble the BeamNG atlas+GLB SERVER-SIDE in
+          // the live session worker; the 'exported' SSE event carries file
+          // PATHS that the Blender bridge / zip sidecar consume directly.
+          if (req.method === 'POST' && segments[1] === 'export') {
+            if (!job.sessionAlive || !job.child?.stdin?.writable) {
+              sendJson(res, 409, {
+                error: 'no live bake session for this job — re-bake to export server-side',
+              });
+              return;
+            }
+            const body = JSON.parse((await readBody(req)).toString('utf8'));
+            const revision = ++job.refineRevision;
+            job.lastActivity = Date.now();
+            job.child.stdin.write(`${JSON.stringify({ type: 'export', revision, spec: body.spec ?? {} })}\n`);
+            console.log(`[google-bake] job ${job.id} export rev${revision} queued`);
+            sendJson(res, 200, { revision });
             return;
           }
 

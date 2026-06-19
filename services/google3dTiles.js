@@ -17,7 +17,10 @@ import {
   restoreSidecarBake,
   bakeRefinementViaSidecar,
   ensureSidecarSession,
+  exportAssemblyViaSidecar,
 } from './googleBakeSidecar.js';
+
+export { sidecarAvailable as googleBakeSidecarAvailable };
 
 // The geometry/station/sweep machinery lives in googleBakeCore.js (shared
 // with the headless Node bake worker). This module is the BROWSER
@@ -584,6 +587,22 @@ export async function refineGoogleTilesBake(data, options, station) {
   const group = await bakeRefinementViaSidecar(key, station, onProgress);
   _bakeCache = { key, promise: Promise.resolve(group) };
   return group;
+}
+
+/**
+ * Assemble the BeamNG google_tiles export server-side (atlas + GLB in the
+ * bake worker — see exportAssemblyViaSidecar). Resolves the same cache key
+ * as the preview, rebuilding the worker session first if it died, so the
+ * export always assembles exactly the bake (incl. refinements) on screen.
+ *
+ * @param {object} spec { worldSize, zOffsetM }
+ * @returns {{glbPath, glbBytes, textures, materialNames, meshes}}
+ */
+export async function exportGoogleTilesViaSidecar(data, options, spec) {
+  const { forceRebake: _ignored, onProgress, ...bakeOptions } = resolveBakeOptions(options);
+  const key = bakeCacheKey(data, bakeOptions);
+  await ensureSidecarSession(data, bakeOptions, key, onProgress);
+  return exportAssemblyViaSidecar(key, spec, onProgress);
 }
 
 /** Dispose a bake group's geometries, materials and textures (see refineGoogleTilesBake). */

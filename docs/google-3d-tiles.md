@@ -314,6 +314,32 @@ base bake. Completion is the `refined` SSE event carrying the revision;
 `GET /<id>/result` then serves the rewritten container (header `revision` +
 `anchor` fields).
 
+### Server-side export assembly (atlas + GLB in the worker)
+
+The in-browser BeamNG export assembly died at ultra scale: ~5k decoded
+preview textures + 39 live 4096² atlas canvases (~2.6 GB RGBA — GLTFExporter
+needs them ALL alive while embedding) + a 1.5 GB GLB in one renderer process.
+When the bake sidecar is reachable, `exportBeamNGLevel` now sends an
+`export` command to the LIVE bake session instead: the worker already holds
+every tile record, `scripts/googleExportAssembly.mjs` shelf-packs the
+textures into atlases with sharp (`extend-with-copy` = the whole 8-patch
+gutter replication in one op per tile), chunk-merges ≤60k-vert meshes and
+writes the GLB BY HAND (geometry is trivial and the atlas PNGs embed as
+pre-encoded bytes — no canvas, no GLTFExporter, no decode).
+
+The browser only ever sees file PATHS: the Blender bridge converts the GLB
+to DAE in place (`POST /api/convert-dae?file=<path>` → `{daePath}`), and the
+zip sidecar ingests both plus the atlas PNGs straight from disk
+(`POST /:id/file?path=...&from=<path>`). The heavy artifacts never enter the
+renderer — `{fromPath, size}` markers ride through the existing zip-recorder
+variables, and the prod JSZip fallback rejects them loudly (it can't happen
+in practice: the markers only exist when the dev server is present).
+
+The 1:1 ported semantics (gutters, half-texel insets, vert limits, `_mesh`
+names, `gX = s·x, gY = y + zOffset, gZ = s·z`) live in
+googleExportAssembly.mjs — keep them in sync with the in-browser
+`generateGoogleTilesGLB`, which remains the prod fallback.
+
 ### Headless-Node gotchas (the sidecar's own lessons)
 
 - **Never import the `3d-tiles-renderer` package indices in Node.** Both the

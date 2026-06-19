@@ -195,7 +195,11 @@ export default function zipExportPlugin() {
           if (!job) { sendJson(res, 404, { error: 'unknown job' }); return; }
 
           // POST /<id>/file?path=... — append one entry, streamed straight
-          // from the request body through DEFLATE (no buffering).
+          // from the request body through DEFLATE (no buffering). With
+          // ?from=<server path>, the entry is read from THIS machine instead
+          // (bake-sidecar artifacts: GLB/DAE/atlases) — multi-GB files then
+          // never round-trip the browser. Paths are constrained to the OS
+          // temp dir, where bake/conversion jobs live.
           if (req.method === 'POST' && segments[1] === 'file') {
             if (job.status !== 'open') {
               sendJson(res, 409, { error: `job is ${job.status}, not accepting files`, detail: job.error });
@@ -203,12 +207,21 @@ export default function zipExportPlugin() {
             }
             const entryPath = url.searchParams.get('path');
             if (!entryPath) { sendJson(res, 400, { error: 'missing ?path=' }); return; }
+            const fromPath = url.searchParams.get('from');
+            if (fromPath && !path.resolve(fromPath).startsWith(path.resolve(tmpdir()))) {
+              sendJson(res, 400, { error: '?from= must point inside the OS temp directory' });
+              return;
+            }
             job.lastActivity = Date.now();
             req.pause(); // hold the body until this entry's turn on the chain
             try {
               const { rawSize } = await enqueue(job, async () => {
                 const parentDir = entryPath.replace(/\\/g, '/').split('/').slice(0, -1).join('/');
                 if (parentDir) await addDirChain(job, parentDir);
+                if (fromPath) {
+                  req.resume(); // drain the empty body
+                  return job.zip.addStream(entryPath, createReadStream(fromPath), { maxBytes: MAX_FILE_BYTES });
+                }
                 req.resume();
                 return job.zip.addStream(entryPath, req, { maxBytes: MAX_FILE_BYTES });
               });

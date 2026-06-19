@@ -320,6 +320,48 @@ export async function bakeRefinementViaSidecar(key, station, onProgress) {
 }
 
 /**
+ * Assemble the BeamNG google_tiles export (atlas PNGs + chunked GLB) on the
+ * SIDEcar — the worker holds every tile record, so the browser never builds
+ * atlas canvases or a multi-GB GLB. Returns the 'exported' message:
+ * { glbPath, glbBytes, textures: [{name, path, bytes}], materialNames } —
+ * server-side PATHS, consumed directly by the Blender bridge and the zip
+ * sidecar on the same machine.
+ */
+export async function exportAssemblyViaSidecar(key, spec, onProgress) {
+  const probeRes = await fetch(`/api/google-bake/jobs?key=${encodeURIComponent(key)}`);
+  if (!probeRes.ok) throw new Error('no bake session for this AOI — bake first');
+  const { jobId, sessionAlive } = await probeRes.json();
+  if (!sessionAlive) throw new Error('the bake session has ended — re-bake to export server-side');
+
+  const res = await fetch(`/api/google-bake/${jobId}/export`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ spec }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json())?.error ?? ''; } catch (_) { /* noop */ }
+    throw new Error(`sidecar export rejected (HTTP ${res.status}${detail ? `: ${detail}` : ''})`);
+  }
+  const { revision } = await res.json();
+
+  return waitForJobEvent(
+    jobId, key, onProgress,
+    (msg) => {
+      if (msg.type === 'exported' && msg.revision === revision) return { resolve: msg };
+      if (msg.type === 'export-error' && msg.revision === revision) {
+        return { reject: new Error(msg.message ?? 'sidecar export failed') };
+      }
+      if (msg.type === 'error' || msg.type === 'session-ended') {
+        return { reject: new Error(msg.message ?? 'bake session ended during export') };
+      }
+      return undefined;
+    },
+    () => false, // a dropped stream can't confirm export completion — retryable
+  );
+}
+
+/**
  * Restore-only probe: if the sidecar holds a FINISHED job for this key
  * (e.g. the page reloaded right after a bake, before IndexedDB persisted,
  * or the persist failed on quota), fetch and decode it. Never starts a bake,

@@ -5,7 +5,12 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { exportTer } from './exportTer.js';
 import { buildTerrainMaterials } from './osmTerrainMaterials.js';
 import { createOSMGroup, createSurroundingMeshes, SCENE_SIZE } from './export3d.js';
-import { getOrBakeGoogle3DTiles, getGoogleTilesZOffset } from './google3dTiles.js';
+import {
+  getOrBakeGoogle3DTiles,
+  getGoogleTilesZOffset,
+  exportGoogleTilesViaSidecar,
+  googleBakeSidecarAvailable,
+} from './google3dTiles.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import beamngGlbToDaeScript from '../scripts/beamng_glb_to_dae.py?raw';
 import { prepareCroppedTerrainData } from './cropTerrain.js';
@@ -29,7 +34,7 @@ import {
 } from './junctionGeometry.js';
 import { generateJunctionsDAE } from './junctionMesh.js';
 import { detectGapJunctions } from './junctionRaster.js';
-import { zipSidecarAvailable, compressZipViaSidecar } from './zipExportSidecar.js';
+import { zipSidecarAvailable, compressZipViaSidecar, isServerPathEntry } from './zipExportSidecar.js';
 import {
   getBeamNGFlavorById,
   getGlobalEnvironmentMap,
@@ -4487,49 +4492,100 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     if (useGoogle3DTiles && googleApiKey) {
       // A failed Google bake must never take down the whole level export —
       // catch, log loudly, and continue with the OSM-only level.
-      try {
-        const googleResult = await generateGoogleTilesGLB(exportTerrainData, worldSize, {
-          apiKey: googleApiKey,
-          errorTarget: google3DErrorTarget,
-          onProgress: (p) => report(
-            `Google tiles pass ${p.station ?? 1}/${p.stations ?? 1}: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`,
-            65,
-          ),
-        });
-        googleTilesGlbBlob = googleResult?.glbBlob ?? null;
-        googleTilesTextureFiles = googleResult?.textureFiles ?? [];
-        googleTilesMaterialNames = googleResult?.materialNames ?? [];
-        if (googleTilesMaterialNames.length > 0) {
-          googleDebugCubeBlob = generateGoogleDebugCubeDAE(googleTilesMaterialNames[0]);
-        }
-        if (!googleResult) {
-          console.warn('[BeamNG export] Google 3D Tiles produced no geometry — exporting without them');
-          report('Google tiles: no geometry produced — exporting without them', 65);
-        } else {
+      //
+      // SIDEcar path first: the bake worker assembles atlases + GLB on the
+      // server (it holds every tile record) and hands back FILE PATHS — the
+      // ultra-scale exports that crashed the tab (39 atlas canvases + a
+      // 1.5 GB GLB in the renderer) never enter the browser at all.
+      const googleProgress = (p) => report(
+        `Google tiles pass ${p.station ?? 1}/${p.stations ?? 1}: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`,
+        65,
+      );
+      if (await googleBakeSidecarAvailable()) {
+        try {
+          beginStep('Assembling Google tiles on the bake sidecar…', 65);
+          await yield_();
+          const exported = await exportGoogleTilesViaSidecar(exportTerrainData, {
+            apiKey: googleApiKey,
+            errorTarget: google3DErrorTarget,
+            onProgress: googleProgress,
+          }, {
+            worldSize,
+            zOffsetM: getGoogleTilesZOffset(),
+          });
+          // Server-side artifacts ride through the existing zip variables as
+          // {fromPath} markers — the zip sidecar ingests them from disk.
+          googleTilesGlbBlob = { fromPath: exported.glbPath, size: exported.glbBytes ?? 0 };
+          googleTilesTextureFiles = (exported.textures ?? []).map((t) => ({
+            name: t.name,
+            ext: 'png',
+            data: { fromPath: t.path, size: t.bytes ?? 0 },
+          }));
+          googleTilesMaterialNames = exported.materialNames ?? [];
           console.info(
-            `[BeamNG export] Google tiles GLB built: ${googleTilesMaterialNames.length} atlas materials, ` +
-            `${googleTilesTextureFiles.length} textures — convert with scripts/beamng_glb_to_dae.py`,
+            `[BeamNG export] sidecar assembled google_tiles.glb: ${exported.meshes} meshes, ` +
+            `${googleTilesMaterialNames.length} atlases, ${((exported.glbBytes ?? 0) / 1024 ** 2).toFixed(0)} MB — zero renderer memory`,
           );
+        } catch (err) {
+          console.warn('[BeamNG export] sidecar export failed — falling back to in-browser assembly:', err);
+          report(`Sidecar export failed (${err?.message ?? err}) — assembling in the browser`, 65);
         }
-      } catch (err) {
-        console.error('[BeamNG export] Google 3D Tiles bake failed — exporting without them:', err);
-        report(`Google tiles failed (${err?.message ?? err}) — exporting without them`, 65);
+      }
+
+      if (!googleTilesGlbBlob) {
+        try {
+          const googleResult = await generateGoogleTilesGLB(exportTerrainData, worldSize, {
+            apiKey: googleApiKey,
+            errorTarget: google3DErrorTarget,
+            onProgress: googleProgress,
+          });
+          googleTilesGlbBlob = googleResult?.glbBlob ?? null;
+          googleTilesTextureFiles = googleResult?.textureFiles ?? [];
+          googleTilesMaterialNames = googleResult?.materialNames ?? [];
+          if (!googleResult) {
+            console.warn('[BeamNG export] Google 3D Tiles produced no geometry — exporting without them');
+            report('Google tiles: no geometry produced — exporting without them', 65);
+          } else {
+            console.info(
+              `[BeamNG export] Google tiles GLB built: ${googleTilesMaterialNames.length} atlas materials, ` +
+              `${googleTilesTextureFiles.length} textures — convert with scripts/beamng_glb_to_dae.py`,
+            );
+          }
+        } catch (err) {
+          console.error('[BeamNG export] Google 3D Tiles bake failed — exporting without them:', err);
+          report(`Google tiles failed (${err?.message ?? err}) — exporting without them`, 65);
+        }
+      }
+      if (googleTilesMaterialNames.length > 0) {
+        googleDebugCubeBlob = generateGoogleDebugCubeDAE(googleTilesMaterialNames[0]);
       }
 
       // Auto-convert GLB → .dae through the dev-server Blender bridge
-      // (vite middleware → headless Blender ≤4.2). When the bridge is
-      // unavailable (no Blender, prod build), the zip ships the GLB plus
-      // the conversion script for the documented manual one-liner.
+      // (vite middleware → headless Blender ≤4.2). Sidecar-assembled GLBs
+      // convert IN PLACE on the server (?file= mode) — no multi-GB blobs in
+      // the tab. When the bridge is unavailable (no Blender, prod build),
+      // the zip ships the GLB plus the conversion script for the documented
+      // manual one-liner.
       if (googleTilesGlbBlob) {
         try {
           beginStep('Converting Google tiles to DAE (Blender)…', 66);
           await yield_();
-          const resp = await fetch('/api/convert-dae', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/octet-stream' },
-            body: googleTilesGlbBlob,
-          });
-          if (resp.ok) {
+          const serverPath = googleTilesGlbBlob.fromPath;
+          const resp = serverPath
+            ? await fetch(`/api/convert-dae?file=${encodeURIComponent(serverPath)}`, { method: 'POST' })
+            : await fetch('/api/convert-dae', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/octet-stream' },
+              body: googleTilesGlbBlob,
+            });
+          if (resp.ok && serverPath) {
+            const { daePath, bytes } = await resp.json();
+            googleTilesDaeBlob = { fromPath: daePath, size: bytes ?? 0 };
+            console.info(
+              `[BeamNG export] Blender bridge converted google_tiles.dae in place ` +
+              `(${((bytes ?? 0) / 1024 ** 2).toFixed(1)} MB) — zip is ready to play`,
+            );
+          } else if (resp.ok) {
             googleTilesDaeBlob = await resp.blob();
             console.info(
               `[BeamNG export] Blender bridge converted google_tiles.dae ` +
@@ -5406,9 +5462,19 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
 
   // Prod fallback: materialise a real JSZip from the recorder and compress
   // in-browser. This is where the old memory ceiling still applies.
+  // Server-path markers can't exist here in practice (they're only created
+  // when the bake sidecar ran, which implies a dev server with the zip
+  // sidecar too) — but if the zip sidecar vanished mid-export, skip them
+  // loudly rather than writing "[object Object]" into the archive.
   const realZip = new JSZip();
   for (const dir of zipDirs) realZip.folder(dir);
-  for (const [p, content] of zipEntries) realZip.file(p, content);
+  for (const [p, content] of zipEntries) {
+    if (isServerPathEntry(content)) {
+      console.error(`[BeamNG export] cannot embed server-side entry "${p}" without the zip sidecar — skipped`);
+      continue;
+    }
+    realZip.file(p, content);
+  }
   const zipBlob = await realZip.generateAsync({ type: 'blob', compression: 'DEFLATE' });
   console.log(`${BEAMNG_EXPORT_SERVICE_LOG} ZIP generated:`, {
     filename,

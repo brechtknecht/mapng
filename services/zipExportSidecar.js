@@ -49,6 +49,15 @@ const postJson = async (path, init) => {
 const MB = (n) => (n / 1024 ** 2).toFixed(0);
 
 /**
+ * Marker for an archive entry that already lives on the dev server's disk
+ * (bake-sidecar exports): { fromPath, size } — see compressZipViaSidecar.
+ * Exported so the prod JSZip fallback can detect and reject it cleanly.
+ */
+export const isServerPathEntry = (c) =>
+  c !== null && typeof c === 'object' && !(c instanceof Blob) && !ArrayBuffer.isView(c)
+  && typeof c.fromPath === 'string';
+
+/**
  * Compress a recorded archive ({ dirs, entries }) via the sidecar. Each entry
  * is uploaded in its ORIGINAL form — Blobs stream from browser-managed (often
  * disk-backed) storage straight into the request body, never copied through
@@ -77,7 +86,7 @@ export async function compressZipViaSidecar({ dirs, entries }, { filename, onPro
 
   const paths = [...entries.keys()];
   const total = paths.length;
-  const sizeOf = (c) => (c instanceof Blob ? c.size : (c?.byteLength ?? new Blob([c]).size));
+  const sizeOf = (c) => (isServerPathEntry(c) ? (c.size ?? 0) : c instanceof Blob ? c.size : (c?.byteLength ?? new Blob([c]).size));
   let totalBytes = 0;
   for (const p of paths) totalBytes += sizeOf(entries.get(p));
   let sentBytes = 0;
@@ -87,22 +96,37 @@ export async function compressZipViaSidecar({ dirs, entries }, { filename, onPro
     const p = paths[i];
     let body = entries.get(p);
     if (body === undefined) continue;
-    // Strings / typed arrays get wrapped once; Blobs pass through untouched.
-    if (!(body instanceof Blob)) body = new Blob([body]);
-    if (body.size > 64 * 1024 * 1024) {
-      console.info(`[zip-export] uploading large entry "${p}" (${MB(body.size)} MB)`);
+
+    let res;
+    let entryBytes;
+    if (isServerPathEntry(body)) {
+      // Bake-sidecar artifact (GLB/DAE/atlas) — already on the server's disk;
+      // only the path crosses the wire.
+      console.info(`[zip-export] ingesting server-side entry "${p}" (${MB(body.size ?? 0)} MB) from ${body.fromPath}`);
+      res = await fetch(
+        `/api/zip-export/${jobId}/file?path=${encodeURIComponent(p)}&from=${encodeURIComponent(body.fromPath)}`,
+        { method: 'POST' },
+      );
+      entryBytes = body.size ?? 0;
+    } else {
+      // Strings / typed arrays get wrapped once; Blobs pass through untouched.
+      if (!(body instanceof Blob)) body = new Blob([body]);
+      if (body.size > 64 * 1024 * 1024) {
+        console.info(`[zip-export] uploading large entry "${p}" (${MB(body.size)} MB)`);
+      }
+      res = await fetch(`/api/zip-export/${jobId}/file?path=${encodeURIComponent(p)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body,
+      });
+      entryBytes = body.size;
     }
-    const res = await fetch(`/api/zip-export/${jobId}/file?path=${encodeURIComponent(p)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body,
-    });
     if (!res.ok) {
       let detail = '';
       try { detail = (await res.json())?.error ?? ''; } catch (_) { /* noop */ }
       throw new Error(`zip sidecar rejected "${p}" (HTTP ${res.status}${detail ? `: ${detail}` : ''})`);
     }
-    sentBytes += body.size;
+    sentBytes += entryBytes;
     body = null;
     // Drop the entry so the renderer can release it before the next upload.
     entries.delete(p);

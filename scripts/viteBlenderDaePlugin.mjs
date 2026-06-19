@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, statSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
@@ -76,7 +76,7 @@ export default function blenderDaePlugin() {
       server.middlewares.use('/api/convert-dae', (req, res) => {
         if (req.method !== 'POST') {
           res.statusCode = 405;
-          res.end('POST a GLB body to convert it to a BeamNG .dae');
+          res.end('POST a GLB body (or ?file=<server path>) to convert it to a BeamNG .dae');
           return;
         }
         const blender = findBlender();
@@ -86,6 +86,40 @@ export default function blenderDaePlugin() {
             'No Blender 3.x/4.x found (Collada export was removed in Blender 5.0+). ' +
             'Set the BLENDER_PATH env var or drop a portable Blender 4.2 on the Desktop.',
           );
+          return;
+        }
+
+        // Server-path mode: the GLB was assembled by the bake sidecar and
+        // already sits on this machine — convert in place and return the DAE
+        // PATH, so multi-GB artifacts never round-trip the browser. Paths are
+        // constrained to the OS temp dir (where bake jobs live).
+        const url = new URL(req.url, 'http://localhost');
+        const serverGlb = url.searchParams.get('file');
+        if (serverGlb) {
+          (async () => {
+            const resolved = path.resolve(serverGlb);
+            if (!resolved.startsWith(path.resolve(tmpdir()))) {
+              res.statusCode = 400;
+              res.end('?file= must point inside the OS temp directory');
+              return;
+            }
+            req.resume(); // drain the (empty) body
+            const daePath = resolved.replace(/\.glb$/i, '') + '.dae';
+            const t0 = Date.now();
+            await runBlender(blender, resolved, daePath);
+            const bytes = statSync(daePath).size;
+            console.log(
+              `[beamng-blender-dae] ${resolved} → ${(bytes / 1024 ** 2).toFixed(1)} MB DAE ` +
+              `in ${((Date.now() - t0) / 1000).toFixed(1)}s (server-path mode)`,
+            );
+            res.statusCode = 200;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ daePath, bytes }));
+          })().catch((err) => {
+            console.warn('[beamng-blender-dae] conversion failed:', err?.message ?? err);
+            res.statusCode = 500;
+            res.end(String(err?.message ?? err));
+          });
           return;
         }
 
