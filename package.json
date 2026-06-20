@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
-    "test:geotiff": "node --test tests/exportGeoTiff.test.mjs"
+    "test:geotiff": "node --test tests/exportGeoTiff.test.mjs",
+    "test:weld": "node --test tests/weldSeams.test.mjs tests/stripGroundTris.test.mjs"
   },
   "dependencies": {
     "@tresjs/cientos": "^4.3.1",

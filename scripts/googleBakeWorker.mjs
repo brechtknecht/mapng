@@ -67,6 +67,8 @@ import {
   sampleHeightAtScene,
   computeUnitsPerMeter,
   stripSeamRisers,
+  weldSeams,
+  stripGroundTris,
   SCENE_SIZE,
 } from '../services/googleBakeCore.js';
 import { createMetricProjector } from '../services/geoUtils.js';
@@ -122,10 +124,25 @@ const REFINE_ERROR_TARGET = Number(process.env.MAPNG_REFINE_ERROR_TARGET) || 1;
 const REFINE_SENSOR = Number(process.env.MAPNG_REFINE_SENSOR) || 2048;
 const REFINE_MAX_WAIT_MS = Number(process.env.MAPNG_REFINE_MAX_WAIT_MS) || 180000;
 
-// Seam-riser strip (removes the LOD-transition tile-edge walls). Kill switch +
-// per-threshold overrides via env (restart the dev server to apply). Set
-// MAPNG_STRIP_RISERS=0 to disable entirely if it ever clips real geometry.
-const STRIP_RISERS = process.env.MAPNG_STRIP_RISERS !== '0';
+// Seam handling. The DEFAULT is now the root-cause pair — lateral footprint
+// carving (computeCarveTargets, in rebuildOutputs) + seam welding (weldSeams,
+// applyWeld) — which removes the LOD-transition tile-edge walls at the source
+// instead of guessing them away. The old heuristic strip stays available as a
+// belt-and-suspenders fallback but is OFF by default:
+//   MAPNG_WELD_SEAMS=0     disable the weld (debug / A-B the carve alone)
+//   MAPNG_STRIP_RISERS=1   re-enable the old magic-threshold deletion
+const WELD_SEAMS = process.env.MAPNG_WELD_SEAMS !== '0';
+const STRIP_RISERS = process.env.MAPNG_STRIP_RISERS === '1';
+// Weld tolerances (all metres) — tune without code edits, restart to apply.
+//   BAND      vertical reach onto the target ground (raise to close taller seams)
+//   COHERE    a cell welds only if its ground spans ≤ this (real steps survive)
+//   MAX_RISER a vertex this far ABOVE local ground is a wall → never welded
+const WELD_OPTS = {
+  ...(process.env.MAPNG_WELD_BAND_M ? { bandM: Number(process.env.MAPNG_WELD_BAND_M) } : {}),
+  ...(process.env.MAPNG_WELD_COHERE_M ? { cohereM: Number(process.env.MAPNG_WELD_COHERE_M) } : {}),
+  ...(process.env.MAPNG_WELD_MAX_RISER_M ? { maxRiserM: Number(process.env.MAPNG_WELD_MAX_RISER_M) } : {}),
+  ...(process.env.MAPNG_WELD_CELL_M ? { cellM: Number(process.env.MAPNG_WELD_CELL_M) } : {}),
+};
 const RISER_OPTS = {
   ...(process.env.MAPNG_RISER_MAX_HEIGHT_M ? { riserMaxHeightM: Number(process.env.MAPNG_RISER_MAX_HEIGHT_M) } : {}),
   ...(process.env.MAPNG_RISER_VERTICAL_NY ? { verticalNormalY: Number(process.env.MAPNG_RISER_VERTICAL_NY) } : {}),
@@ -163,6 +180,89 @@ const applyRiserStrip = (session) => {
   console.info(
     `[bakeWorker] seam-riser strip: removed ${removed}/${candidates} candidate tris across ` +
     `${tileId.size} tiles in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
+};
+
+/**
+ * Close LOD seams by welding coarse vertices onto the finer ground
+ * (googleBakeCore → weldSeams) — the default, root-cause replacement for the
+ * heuristic strip. Recomputed every merge from each record's IMMUTABLE base
+ * positions, so it's idempotent under refinement: a refine that adds finer
+ * tiles simply re-snaps to the newly-finer ground, and a refine that drops a
+ * finer tile reverts the affected coarse vertices to their base height.
+ */
+const applyWeld = (session) => {
+  if (!WELD_SEAMS) return;
+  const upm = computeUnitsPerMeter(session.data);
+  const recs = [];
+  const soup = [];
+  for (const [tile, entry] of session.outputs) {
+    const lod = tile.geometricError ?? Infinity;
+    for (const r of entry.records) {
+      // Field from the FULL index (baseIndex) so the street ground is present
+      // even after a previous merge stripped it — that's what lets the weld
+      // snap street risers. Positions from the un-welded base so the weld never
+      // compounds across merges.
+      const idx = r.baseIndex ?? r.index;
+      if (!idx) continue;
+      recs.push(r);
+      soup.push({ positions: r.basePositions ?? r.positions, index: idx, lod });
+    }
+  }
+  if (soup.length === 0) return;
+  const t0 = performance.now();
+  const { positions, meshesMoved, vertsMoved } = weldSeams(soup, { unitsPerMeter: upm, ...WELD_OPTS });
+  for (let i = 0; i < recs.length; i++) {
+    const r = recs[i];
+    if (positions[i]) {
+      if (!r.basePositions) r.basePositions = r.positions; // stash the base once
+      r.positions = positions[i];
+    } else if (r.basePositions) {
+      r.positions = r.basePositions; // no longer moved this merge — revert
+    }
+  }
+  console.info(
+    `[bakeWorker] seam weld: moved ${vertsMoved} verts across ${meshesMoved}/${recs.length} meshes ` +
+    `in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
+};
+
+/**
+ * Ground strip — LAST pass, after the weld (googleBakeCore → stripGroundTris).
+ * Drops near-flat tris within groundDistanceM of the mapng terrain so the
+ * heightmap shows through; running it here (not in the transform) means the
+ * weld already collapsed the street's tile-edge risers onto the street, so they
+ * get removed along with it instead of standing on the bare terrain.
+ *
+ * Recomputed every merge from each record's IMMUTABLE base index (the full,
+ * unstripped triangle set), so it stays correct across refines and never feeds
+ * a half-stripped surface back into the weld's ground field.
+ */
+const applyGroundStrip = (session) => {
+  if (!session.groundStrip.enabled) return;
+  const recs = [];
+  const soup = [];
+  for (const entry of session.outputs.values()) {
+    for (const r of entry.records) {
+      const idx = r.baseIndex ?? r.index;
+      if (!idx) continue;
+      recs.push(r);
+      soup.push({ positions: r.positions, index: idx });
+    }
+  }
+  if (soup.length === 0) return;
+  const t0 = performance.now();
+  const { indices, removed, total } = stripGroundTris(soup, session.data, {
+    groundNormalThreshold: session.groundStrip.groundNormalThreshold,
+    groundDistanceM: session.groundStrip.groundDistanceM,
+  });
+  for (let i = 0; i < recs.length; i++) {
+    if (!recs[i].baseIndex) recs[i].baseIndex = recs[i].index; // stash the full index once
+    recs[i].index = indices[i];
+  }
+  console.info(
+    `[bakeWorker] ground strip: removed ${removed}/${total} near-terrain tris in ` +
+    `${((performance.now() - t0) / 1000).toFixed(1)}s`,
   );
 };
 
@@ -284,6 +384,80 @@ const tileDepth = (tile) => {
 };
 
 /**
+ * For every kept tile, the footprints of all STRICTLY COARSER kept tiles it
+ * overlaps — generalising the old ancestor-only carve to LATERAL LOD seams
+ * (adjacent cousins, not just parent/child). A finer tile owns the ground it
+ * covers, so its footprint is subtracted from every coarser kept tile beneath
+ * OR beside it; that removes the coarse surface (and the riser geometry
+ * standing on it) at the source, instead of leaving a wall for the heuristic
+ * seam strip to guess at.
+ *
+ * Hole-safe: a tile only ever carves WITHIN its own inward-shrunk footprint,
+ * which its real geometry fully covers — the same guarantee the ancestor carve
+ * already relied on (footprintRect shrinks ~2 m inward).
+ *
+ * Returns Map<coarseTile, rect[]>. A broad-phase grid keeps it ~O(n) rather
+ * than O(n²) over the thousands of tiles a dense bake selects.
+ */
+const computeCarveTargets = (session, keep) => {
+  const items = [];
+  for (const tile of keep) {
+    const r = footprintRect(session, tile);
+    if (!r) continue;
+    items.push({ tile, r, ge: tile.geometricError ?? Infinity });
+  }
+  const CELL = 8; // scene units — broad-phase bucket only
+  const inv = 1 / CELL;
+  const keyOf = (gx, gz) => (gx + 1e6) * 4e6 + (gz + 1e6);
+  // Carving only matters INSIDE the AOI — geometry beyond ±SCENE_SIZE/2 is
+  // clipped away by the transform. Coarse far-field tiles, however, have
+  // enormous footprints (whole-city OBBs); rasterising those raw would create
+  // millions of grid cells and blow V8's Map cap ("Map maximum size
+  // exceeded"). Clamp every footprint's CELL RANGE to the AOI window so the
+  // grid stays bounded; the true rects are still used for the overlap test.
+  const LIM = SCENE_SIZE / 2 + 4;
+  const loCell = Math.floor(-LIM * inv);
+  const hiCell = Math.floor(LIM * inv);
+  const cellLo = (v) => Math.max(loCell, Math.floor(v * inv));
+  const cellHi = (v) => Math.min(hiCell, Math.floor(v * inv));
+  const grid = new Map();
+  for (let i = 0; i < items.length; i++) {
+    const { r } = items[i];
+    for (let gx = cellLo(r.minX); gx <= cellHi(r.maxX); gx++) {
+      for (let gz = cellLo(r.minZ); gz <= cellHi(r.maxZ); gz++) {
+        const k = keyOf(gx, gz);
+        let cell = grid.get(k);
+        if (!cell) { cell = []; grid.set(k, cell); }
+        cell.push(i);
+      }
+    }
+  }
+  const targets = new Map();
+  for (let fi = 0; fi < items.length; fi++) {
+    const F = items[fi];
+    const seen = new Set();
+    for (let gx = cellLo(F.r.minX); gx <= cellHi(F.r.maxX); gx++) {
+      for (let gz = cellLo(F.r.minZ); gz <= cellHi(F.r.maxZ); gz++) {
+        const cell = grid.get(keyOf(gx, gz));
+        if (!cell) continue;
+        for (const ci of cell) {
+          if (ci === fi || seen.has(ci)) continue;
+          seen.add(ci);
+          const C = items[ci];
+          if (!(C.ge > F.ge)) continue; // C must be strictly COARSER than F
+          if (F.r.minX > C.r.maxX || F.r.maxX < C.r.minX ||
+              F.r.minZ > C.r.maxZ || F.r.maxZ < C.r.minZ) continue; // AABB overlap
+          let list = targets.get(C.tile);
+          if (!list) { list = []; targets.set(C.tile, list); }
+          list.push(F.r);
+        }
+      }
+    }
+  }
+  return targets;
+};
+
+/**
  * Sync session.outputs (Map<tile, {records, carveSig}>) with the current
  * finest covering of the union selection.
  *
@@ -319,10 +493,12 @@ const rebuildOutputs = (session) => {
     }
   }
 
-  const carveRectsFor = new Map(); // kept ancestor → finer kept footprints
+  // Lateral + ancestor carve: every kept tile's coarse surface is subtracted
+  // wherever a strictly finer kept tile (descendant OR cousin) covers it.
+  const carveTargets = computeCarveTargets(session, keep);
   const byDepth = [...keep].sort((a, b) => tileDepth(b) - tileDepth(a));
   for (const tile of byDepth) {
-    const rects = carveRectsFor.get(tile) ?? [];
+    const rects = carveTargets.get(tile) ?? [];
     const carveSig = rects.map((r) => r.key).sort().join(';');
     const existing = session.outputs.get(tile);
     let entry = existing;
@@ -369,17 +545,6 @@ const rebuildOutputs = (session) => {
       }
     }
 
-    // Geometry exists here — carve it out of every kept ancestor.
-    if (entry?.records?.length) {
-      const rect = footprintRect(session, tile);
-      if (rect) {
-        for (let p = tile.parent; p; p = p.parent) {
-          if (!keep.has(p)) continue;
-          const list = carveRectsFor.get(p);
-          if (list) list.push(rect); else carveRectsFor.set(p, [rect]);
-        }
-      }
-    }
   }
 
   if (missingScenes > 0) {
@@ -597,8 +762,10 @@ async function startBake(data, options, outPath) {
     googleGroundAlt = 0;
   }
 
+  // Keep the ground here — the strip now runs LAST (after the weld), so the
+  // weld can flatten street risers onto a street surface that still exists.
   const transformMesh = createTileMeshTransformer(data, frame, WGS84_ELLIPSOID, googleGroundAlt, {
-    stripGround, groundNormalThreshold, groundDistanceM, computeNormals: false,
+    stripGround: false, computeNormals: false,
   });
   console.info(
     `[bakeWorker] vertical anchor: googleGroundAlt=${googleGroundAlt.toFixed(1)}m (ellipsoidal), ` +
@@ -609,6 +776,8 @@ async function startBake(data, options, outPath) {
     data, options, tiles, cam, frame, stations, selectedTiles,
     quality, stabilityMs, tileCache,
     googleGroundAlt, transformMesh,
+    // Ground strip runs as a final pass (applyGroundStrip), not in the transform.
+    groundStrip: { enabled: stripGround, groundNormalThreshold, groundDistanceM },
     outputs: new Map(),       // tile → { records, carveSig }
     zeroTiles: new Set(),     // kept tiles known to clip/strip to nothing
     footprints: new Map(),    // tile → scene-XZ rect | null (stable, cached)
@@ -635,7 +804,9 @@ async function startBake(data, options, outPath) {
   if (session.outputs.size === 0) {
     throw new Error('bake worker: tiles loaded but none survived AOI clipping/ground stripping.');
   }
-  applyRiserStrip(session);
+  applyWeld(session);        // close seams while the street ground still exists
+  applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
+  applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
 
   const { meshes, bytes } = await writeContainer(session, outPath);
   console.info(
@@ -763,7 +934,9 @@ async function refine(session, revision, stationSpec) {
   session.revision = revision;
 
   const diff = rebuildOutputs(session);
-  applyRiserStrip(session);
+  applyWeld(session);        // close seams while the street ground still exists
+  applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
+  applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
   const resultPath = `${session.outBase}.rev${revision}`;
   const { meshes, bytes } = await writeContainer(session, resultPath);
   const previous = session.currentResultPath;

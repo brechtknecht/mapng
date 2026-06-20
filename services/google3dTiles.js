@@ -11,6 +11,8 @@ import {
   sampleHeightAtScene,
   computeUnitsPerMeter,
   stripSeamRisers,
+  weldSeams,
+  stripGroundTris,
 } from './googleBakeCore.js';
 import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTilesPersistentCache.js';
 import {
@@ -31,11 +33,19 @@ export { sidecarAvailable as googleBakeSidecarAvailable };
 // the rest of the app imports from here.
 export { sampleHeightAtScene, computeUnitsPerMeter };
 
-// Kill switch for the seam-riser strip (parity with the worker's
-// MAPNG_STRIP_RISERS env). Set localStorage mapng_strip_risers='0' to disable
-// if it ever clips real geometry on a tricky map.
+// Seam handling for the in-tab fallback bake (prod / sidecar unreachable). The
+// DEFAULT is the root-cause seam weld (weldSeams); the old magic-threshold
+// strip is OFF by default, behind a kill switch for parity with the worker.
+//   localStorage mapng_weld_seams='0'   disable the weld
+//   localStorage mapng_strip_risers='1' re-enable the old heuristic deletion
+// NOTE: lateral footprint carving lives in the Node worker (it needs the live
+// tile tree); the in-tab path runs the weld only, so it leans on weldSeams to
+// close seams. On the dev server every bake routes through the worker anyway.
+const weldSeamsEnabled = () => {
+  try { return localStorage.getItem('mapng_weld_seams') !== '0'; } catch (_) { return true; }
+};
 const riserStripEnabled = () => {
-  try { return localStorage.getItem('mapng_strip_risers') !== '0'; } catch (_) { return true; }
+  try { return localStorage.getItem('mapng_strip_risers') === '1'; } catch (_) { return false; }
 };
 
 /**
@@ -204,12 +214,17 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // selected tiles should never be evicted — if scenes are missing anyway,
   // say so LOUDLY: every missing scene is a visible hole in the map.
   const bakeScenes = [];
+  // Owning tile's geometricError per scene (SMALLER = finer), parallel to
+  // bakeScenes — the weld needs each output mesh's LOD to know which side of a
+  // seam is authoritative.
+  const bakeSceneGE = [];
   let missingScenes = 0;
   for (const tile of bakeTiles) {
     const scene = tile.cached?.scene;
     if (!scene) { missingScenes++; continue; }
     scene.updateMatrixWorld(true);
     bakeScenes.push(scene);
+    bakeSceneGE.push(tile.geometricError ?? Infinity);
   }
   if (missingScenes > 0) {
     console.warn(
@@ -263,8 +278,10 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     googleGroundAlt = 0;
   }
 
+  // Keep the ground here; the strip runs LAST (after the weld) so street risers
+  // can be welded onto the street before it's removed. Mirrors the worker.
   const transformMesh = createTileMeshTransformer(data, frame, WGS84_ELLIPSOID, googleGroundAlt, {
-    stripGround, groundNormalThreshold, groundDistanceM,
+    stripGround: false,
   });
   console.info(
     `[google3dTiles] vertical anchor: googleGroundAlt=${googleGroundAlt.toFixed(1)}m (ellipsoidal), ` +
@@ -338,17 +355,56 @@ export async function bakeGoogle3DTiles(data, options = {}) {
 
   try { tiles.dispose(); } catch (_) { /* noop */ }
 
-  // Cross-tile seam-riser strip — remove the LOD-transition tile-edge walls.
-  // The SAME shared pass the headless export runs, so preview and export match.
+  const upm = computeUnitsPerMeter(data);
+
+  // Seam weld — close the LOD-transition tile-edge walls by snapping coarse
+  // vertices onto the finer ground. The SAME shared pass the headless worker
+  // runs, so the in-tab fallback and the export match. Default on.
+  if (weldSeamsEnabled()) {
+    const soup = out.children.map((m) => ({
+      positions: m.geometry.attributes.position.array,
+      index: m.geometry.index?.array,
+      lod: bakeSceneGE[m.userData.riserGroup] ?? Infinity,
+    }));
+    const { positions, meshesMoved, vertsMoved } = weldSeams(soup, { unitsPerMeter: upm });
+    for (let i = 0; i < out.children.length; i++) {
+      if (positions[i]) {
+        const attr = out.children[i].geometry.attributes.position;
+        attr.array.set(positions[i]);
+        attr.needsUpdate = true;
+        out.children[i].geometry.computeVertexNormals();
+      }
+    }
+    console.info(`[google3dTiles] seam weld: moved ${vertsMoved} verts across ${meshesMoved} meshes`);
+  }
+
+  // Ground strip — LAST, after the weld (so welded street risers go with the
+  // street). The transform keeps the ground now, so this is where the heightmap
+  // gets exposed. Mirrors the worker's applyGroundStrip.
+  if (stripGround) {
+    const soup = out.children.map((m) => ({
+      positions: m.geometry.attributes.position.array,
+      index: m.geometry.index?.array,
+    }));
+    const { indices, removed, total } = stripGroundTris(soup, data, {
+      groundNormalThreshold, groundDistanceM,
+    });
+    for (let i = 0; i < out.children.length; i++) {
+      if (indices[i] && indices[i] !== soup[i].index) {
+        out.children[i].geometry.setIndex(Array.from(indices[i]));
+      }
+    }
+    console.info(`[google3dTiles] ground strip: removed ${removed}/${total} near-terrain tris`);
+  }
+
+  // Legacy heuristic strip — off by default, behind localStorage mapng_strip_risers='1'.
   if (riserStripEnabled()) {
     const soup = out.children.map((m) => ({
       positions: m.geometry.attributes.position.array,
       index: m.geometry.index?.array,
       groupId: m.userData.riserGroup ?? -1,
     }));
-    const { indices, removed, candidates } = stripSeamRisers(soup, {
-      unitsPerMeter: computeUnitsPerMeter(data),
-    });
+    const { indices, removed, candidates } = stripSeamRisers(soup, { unitsPerMeter: upm });
     for (let i = 0; i < out.children.length; i++) {
       if (indices[i] && indices[i] !== soup[i].index) {
         out.children[i].geometry.setIndex(Array.from(indices[i]));
