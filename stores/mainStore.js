@@ -10,7 +10,19 @@ export const useMainStore = defineStore('main', () => {
   const zoom = ref(parseInt(localStorage.getItem('mapng_zoom')) || 13);
   const resolution = ref(parseInt(localStorage.getItem('mapng_resolution')) || 1024);
   const isDarkMode = ref(localStorage.getItem('theme') === 'dark');
-  const batchMode = ref(localStorage.getItem('mapng_batch_mode') === 'true');
+
+  // Map mode: 'single' | 'batch' | 'route'. Source of truth; batchMode/routeMode
+  // are derived shims so existing call sites keep working unchanged.
+  // Migrate from the legacy boolean `mapng_batch_mode` if no mode is stored yet.
+  const VALID_MAP_MODES = ['single', 'batch', 'route'];
+  const storedMapMode = localStorage.getItem('mapng_map_mode');
+  const mapMode = ref(
+    VALID_MAP_MODES.includes(storedMapMode)
+      ? storedMapMode
+      : (localStorage.getItem('mapng_batch_mode') === 'true' ? 'batch' : 'single')
+  );
+  const batchMode = computed(() => mapMode.value === 'batch');
+  const routeMode = computed(() => mapMode.value === 'route');
 
   if (batchMode.value && Number(resolution.value) > 8192) {
     resolution.value = 8192;
@@ -53,6 +65,15 @@ export const useMainStore = defineStore('main', () => {
   const showBatchProgress = ref(false);
   const savedBatchState = ref(loadBatchState());
 
+  // --- Route Corridor State ---
+  const routeStart = ref(JSON.parse(localStorage.getItem('mapng_route_start') || 'null')); // {lat,lng}|null
+  const routeEnd = ref(JSON.parse(localStorage.getItem('mapng_route_end') || 'null'));     // {lat,lng}|null
+  const routePolyline = ref([]);            // decoded centerline [{lat,lng}] — refetched, not persisted
+  const routeDistanceM = ref(0);            // total route length in metres
+  const routeFetching = ref(false);
+  const routeError = ref('');
+  const corridorTier = ref(localStorage.getItem('mapng_corridor_tier') || 'standard'); // draft|standard|fine|ultra
+
   // --- Actions ---
   function setCenter(newCenter) {
     center.value = newCenter;
@@ -80,9 +101,43 @@ export const useMainStore = defineStore('main', () => {
     }
   }
 
+  function setMapMode(mode) {
+    const next = VALID_MAP_MODES.includes(mode) ? mode : 'single';
+    mapMode.value = next;
+    localStorage.setItem('mapng_map_mode', next);
+    // Keep the legacy flag in sync for any old readers.
+    localStorage.setItem('mapng_batch_mode', next === 'batch' ? 'true' : 'false');
+  }
+
+  // Back-compat shim: older call sites toggle a boolean.
   function setBatchMode(value) {
-    batchMode.value = value;
-    localStorage.setItem('mapng_batch_mode', value ? 'true' : 'false');
+    setMapMode(value ? 'batch' : 'single');
+  }
+
+  function setRouteStart(point) {
+    routeStart.value = point;
+    localStorage.setItem('mapng_route_start', JSON.stringify(point ?? null));
+  }
+
+  function setRouteEnd(point) {
+    routeEnd.value = point;
+    localStorage.setItem('mapng_route_end', JSON.stringify(point ?? null));
+  }
+
+  function setRoutePolyline(points, distanceMeters = 0) {
+    routePolyline.value = Array.isArray(points) ? points : [];
+    routeDistanceM.value = Number(distanceMeters) || 0;
+  }
+
+  function setCorridorTier(tier) {
+    corridorTier.value = tier;
+    localStorage.setItem('mapng_corridor_tier', tier);
+  }
+
+  function clearRoute() {
+    routePolyline.value = [];
+    routeDistanceM.value = 0;
+    routeError.value = '';
   }
 
   function setBatchGridCols(cols) {
@@ -116,7 +171,9 @@ export const useMainStore = defineStore('main', () => {
     zoom,
     resolution,
     isDarkMode,
+    mapMode,
     batchMode,
+    routeMode,
     terrainData,
     lastGenerationKey,
     isLoading,
@@ -133,12 +190,25 @@ export const useMainStore = defineStore('main', () => {
     batchCurrentStep,
     showBatchProgress,
     savedBatchState,
+    routeStart,
+    routeEnd,
+    routePolyline,
+    routeDistanceM,
+    routeFetching,
+    routeError,
+    corridorTier,
     // Actions
     setCenter,
     setZoom,
     setResolution,
     toggleDarkMode,
+    setMapMode,
     setBatchMode,
+    setRouteStart,
+    setRouteEnd,
+    setRoutePolyline,
+    setCorridorTier,
+    clearRoute,
     setBatchGridCols,
     setBatchGridRows,
     setBatchTileFollowCenter,

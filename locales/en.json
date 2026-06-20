@@ -26,7 +26,39 @@
   },
   "mode": {
     "singleTile": "Single Tile",
-    "batchJob": "Batch Job"
+    "batchJob": "Batch Job",
+    "route": "Route"
+  },
+  "route": {
+    "title": "Route",
+    "start": "Start",
+    "end": "End",
+    "swap": "Swap",
+    "pickOnMap": "Click map pin to set",
+    "clickMapHint": "Click on the map…",
+    "corridorQuality": "Corridor quality",
+    "corridorHint": "Sets how many metres of surroundings are pulled around the road, and the level of detail.",
+    "tier": {
+      "draft": "Draft",
+      "standard": "Standard",
+      "fine": "Fine",
+      "ultra": "Ultra"
+    },
+    "fetchRoute": "Fetch route",
+    "fetching": "Fetching route…",
+    "routeReady": "Route ready · {km} km · {chunks} chunks",
+    "noKey": "Set VITE_GOOGLE_MAPS_API_KEY (Routes API enabled) to fetch routes.",
+    "bakeTitle": "Bake corridor",
+    "bakeExport": "Bake & export corridor ({chunks} chunks)",
+    "bakeNote": "Bakes Google 3D tiles + terrain + OSM for each chunk and downloads one .zip with a manifest. This can take a while and uses Google tile quota.",
+    "bakeProgress": "Chunk {chunk}/{total} · {phase}",
+    "cancelBake": "Cancel",
+    "phase": {
+      "terrain": "terrain",
+      "bake": "baking tiles",
+      "done": "done",
+      "zip": "packaging"
+    }
   },
   "view": {
     "map2d": "2D Map",

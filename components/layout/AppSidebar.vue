@@ -26,7 +26,7 @@
       </BaseButton>
     </div>
 
-    <ModeToggle :batch-mode="batchMode" @set-batch-mode="$emit('set-batch-mode', $event)" />
+    <ModeToggle :mode="mode" @set-mode="$emit('set-mode', $event)" />
 
     <div class="flex-1 overflow-y-auto custom-scrollbar bg-gray-50/50 dark:bg-gray-800/50 p-5">
       <slot />
@@ -88,13 +88,13 @@ const { t, locale } = useI18n({ useScope: 'global' });
 const locales = computed(() => getSupportedLocales());
 
 defineProps({
-  batchMode: { type: Boolean, default: false },
+  mode: { type: String, default: 'single' },
   isDarkMode: { type: Boolean, default: false },
   buildHash: { type: String, default: '' },
   buildTime: { type: String, default: '' },
 });
 
-defineEmits(['show-about', 'show-disclaimer', 'show-stack', 'toggle-dark', 'set-batch-mode']);
+defineEmits(['show-about', 'show-disclaimer', 'show-stack', 'toggle-dark', 'set-mode']);
 
 const handleLocaleChange = (event) => {
   setI18nLanguage(event.target.value);

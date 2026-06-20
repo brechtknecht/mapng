@@ -10,7 +10,7 @@
   <!-- Main Application - Hidden on Mobile -->
   <div class="hidden md:flex h-screen w-full flex-col md:flex-row overflow-hidden bg-white dark:bg-gray-900 text-gray-900 dark:text-white">
     <AppSidebar
-      :batch-mode="batchMode"
+      :mode="mapMode"
       :is-dark-mode="isDarkMode"
       :build-hash="buildHash"
       :build-time="buildTime"
@@ -18,11 +18,11 @@
       @show-disclaimer="showDisclaimer = true"
       @show-stack="showStackInfo = true"
       @toggle-dark="store.toggleDarkMode"
-      @set-batch-mode="setBatchMode"
+      @set-mode="setMapMode"
     >
       <!-- Single mode -->
       <ControlPanel
-        v-if="!batchMode"
+        v-if="mapMode === 'single'"
         :center="center"
         :zoom="zoom"
         :resolution="resolution"
@@ -72,13 +72,37 @@
         @update:tile-follow-center="store.setBatchTileFollowCenter"
         @show-support="openSupportTip('manual')"
       />
+
+      <!-- Route corridor mode -->
+      <RouteControlPanel
+        v-if="routeMode"
+        :route-start="routeStart"
+        :route-end="routeEnd"
+        :route-polyline="routePolyline"
+        :route-distance-m="routeDistanceM"
+        :route-fetching="routeFetching"
+        :route-error="routeError"
+        :corridor-tier="corridorTier"
+        :active-point="routeActivePoint"
+        :chunk-count="routeChunks.length"
+        :baking="routeBaking"
+        :bake-progress="routeBakeProgress"
+        @pick-point="handlePickRoutePoint"
+        @clear-point="handleClearRoutePoint"
+        @swap-points="handleSwapRoutePoints"
+        @set-corridor-tier="store.setCorridorTier"
+        @fetch-route="handleFetchRoute"
+        @clear-route="store.clearRoute"
+        @bake-route="handleBakeRoute"
+        @cancel-bake="handleCancelRouteBake"
+      />
     </AppSidebar>
 
     <!-- Main Content Area -->
     <main class="flex-1 relative flex flex-col h-full bg-gray-100 dark:bg-gray-950">
       <ViewTabs
         :preview-mode="previewMode"
-        :can-preview="!!terrainData"
+        :can-preview="!!terrainData || (routeMode && !!routePreview)"
         @switch-2d="switchTo2D"
         @switch-3d="previewMode = true"
       />
@@ -98,9 +122,16 @@
             :surrounding-tile-positions="surroundingTilePositions"
             :batch-grid="batchGridTiles"
             :batch-editable="batchMode && !batchRunning && !showBatchProgress"
-            @move="handleMapMove" 
+            :route-mode="routeMode"
+            :route-start="routeStart"
+            :route-end="routeEnd"
+            :route-polyline="routePolyline"
+            :route-chunks="routeChunks"
+            :route-active-point="routeActivePoint"
+            @move="handleMapMove"
             @zoom="store.setZoom"
             @batch-tile-drag="handleBatchTileDrag"
+            @route-point="handleRoutePoint"
           />
         </div>
         
@@ -108,8 +139,13 @@
         <div :class="['absolute inset-0 transition-all duration-500 bg-black', previewMode ? 'opacity-100 visible' : 'opacity-0 invisible pointer-events-none']">
           <Suspense>
             <template #default>
-              <Preview3D 
-                v-if="terrainData && previewMode"
+              <RoutePreview
+                v-if="routeMode && routePreview && previewMode"
+                :chunks="routePreview.chunks"
+                :world-bounds="routePreview.worldBounds"
+              />
+              <Preview3D
+                v-else-if="terrainData && previewMode && !routeMode"
                 :terrain-data="terrainData"
               />
             </template>
@@ -196,14 +232,19 @@ import TechStackModal from './components/modals/TechStackModal.vue';
 import SupportTipModal from './components/modals/SupportTipModal.vue';
 import ControlPanel from './components/panels/ControlPanel.vue';
 import BatchControlPanel from './components/panels/BatchControlPanel.vue';
+import RouteControlPanel from './components/panels/RouteControlPanel.vue';
 import BatchProgressModal from './components/modals/BatchProgressModal.vue';
 import MapSelector from './components/map/MapSelector.vue';
 import Preview3D from './components/three/Preview3D.vue';
+import RoutePreview from './components/three/RoutePreview.vue';
 import AppSidebar from './components/layout/AppSidebar.vue';
 import ViewTabs from './components/ui/ViewTabs.vue';
 import { fetchTerrainData, addOSMToTerrain, loadTerrainFromTif, parseTifFile, loadTerrainFromLaz, parseLazFile } from './services/terrain';
 import { applyAscCoordinateSystem } from './services/ascLoader.js';
 import { computeUploadedCropBounds } from './services/uploadBounds';
+import { fetchRoute } from './services/googleRoutes';
+import { chunkRoute } from './services/routeCorridor';
+import { bakeAndExportRoute } from './services/routeBake';
 import {
   computeGridTiles,
   computeGridTilesWithOffsets,
@@ -228,7 +269,9 @@ const {
   zoom,
   resolution,
   isDarkMode,
+  mapMode,
   batchMode,
+  routeMode,
   terrainData,
   lastGenerationKey,
   isLoading,
@@ -244,7 +287,14 @@ const {
   batchRunning,
   batchCurrentStep,
   showBatchProgress,
-  savedBatchState
+  savedBatchState,
+  routeStart,
+  routeEnd,
+  routePolyline,
+  routeDistanceM,
+  routeFetching,
+  routeError,
+  corridorTier
 } = storeToRefs(store);
 
 const showStackInfo = ref(false);
@@ -358,7 +408,7 @@ const batchGridTiles = computed(() => {
 const buildHash = __BUILD_HASH__;
 const buildTime = new Date(__BUILD_TIME__).toLocaleString();
 
-const { setCenter, setResolution, setBatchMode: setStoreBatchMode } = store;
+const { setCenter, setResolution, setMapMode: setStoreMapMode } = store;
 
 const handleGlobalDevToggleKey = (event) => {
   if (event.defaultPrevented) return;
@@ -374,11 +424,124 @@ const handleGlobalDevToggleKey = (event) => {
   }
 };
 
-const setBatchMode = (value) => {
-  setStoreBatchMode(value);
-  if (value && Number(resolution.value) > 8192) {
+const routeActivePoint = ref(null); // 'start' | 'end' | null
+let routeAbortController = null;
+
+const setMapMode = (mode) => {
+  setStoreMapMode(mode);
+  if (mode === 'batch' && Number(resolution.value) > 8192) {
     setResolution(8192);
   }
+  if (mode !== 'route') routeActivePoint.value = null;
+  // Switching modes: drop any stale preview so the wrong scene doesn't show.
+  previewMode.value = false;
+};
+
+// Toggle which endpoint the next map click / current state should set.
+const handlePickRoutePoint = (which) => {
+  routeActivePoint.value = routeActivePoint.value === which ? null : which;
+};
+
+// A map click or pin drag delivered a coordinate for an endpoint.
+const handleRoutePoint = ({ which, lat, lng }) => {
+  const point = { lat, lng };
+  if (which === 'start') store.setRouteStart(point);
+  else store.setRouteEnd(point);
+  store.clearRoute(); // any existing route is stale once an endpoint moves
+  // Fast first run: after placing start, advance to placing end.
+  if (which === 'start' && !routeEnd.value) routeActivePoint.value = 'end';
+  else if (routeActivePoint.value === which) routeActivePoint.value = null;
+};
+
+const handleClearRoutePoint = (which) => {
+  if (which === 'start') store.setRouteStart(null);
+  else store.setRouteEnd(null);
+  store.clearRoute();
+};
+
+const handleSwapRoutePoints = () => {
+  const prevStart = routeStart.value;
+  store.setRouteStart(routeEnd.value);
+  store.setRouteEnd(prevStart);
+  store.clearRoute();
+};
+
+const handleFetchRoute = async () => {
+  if (!routeStart.value || !routeEnd.value || routeFetching.value) return;
+  routeAbortController?.abort();
+  routeAbortController = new AbortController();
+  routeError.value = '';
+  routeFetching.value = true;
+  try {
+    const { polyline, distanceMeters } = await fetchRoute({
+      start: routeStart.value,
+      end: routeEnd.value,
+      signal: routeAbortController.signal,
+    });
+    store.setRoutePolyline(polyline, distanceMeters);
+    routeActivePoint.value = null;
+  } catch (err) {
+    if (err?.name === 'AbortError') return;
+    console.error('fetchRoute failed', err);
+    store.clearRoute(); // drop any stale polyline first — it also resets the error
+    routeError.value = err?.message || String(err);
+  } finally {
+    routeFetching.value = false;
+  }
+};
+
+// AOI boxes along the fetched route (live preview; recomputes on tier change).
+const routeChunks = computed(() => {
+  if (!routeMode.value || routePolyline.value.length < 2) return [];
+  return chunkRoute(routePolyline.value, corridorTier.value);
+});
+
+// --- Route corridor bake + export ---
+const routeBaking = ref(false);
+const routeBakeProgress = ref(null); // { chunk, total, phase, detail }
+const routePreview = ref(null); // { chunks: [{index, blob, placement}], worldBounds }
+let routeBakeAbort = null;
+
+const handleBakeRoute = async () => {
+  if (!routeChunks.value.length || routeBaking.value) return;
+  const tilesApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  if (!tilesApiKey) {
+    routeError.value = 'Set VITE_GOOGLE_MAPS_API_KEY (tiles credential) to bake the corridor.';
+    return;
+  }
+  routeBakeAbort = new AbortController();
+  routeBaking.value = true;
+  routeError.value = '';
+  routeBakeProgress.value = { chunk: 0, total: routeChunks.value.length, phase: 'terrain', detail: '' };
+  try {
+    const { blob, previewChunks, worldBoundsM } = await bakeAndExportRoute(routeChunks.value, {
+      tierId: corridorTier.value,
+      googleApiKey: tilesApiKey,
+      routeDistanceM: routeDistanceM.value,
+      onProgress: (p) => { routeBakeProgress.value = p; },
+      signal: routeBakeAbort.signal,
+    });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    const date = new Date().toISOString().slice(0, 10);
+    link.download = `MapNG_Route_${date}_${routeChunks.value.length}chunks.zip`;
+    link.click();
+    URL.revokeObjectURL(link.href);
+    // Show the stitched route in the 3D preview tab (same content as the export).
+    routePreview.value = { chunks: previewChunks, worldBounds: worldBoundsM };
+    previewMode.value = true;
+  } catch (err) {
+    if (err?.name === 'AbortError') return;
+    console.error('route bake failed', err);
+    routeError.value = err?.message || String(err);
+  } finally {
+    routeBaking.value = false;
+    routeBakeProgress.value = null;
+  }
+};
+
+const handleCancelRouteBake = () => {
+  routeBakeAbort?.abort();
 };
 
 // Attempt to get user location on load
