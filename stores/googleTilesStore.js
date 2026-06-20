@@ -22,6 +22,12 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   const status = ref('idle'); // 'idle' | 'baking' | 'ready' | 'error'
   const error = ref(null);
   const show = ref(true);
+  // True once the user has actually loaded Google tiles for the CURRENT AOI
+  // (clicked Load, or a cached bake auto-restored). Lets the stripGround toggle
+  // auto-bake the other variant only when tiles are already in play — flipping
+  // the checkbox before ever loading must NOT kick off a bake. Cleared on a new
+  // AOI (Preview3D's terrainData watch).
+  const engaged = ref(false);
   const showCameras = ref(false); // overlay the bake's camera stations in the preview
   const progress = reactive({ visible: 0, inflight: 0, station: 1, stations: 1 });
   const group = shallowRef(null);
@@ -67,6 +73,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
 
   async function bakeForPreview(terrainData, forceRebake = false) {
     if (!apiKey || !terrainData || status.value === 'baking') return;
+    engaged.value = true; // the user loaded tiles for this AOI
     status.value = 'baking';
     error.value = null;
     progress.visible = 0;
@@ -160,6 +167,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
         group.value = markRaw(restored);
         show.value = true;
         status.value = 'ready';
+        engaged.value = true; // tiles are now showing — toggling may compare
       }
     } catch (err) {
       console.warn('[googleTilesStore] cache restore failed:', err);
@@ -175,7 +183,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
 
   return {
     status, error, show, showCameras, progress, group, apiKey, quality, zOffset,
-    refining, refineError, stripGround,
+    refining, refineError, stripGround, engaged,
     setQuality, setZOffset, setStripGround,
     bakeForPreview, rebake, reset, tryRestore, refineFromView,
   };

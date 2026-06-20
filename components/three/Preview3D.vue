@@ -565,7 +565,8 @@ const googleTilesStore = useGoogleTilesStore();
 // click and without any Google refetch.
 watch(() => props.terrainData, (data) => {
   if (googleTilesStore.status !== 'idle') googleTilesStore.reset();
-  if (data) googleTilesStore.tryRestore(data);
+  googleTilesStore.engaged = false; // new AOI — tiles not loaded yet here
+  if (data) googleTilesStore.tryRestore(data); // a cache hit re-marks engaged
 }, { immediate: true });
 
 // Quality switch: the displayed bake no longer matches — drop it and probe
@@ -577,11 +578,21 @@ watch(() => googleTilesStore.quality, () => {
   if (props.terrainData) googleTilesStore.tryRestore(props.terrainData);
 });
 
-// Ground-strip toggle is part of the bake cache key — same probe dance.
-watch(() => googleTilesStore.stripGround, () => {
+// Ground-strip toggle is part of the bake cache key. Restore the matching
+// variant if it's cached; otherwise BAKE it — unlike the quality switch, this
+// is a quick on/off comparison the user expects to SEE immediately (without it,
+// flipping to an un-baked variant just leaves the OSM buildings on screen).
+watch(() => googleTilesStore.stripGround, async () => {
   if (googleTilesStore.status === 'baking') return;
+  // Only auto-bake the new variant if tiles were already loaded for this AOI;
+  // a cold checkbox flip just probes the cache (Load button stays otherwise).
+  const wasEngaged = googleTilesStore.engaged;
   googleTilesStore.reset();
-  if (props.terrainData) googleTilesStore.tryRestore(props.terrainData);
+  if (!props.terrainData) return;
+  await googleTilesStore.tryRestore(props.terrainData);
+  if (wasEngaged && googleTilesStore.status === 'idle') {
+    googleTilesStore.bakeForPreview(props.terrainData);
+  }
 });
 
 // Google photogrammetry replaces the OSM-extruded buildings — showing both
