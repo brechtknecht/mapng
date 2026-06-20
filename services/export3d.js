@@ -1587,8 +1587,25 @@ export const exportToGLB = async (data, options = {}) => {
           errorTarget: google3DErrorTarget,
           ...(googleQuality ? { quality: googleQuality } : {}),
           ...(typeof stripGoogleGround === 'boolean' ? { stripGround: stripGoogleGround } : {}),
-          onProgress: (p) => onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`),
+          // Route mode: bake ONLY the corridor (stations follow the route),
+          // not the whole box — the mask below then trims almost nothing.
+          // memoryCache:false lets the route export bake several chunks at once
+          // (the single-slot in-memory cache can't hold more than one).
+          ...(corridorMask ? {
+            corridorSegment: corridorMask.segment,
+            corridorHalfWidthM: corridorMask.halfWidthM,
+            memoryCache: false,
+          } : {}),
+          onProgress: (p) => {
+            onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`);
+            // Structured sweep progress (station/stations, tile counts) for a
+            // per-chunk fill on the route map — see routeBake/routeProgress.
+            options.onBakeProgress?.(p);
+          },
         });
+        // Surface bake telemetry (station/tile counts, bake ms) for the route
+        // manifest — undefined on an IndexedDB/in-memory cache hit.
+        options.onBakeStats?.(googleGroup.userData?.bakeStats);
         // Clone the mesh nodes (geometry/material stay shared) — the cached
         // group is owned by the bake cache and may be parented into the 3D
         // preview scene right now; scene.add() on it directly would steal it.

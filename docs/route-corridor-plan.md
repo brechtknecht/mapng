@@ -222,6 +222,42 @@ origin + heading + shared-edge ids in `manifest.json`) so a **stitch pass (phase
 
 ---
 
+## 7.5 Bake performance — where the time goes & how to cut it
+
+Measured: ~**2.5 min/chunk** (Standard/roads, 1024 m box), strictly sequential →
+a 15 km route (~17 chunks) ≈ **40+ min**. Cost drivers, per chunk:
+
+1. **Google tile bake (DOMINANT)** — `runStationSweep` downloads+parses tiles per
+   station. Time ≈ `2 min + 25 s/station`. Station count for roads/1024 m:
+   1 top-down + **8 obliques + 16 grid cells (cover the WHOLE box)** + up to 40 road
+   stations. The obliques+grid pull tiles across the entire box — then the corridor
+   mask throws ~60-70% away. **We pay to bake tiles we delete.**
+2. **GLB encode** — 100-300 MB per chunk (CPU-bound, single-threaded).
+3. **Terrain + OSM fetch** — minor, network-bound.
+All three run sequentially, and chunks run sequentially.
+
+Optimizations, ranked by impact ÷ effort:
+
+- **A. Corridor-only stations (biggest win; synergises with masking).** A route-bake
+  mode that places stations ONLY along the route segment within the corridor (a real
+  `buildCorridorStations` — the `roads` pass already does along-road stations; the waste
+  is the box-covering 8 obliques + 16-cell grid). Pull only the tiles we keep → the mask
+  becomes ~free and tile downloads drop ~2-3×. Effort: medium-high (bake core + worker
+  accept the segment, skip the full grid). **This is the structural fix.**
+- **B. Parallelise chunks.** The sidecar spawns one worker per chunk-key, so different
+  bounds bake concurrently. Run 2-3 chunks at once instead of sequential. Caps at network
+  bandwidth + Google rate limits; needs the in-browser single-slot cache made concurrency-safe.
+  Effort: medium. Win: up to ~Nx wall-clock.
+- **C. Pipeline encode + prefetch (cheap).** Overlap the GLB encode (CPU) and the next
+  chunk's terrain/OSM fetch (network) with the current bake; prefetch all terrain up front.
+  Effort: low. Win: hides fetch + part of encode.
+- **D. Cut chunk overlap / share tiles.** 15% overlap re-downloads boundary tiles each chunk;
+  trimming overlap or sharing a tile cache across chunk bakes removes redundant downloads.
+- **E. The quality dial IS the main knob.** Draft (`high`, no road pass) bakes far fewer
+  stations than Ultra (`max`, +128 deepen stations). Surface expected time per tier.
+
+Recommended order: **A → C → B**. A removes the wasted work, C is nearly free, B scales the rest.
+
 ## 8. Risks & open questions
 
 **Risks**

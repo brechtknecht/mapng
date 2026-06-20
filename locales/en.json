@@ -44,6 +44,13 @@
       "fine": "Fine",
       "ultra": "Ultra"
     },
+    "chunkSize": "Chunk size",
+    "chunkSizeAuto": "Auto",
+    "chunkSizeHint": "Box size of each baked piece (also the terrain detail). Auto follows the quality tier.",
+    "chunkSizeEffective": "{size} m boxes · {res}px terrain · ~{chunks} pieces",
+    "concurrency": "Parallel fetches",
+    "concurrencyHint": "How many chunks bake at once (dev sidecar only). Higher = faster but more RAM and Google tile quota.",
+    "parallelBaking": "{n}× in parallel",
     "fetchRoute": "Fetch route",
     "fetching": "Fetching route…",
     "routeReady": "Route ready · {km} km · {chunks} chunks",
@@ -56,7 +63,9 @@
     "phase": {
       "terrain": "terrain",
       "bake": "baking tiles",
+      "encode": "encoding",
       "done": "done",
+      "error": "error",
       "zip": "packaging"
     }
   },

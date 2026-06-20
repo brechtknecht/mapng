@@ -62,15 +62,26 @@
         :options="{ dashArray: '6, 8', lineCap: 'round' }"
       />
 
-      <!-- Route corridor: AOI chunk boxes along the route -->
+      <!-- Route corridor: AOI chunk boxes along the route (outline, status-coloured) -->
       <l-rectangle
         v-for="chunk in (routeMode ? routeChunks : [])"
         :key="'route-chunk-' + chunk.id"
         :bounds="[[chunk.bounds.south, chunk.bounds.west], [chunk.bounds.north, chunk.bounds.east]]"
-        color="#0f766e"
-        :weight="1.5"
-        :fill-opacity="0.06"
-        :options="{ dashArray: '4, 6', lineCap: 'round' }"
+        :color="chunkColor(chunk)"
+        :weight="chunkStatusOf(chunk).phase === 'pending' ? 1.5 : 2"
+        :fill-opacity="0.05"
+        :options="chunkOutlineOpts(chunk)"
+      />
+      <!-- Route corridor: per-chunk progress fill (grows bottom→top with pct) -->
+      <l-rectangle
+        v-for="chunk in (routeMode && routeBaking ? routeChunks.filter(chunkHasFill) : [])"
+        :key="'route-chunk-fill-' + chunk.id"
+        :bounds="chunkFillBounds(chunk)"
+        :color="chunkColor(chunk)"
+        :weight="0"
+        :fill-color="chunkColor(chunk)"
+        :fill-opacity="0.4"
+        :options="{ interactive: false }"
       />
 
       <!-- Route corridor: fetched road centerline + start/end markers -->
@@ -248,6 +259,8 @@ const props = defineProps({
   routeEnd: { type: Object, default: null },
   routePolyline: { type: Array, default: () => [] },
   routeChunks: { type: Array, default: () => [] },
+  // Live per-chunk bake status (index-aligned with routeChunks): [{ index, phase, pct }]
+  routeChunkStatus: { type: Array, default: () => [] },
   routeActivePoint: { type: String, default: null }, // 'start' | 'end' | null
 });
 
@@ -263,6 +276,31 @@ const makeRoutePinIcon = (color) =>
 
 const routeStartIcon = makeRoutePinIcon('#10B981');
 const routeEndIcon = makeRoutePinIcon('#EF4444');
+
+// --- Route chunk live status (drives the per-box fill while baking) ---
+const PHASE_COLOR = {
+  pending: '#0f766e', // teal (idle)
+  terrain: '#0ea5e9', // sky — fetching terrain
+  bake: '#f59e0b',    // amber — baking tiles
+  encode: '#f59e0b',
+  done: '#10b981',    // green
+  error: '#ef4444',   // red
+};
+const chunkStatusOf = (chunk) =>
+  props.routeChunkStatus?.[chunk.index] ?? { phase: 'pending', pct: 0 };
+const routeBaking = computed(() => (props.routeChunkStatus?.length ?? 0) > 0);
+const chunkColor = (chunk) => PHASE_COLOR[chunkStatusOf(chunk).phase] ?? PHASE_COLOR.pending;
+const chunkOutlineOpts = (chunk) =>
+  (chunkStatusOf(chunk).phase === 'pending'
+    ? { dashArray: '4, 6', lineCap: 'round' }
+    : { lineCap: 'round' }); // solid once active/done — stands out from idle boxes
+const chunkHasFill = (chunk) => chunkStatusOf(chunk).pct > 0;
+// Fill grows bottom (south) → top with pct, so each box visibly "fills up".
+const chunkFillBounds = (chunk) => {
+  const { south, north, west, east } = chunk.bounds;
+  const pct = Math.max(0, Math.min(100, chunkStatusOf(chunk).pct)) / 100;
+  return [[south, west], [south + (north - south) * pct, east]];
+};
 
 const hasBatchGrid = computed(() => props.batchGrid && props.batchGrid.length > 0);
 

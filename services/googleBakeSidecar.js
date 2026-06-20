@@ -52,7 +52,9 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
   const {
     apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
     cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
+    corridorSegment, corridorHalfWidthM,
   } = options;
+  const corridorMode = Array.isArray(corridorSegment) && corridorSegment.length >= 2;
   const heightMap = data.heightMap instanceof Float32Array
     ? data.heightMap
     : new Float32Array(data.heightMap);
@@ -66,13 +68,16 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
       height: data.height,
       minHeight: data.minHeight,
       heightMap: toBase64(heightMap),
-      osmFeatures: quality === 'roads' || quality === 'max'
+      // Corridor mode drives stations from corridorSegment, not the OSM
+      // network — don't ship the road features the worker won't read.
+      osmFeatures: !corridorMode && (quality === 'roads' || quality === 'max')
         ? (data.osmFeatures ?? []).filter((f) => f.type === 'road')
         : undefined,
     },
     options: {
       apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
       cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
+      corridorSegment, corridorHalfWidthM,
     },
   };
 };
@@ -177,6 +182,14 @@ const fetchAndDecodeResult = async (jobId) => {
 const buildGroup = async (key, { meshes, stations, stats }) => {
   const group = await deserializeGroup(meshes);
   if (stations) group.userData.bakeStations = stations;
+  // Surface the worker's bake telemetry for the route manifest (§6).
+  group.userData.bakeStats = {
+    stations: stats.stations,
+    selected: stats.selected,
+    kept: stats.kept,
+    timedOut: stats.timedOut,
+    elapsedMs: stats.elapsedMs,
+  };
   console.info(
     `[google-bake] sidecar bake restored: ${meshes.length} meshes ` +
     `(${stats.selected ?? '?'} tiles selected, ${stats.kept ?? '?'} kept, ` +

@@ -73,6 +73,21 @@ export const useMainStore = defineStore('main', () => {
   const routeFetching = ref(false);
   const routeError = ref('');
   const corridorTier = ref(localStorage.getItem('mapng_corridor_tier') || 'standard'); // draft|standard|fine|ultra
+  // Manual AOI box-size override (metres), decoupled from the tier. null = Auto
+  // (follow the tier's chunkSizeM). See routeCorridor.resolveChunkSizeM.
+  const routeChunkSizeM = ref(
+    (() => {
+      const v = parseInt(localStorage.getItem('mapng_route_chunk_size'), 10);
+      return Number.isFinite(v) && v > 0 ? v : null;
+    })(),
+  );
+  // How many chunks to bake concurrently (dev sidecar only). 1–4; default 2.
+  const routeConcurrency = ref(
+    (() => {
+      const v = parseInt(localStorage.getItem('mapng_route_concurrency'), 10);
+      return Number.isFinite(v) ? Math.max(1, Math.min(4, v)) : 2;
+    })(),
+  );
 
   // --- Actions ---
   function setCenter(newCenter) {
@@ -132,6 +147,23 @@ export const useMainStore = defineStore('main', () => {
   function setCorridorTier(tier) {
     corridorTier.value = tier;
     localStorage.setItem('mapng_corridor_tier', tier);
+  }
+
+  function setRouteChunkSizeM(sizeM) {
+    const v = Number(sizeM);
+    if (Number.isFinite(v) && v > 0) {
+      routeChunkSizeM.value = v;
+      localStorage.setItem('mapng_route_chunk_size', String(v));
+    } else {
+      routeChunkSizeM.value = null; // Auto
+      localStorage.removeItem('mapng_route_chunk_size');
+    }
+  }
+
+  function setRouteConcurrency(n) {
+    const v = Math.max(1, Math.min(4, Math.round(Number(n)) || 1));
+    routeConcurrency.value = v;
+    localStorage.setItem('mapng_route_concurrency', String(v));
   }
 
   function clearRoute() {
@@ -197,6 +229,8 @@ export const useMainStore = defineStore('main', () => {
     routeFetching,
     routeError,
     corridorTier,
+    routeChunkSizeM,
+    routeConcurrency,
     // Actions
     setCenter,
     setZoom,
@@ -208,6 +242,8 @@ export const useMainStore = defineStore('main', () => {
     setRouteEnd,
     setRoutePolyline,
     setCorridorTier,
+    setRouteChunkSizeM,
+    setRouteConcurrency,
     clearRoute,
     setBatchGridCols,
     setBatchGridRows,

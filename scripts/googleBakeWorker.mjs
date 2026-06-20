@@ -668,6 +668,10 @@ async function startBake(data, options, outPath) {
     sensorSize = quality === 'standard' ? 1024 : 1536,
     maxWaitMs = null,
     stabilityMs = 2500,
+    // Route-corridor mode (opt-in) — see services/googleBakeCore.js. Mirrors
+    // the in-browser bake so the sidecar produces the identical corridor result.
+    corridorSegment = null,
+    corridorHalfWidthM = 0,
   } = options;
 
   if (!apiKey) throw new Error('bake worker: missing apiKey');
@@ -712,7 +716,7 @@ async function startBake(data, options, outPath) {
 
   installCaptureLoader(tiles);
 
-  const stations = buildSweepStations(frame, { quality, cameraSweep });
+  const stations = buildSweepStations(frame, { quality, cameraSweep, corridorSegment });
 
   const cam = new THREE.PerspectiveCamera(60, 1, 1, 1e9);
   cam.up.copy(frame.upDir);
@@ -729,6 +733,7 @@ async function startBake(data, options, outPath) {
     ellipsoid: WGS84_ELLIPSOID,
     quality, maxWaitMs, stabilityMs,
     startTicker, onProgress, selectedTiles,
+    corridorSegment, corridorHalfWidthM,
   });
 
   const cacheFull = typeof tiles.lruCache?.isFull === 'function' ? tiles.lruCache.isFull() : false;

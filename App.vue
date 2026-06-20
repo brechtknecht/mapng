@@ -83,6 +83,8 @@
         :route-fetching="routeFetching"
         :route-error="routeError"
         :corridor-tier="corridorTier"
+        :chunk-size-m="routeChunkSizeM"
+        :concurrency="routeConcurrency"
         :active-point="routeActivePoint"
         :chunk-count="routeChunks.length"
         :baking="routeBaking"
@@ -91,6 +93,8 @@
         @clear-point="handleClearRoutePoint"
         @swap-points="handleSwapRoutePoints"
         @set-corridor-tier="store.setCorridorTier"
+        @set-chunk-size="store.setRouteChunkSizeM"
+        @set-concurrency="store.setRouteConcurrency"
         @fetch-route="handleFetchRoute"
         @clear-route="store.clearRoute"
         @bake-route="handleBakeRoute"
@@ -127,6 +131,7 @@
             :route-end="routeEnd"
             :route-polyline="routePolyline"
             :route-chunks="routeChunks"
+            :route-chunk-status="routeChunkStatus"
             :route-active-point="routeActivePoint"
             @move="handleMapMove"
             @zoom="store.setZoom"
@@ -294,7 +299,9 @@ const {
   routeDistanceM,
   routeFetching,
   routeError,
-  corridorTier
+  corridorTier,
+  routeChunkSizeM,
+  routeConcurrency
 } = storeToRefs(store);
 
 const showStackInfo = ref(false);
@@ -490,15 +497,18 @@ const handleFetchRoute = async () => {
   }
 };
 
-// AOI boxes along the fetched route (live preview; recomputes on tier change).
+// AOI boxes along the fetched route (live preview; recomputes on tier or
+// chunk-size change). The chunk-size override is decoupled from the tier.
 const routeChunks = computed(() => {
   if (!routeMode.value || routePolyline.value.length < 2) return [];
-  return chunkRoute(routePolyline.value, corridorTier.value);
+  return chunkRoute(routePolyline.value, corridorTier.value, routeChunkSizeM.value);
 });
 
 // --- Route corridor bake + export ---
 const routeBaking = ref(false);
-const routeBakeProgress = ref(null); // { chunk, total, phase, detail }
+const routeBakeProgress = ref(null); // RouteProgressSnapshot | { chunk, total, phase, detail }
+// Per-chunk status for the map overlay (index-aligned with routeChunks).
+const routeChunkStatus = computed(() => routeBakeProgress.value?.chunks ?? []);
 const routePreview = ref(null); // { chunks: [{index, blob, placement}], worldBounds }
 let routeBakeAbort = null;
 
@@ -516,6 +526,8 @@ const handleBakeRoute = async () => {
   try {
     const { blob, previewChunks, worldBoundsM } = await bakeAndExportRoute(routeChunks.value, {
       tierId: corridorTier.value,
+      chunkSizeM: routeChunkSizeM.value,
+      concurrency: routeConcurrency.value,
       googleApiKey: tilesApiKey,
       routeDistanceM: routeDistanceM.value,
       onProgress: (p) => { routeBakeProgress.value = p; },

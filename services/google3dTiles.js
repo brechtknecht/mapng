@@ -108,6 +108,12 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     // 25 s per station. 2.5 s queue-quiet window per station.
     maxWaitMs = null,
     stabilityMs = 2500,
+    // Route-corridor mode (opt-in, set by the route bake via export3d.js).
+    // When present, the sweep follows the route polyline within ±halfWidth
+    // instead of covering the whole AOI box. Omitted for the area/single-tile
+    // export, which keeps the full box-covering sweep.
+    corridorSegment = null,
+    corridorHalfWidthM = 0,
     onProgress,
   } = options;
 
@@ -183,7 +189,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     return () => { tickHandler = null; };
   };
 
-  const stations = buildSweepStations(frame, { quality, cameraSweep });
+  const stations = buildSweepStations(frame, { quality, cameraSweep, corridorSegment });
 
   const cam = new THREE.PerspectiveCamera(60, 1, 1, 1e9);
   cam.up.copy(frame.upDir);
@@ -205,6 +211,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       ellipsoid: WGS84_ELLIPSOID,
       quality, maxWaitMs, stabilityMs,
       startTicker, onProgress,
+      corridorSegment, corridorHalfWidthM,
     });
   } finally {
     // Always kill the worker ticker — also on bake errors mid-sweep.
@@ -295,8 +302,16 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   const out = new THREE.Group();
   out.name = 'GoogleTiles3D';
   // Station footprints for the 3D preview's camera-position overlay
-  // (includes road stations appended mid-sweep).
+  // (includes road/corridor stations appended mid-sweep).
   out.userData.bakeStations = stations.map((st) => st.viz).filter(Boolean);
+  // Bake telemetry for the route manifest's per-chunk bake{} block (§6).
+  out.userData.bakeStats = {
+    stations: stations.length,
+    selected: selectedTiles.size,
+    kept: bakeTiles.length,
+    timedOut,
+    elapsedMs: Math.round(elapsedMs),
+  };
 
   let outputMeshIdx = 0;
   forEachBakeMesh((node, sceneIdx) => {
@@ -448,6 +463,21 @@ let _bakeCache = null; // { key, promise }
 // v5: cross-tile seam-riser strip (removes the LOD-transition tile-edge walls).
 const BAKE_FORMAT_VERSION = 5;
 
+// Cheap order-sensitive hash of a route segment (rounded coords) — keeps the
+// cache key short while still splitting different routes/widths over the same
+// bounds into distinct entries.
+const hashSegment = (segment) => {
+  let h = 2166136261; // FNV-1a 32-bit
+  for (const p of segment) {
+    const s = `${p.lat.toFixed(6)},${p.lng.toFixed(6)};`;
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 16777619);
+    }
+  }
+  return (h >>> 0).toString(36);
+};
+
 const bakeCacheKey = (
   data,
   {
@@ -457,16 +487,25 @@ const bakeCacheKey = (
     cameraSweep = true,
     quality = 'standard',
     sensorSize = quality === 'standard' ? 1024 : 1536,
+    corridorSegment = null,
+    corridorHalfWidthM = 0,
   } = {},
 ) => {
   const b = data.bounds;
   // Round to ~1 cm so float formatting noise between sessions can't split
   // identical coordinates into different cache keys.
   const r = (x) => Number(x).toFixed(7);
+  // Corridor bakes follow the route, not the box — a different station set and
+  // result than a full-box bake of the same bounds, so they MUST key apart (and
+  // re-bake when the route or half-width changes). Empty for the area path, so
+  // its key is byte-for-byte unchanged.
+  const corridor = Array.isArray(corridorSegment) && corridorSegment.length >= 2
+    ? `|corr=${corridorHalfWidthM}:${corridorSegment.length}:${hashSegment(corridorSegment)}`
+    : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
     `|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}` +
-    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}`
+    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}${corridor}`
   );
 };
 
@@ -562,9 +601,61 @@ const disposeGroup = (group) => {
  * `onProgress` only fires when a real bake runs — cache hits resolve fast.
  * Pass `forceRebake: true` to bypass and purge both layers for this key.
  */
+// The actual bake for a cache key: IndexedDB restore → Node sidecar → in-browser
+// fallback. Touches NO module-global state, so it is safe to run concurrently
+// for different keys (route mode bakes several chunks at once). The returned
+// group is owned by the CALLER.
+const runBake = async (key, data, bakeOptions, forceRebake) => {
+  if (forceRebake) {
+    await deletePersistedBake(key).catch(() => { /* best effort */ });
+  } else {
+    try {
+      const t0 = performance.now();
+      const restored = await loadPersistedBake(key);
+      if (restored) {
+        console.info(
+          `[google3dTiles] restored ${restored.children.length} tile meshes from IndexedDB ` +
+          `in ${((performance.now() - t0) / 1000).toFixed(1)}s — no Google refetch`,
+        );
+        return restored;
+      }
+    } catch (err) {
+      console.warn('[google3dTiles] persistent cache read failed — baking fresh:', err);
+    }
+  }
+
+  if (await sidecarAvailable()) {
+    console.info('[google3dTiles] baking via Node sidecar');
+    // The sidecar client persists the result records to IndexedDB itself.
+    return bakeViaSidecar(data, bakeOptions, key, { force: forceRebake });
+  }
+
+  const group = await bakeGoogle3DTiles(data, bakeOptions);
+  // Persist in the background; never block or fail the bake on it.
+  persistBake(key, group)
+    .then((bytes) => {
+      if (bytes !== null) {
+        console.info(
+          `[google3dTiles] bake persisted to IndexedDB (~${(bytes / 1024 ** 2).toFixed(0)} MB) key=${key}`,
+        );
+      }
+    })
+    .catch((err) => console.warn('[google3dTiles] persisting bake failed (quota?):', err));
+  return group;
+};
+
 export function getOrBakeGoogle3DTiles(data, options = {}) {
-  const { forceRebake = false, ...bakeOptions } = resolveBakeOptions(options);
+  const { forceRebake = false, memoryCache = true, ...bakeOptions } = resolveBakeOptions(options);
   const key = bakeCacheKey(data, bakeOptions);
+
+  // Route mode passes memoryCache:false so several chunks can bake at once: the
+  // single-slot _bakeCache would otherwise have concurrent chunks evict (and
+  // prematurely dispose) one another's groups. Each chunk is baked + encoded
+  // once, so the in-memory layer buys nothing here — IndexedDB still makes
+  // re-runs free. The group is owned by the caller (GC reclaims it; the bake
+  // groups hold no GPU resources, only CPU buffers/canvas textures).
+  if (!memoryCache) return runBake(key, data, bakeOptions, forceRebake);
+
   if (!forceRebake && _bakeCache?.key === key) {
     console.info('[google3dTiles] cache hit — reusing baked tiles');
     return _bakeCache.promise;
@@ -572,46 +663,7 @@ export function getOrBakeGoogle3DTiles(data, options = {}) {
 
   clearGoogleTilesCache();
 
-  const run = async () => {
-    if (forceRebake) {
-      await deletePersistedBake(key).catch(() => { /* best effort */ });
-    } else {
-      try {
-        const t0 = performance.now();
-        const restored = await loadPersistedBake(key);
-        if (restored) {
-          console.info(
-            `[google3dTiles] restored ${restored.children.length} tile meshes from IndexedDB ` +
-            `in ${((performance.now() - t0) / 1000).toFixed(1)}s — no Google refetch`,
-          );
-          return restored;
-        }
-      } catch (err) {
-        console.warn('[google3dTiles] persistent cache read failed — baking fresh:', err);
-      }
-    }
-
-    if (await sidecarAvailable()) {
-      console.info('[google3dTiles] baking via Node sidecar');
-      // The sidecar client persists the result records to IndexedDB itself.
-      return bakeViaSidecar(data, bakeOptions, key, { force: forceRebake });
-    }
-
-    const group = await bakeGoogle3DTiles(data, bakeOptions);
-    // Persist in the background; never block or fail the bake on it.
-    persistBake(key, group)
-      .then((bytes) => {
-        if (bytes !== null) {
-          console.info(
-            `[google3dTiles] bake persisted to IndexedDB (~${(bytes / 1024 ** 2).toFixed(0)} MB) key=${key}`,
-          );
-        }
-      })
-      .catch((err) => console.warn('[google3dTiles] persisting bake failed (quota?):', err));
-    return group;
-  };
-
-  const promise = run().catch((err) => {
+  const promise = runBake(key, data, bakeOptions, forceRebake).catch((err) => {
     // Failed bakes must not poison the cache.
     if (_bakeCache?.promise === promise) _bakeCache = null;
     throw err;
