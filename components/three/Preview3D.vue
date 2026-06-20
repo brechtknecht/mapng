@@ -390,6 +390,19 @@
                 >
                   {{ t('preview.googleTilesQualityRoads') }}
                 </button>
+                <button
+                  @click="googleTilesStore.setQuality('max')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityMaxHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'max'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityMax') }}
+                </button>
               </div>
 
               <div class="flex items-center gap-2">

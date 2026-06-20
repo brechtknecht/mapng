@@ -32,12 +32,14 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   const progress = reactive({ visible: 0, inflight: 0, station: 1, stations: 1 });
   const group = shallowRef(null);
   // 'standard' (5 camera stations) | 'high' (25 stations, much deeper LOD) |
-  // 'roads' (high + street-level stations along the OSM roads).
+  // 'roads' (high + street-level stations along the OSM roads) |
+  // 'max' (roads + per-cell low-oblique facade ring + errorTarget 3 +
+  // saturation stop — auto fly-mode for Google's finest LOD everywhere).
   // Persisted so the exports resolve the same quality → same cache key.
   const quality = ref(getPreferredBakeQuality());
 
   function setQuality(q) {
-    quality.value = q === 'high' || q === 'roads' ? q : 'standard';
+    quality.value = q === 'high' || q === 'roads' || q === 'max' ? q : 'standard';
     try { localStorage.setItem('mapng_google_bake_quality', quality.value); } catch (_) { /* private mode */ }
   }
 

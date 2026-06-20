@@ -176,7 +176,7 @@ export const buildSweepStations = (frame, { quality = 'standard', cameraSweep = 
   ];
   if (!cameraSweep) return stations;
 
-  if (quality === 'high' || quality === 'roads') {
+  if (quality === 'high' || quality === 'roads' || quality === 'max') {
     // 8 perimeter obliques, lower than standard for sharper facades. The
     // near side fills the frustum at high LOD; the far side is covered by
     // the opposite station.
@@ -214,6 +214,41 @@ export const buildSweepStations = (frame, { quality = 'standard', cameraSweep = 
           target,
           viz: { kind: 'grid', e: cellE, n: cellN, aglM: gridAlt },
         });
+      }
+    }
+    if (quality === 'max') {
+      // Auto fly-mode: a LOW OBLIQUE camera per cell. The grid above looks
+      // straight down, so walls cover almost no pixels and the LOD selector
+      // never refines facades — exactly the detail the user otherwise has to
+      // chase by hand in fly mode. Two diagonal headings (SW + NE) see all
+      // four facade orientations. Much lower than the grid (≈third the
+      // altitude) so screen-space error drags several LOD levels deeper.
+      // These run LAST and carry phase 'deepen' so runStationSweep's
+      // saturation stop can trim the tail once they stop adding tiles
+      // (Google's finite LOD ceiling reached).
+      const lowAlt = cellM * 0.4 + 50;
+      const standoff = cellM * 0.7;
+      const headings = [
+        ['sw', -Math.SQRT1_2, -Math.SQRT1_2],
+        ['ne', Math.SQRT1_2, Math.SQRT1_2],
+      ];
+      for (let gy = 0; gy < GRID; gy++) {
+        for (let gx = 0; gx < GRID; gx++) {
+          const cellE = ((gx + 0.5) / GRID - 0.5) * extentM;
+          const cellN = ((gy + 0.5) / GRID - 0.5) * extentM;
+          const target = horiz(cellE, cellN);
+          for (const [label, e, n] of headings) {
+            const offE = cellE + e * standoff;
+            const offN = cellN + n * standoff;
+            stations.push({
+              label: `oblique-cell-${gx},${gy}-${label}`,
+              offset: horiz(offE, offN).addScaledVector(upDir, lowAlt),
+              target,
+              phase: 'deepen',
+              viz: { kind: 'oblique', e: offE, n: offN, aglM: lowAlt },
+            });
+          }
+        }
       }
     }
   } else {
@@ -319,6 +354,16 @@ export async function runStationSweep({
   // road pass appends stations mid-sweep.
   let bakeBudgetMs = maxWaitMs ?? (120000 + stations.length * 25000);
 
+  // 'max' tier: stop sweeping the deepen oblique tail once it stops adding new
+  // tiles. Google's photorealistic LOD is finite — past the ceiling, extra
+  // low-oblique stations only re-select tiles already in the union, so flying
+  // lower yields bigger triangles, not new geometry. Counts CONSECUTIVE deepen
+  // stations that each add < ~0.3% (min 8) new unique tiles; only ever trims
+  // the redundant tail (deepen stations run last; roads/grid already done).
+  const saturationStop = quality === 'max';
+  const saturationWindow = 4;
+  let lowDeltaRun = 0;
+
   let updateError = null;
   const onUpdateError = (e) => { updateError = e; };
   tiles.addEventListener('load-error', onUpdateError);
@@ -395,11 +440,13 @@ export async function runStationSweep({
 
       await waitForQuiet(s);
 
+      const uniqueBefore = selectedTiles.size;
       for (const tile of tiles.visibleTiles) selectedTiles.add(tile);
+      const added = selectedTiles.size - uniqueBefore;
       console.info(
         `[google3dTiles] station ${s + 1}/${stations.length} (${stations[s].label}): ` +
-        `${tiles.visibleTiles.size} tiles selected, ${selectedTiles.size} unique total, ` +
-        `${((performance.now() - startedAt) / 1000).toFixed(1)}s elapsed`,
+        `${tiles.visibleTiles.size} tiles selected, ${selectedTiles.size} unique total ` +
+        `(+${added}), ${((performance.now() - startedAt) / 1000).toFixed(1)}s elapsed`,
       );
       if (timedOut) {
         console.warn(
@@ -409,12 +456,25 @@ export async function runStationSweep({
         break;
       }
 
+      if (saturationStop && stations[s].phase === 'deepen') {
+        const thresh = Math.max(8, Math.round(uniqueBefore * 0.003));
+        lowDeltaRun = added < thresh ? lowDeltaRun + 1 : 0;
+        if (lowDeltaRun >= saturationWindow) {
+          console.info(
+            `[google3dTiles] saturation reached at station ${s + 1}/${stations.length}: ` +
+            `${saturationWindow} consecutive deepen stations each added < ${thresh} new tiles ` +
+            `— Google's LOD ceiling hit, skipping the remaining ${stations.length - s - 1} stations`,
+          );
+          break;
+        }
+      }
+
       // 'roads' quality: street-level stations need the ellipsoidal ground
       // altitude, which is only known once the overview station has loaded
       // tiles — probe now and append the road pass to the sweep. Per-station
       // street height = centre altitude + the mapng heightmap's relative
       // elevation (the geoid offset is locally constant).
-      if (s === 0 && quality === 'roads' && enableRoadPass) {
+      if (s === 0 && (quality === 'roads' || quality === 'max') && enableRoadPass) {
         tiles.group.updateMatrixWorld(true);
         const centerGroundAlt = probeGroundAltitude(
           (cb) => tiles.group.traverse(cb),
@@ -444,7 +504,12 @@ export async function runStationSweep({
           if (roadStations.length === 0) {
             console.warn('[google3dTiles] road pass: no OSM roads found in the AOI — skipping street-level stations');
           } else {
-            stations.push(...roadStations);
+            // 'roads' appends street-level stations at the end. 'max' splices
+            // them in right after the overview so they run BEFORE the deepen
+            // oblique tail — the saturation stop must never sacrifice the
+            // deepest (street-level) stations, only the redundant tail.
+            if (quality === 'max') stations.splice(s + 1, 0, ...roadStations);
+            else stations.push(...roadStations);
             if (maxWaitMs == null) bakeBudgetMs = 120000 + stations.length * 25000;
             console.info(
               `[google3dTiles] road pass: ${roadStations.length} street-level stations queued ` +

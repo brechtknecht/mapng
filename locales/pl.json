@@ -238,7 +238,9 @@
     "googleTilesQualityRoads": "+Ulice",
     "googleTilesShowCameras": "Pokaż pozycje kamer",
     "googleTilesCamerasLegend": "biały = przegląd · fiolet = ukośna · niebieski = siatka · pomarańcz = ulica",
-    "googleTilesQualityRoadsHint": "Ultra plus do 40 kamer na poziomie ulicy wzdłuż dróg OSM — najwyższy detal Google w korytarzu jazdy"
+    "googleTilesQualityRoadsHint": "Ultra plus do 40 kamer na poziomie ulicy wzdłuż dróg OSM — najwyższy detal Google w korytarzu jazdy",
+    "googleTilesQualityMax": "Max",
+    "googleTilesQualityMaxHint": "Ulice plus pierścień niskich kamer ukośnych nad CAŁĄ mapą + głębszy próg LOD, automatyczne zatrzymanie na granicy Google — automatyczny tryb lotu, maksymalny detal, najwolniejszy bake"
   },
   "exportPanel": {
     "osmMissing": "Dane OSM brakują",

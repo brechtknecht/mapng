@@ -238,7 +238,9 @@
     "googleTilesQualityRoads": "+Strade",
     "googleTilesShowCameras": "Mostra posizioni camera",
     "googleTilesCamerasLegend": "bianco = panoramica · viola = obliqua · blu = griglia · arancio = strada",
-    "googleTilesQualityRoadsHint": "Ultra più fino a 40 camere a livello strada lungo le vie OSM — il massimo dettaglio di Google sul percorso"
+    "googleTilesQualityRoadsHint": "Ultra più fino a 40 camere a livello strada lungo le vie OSM — il massimo dettaglio di Google sul percorso",
+    "googleTilesQualityMax": "Max",
+    "googleTilesQualityMaxHint": "Strade più un anello di camere oblique basse su TUTTA la mappa + soglia LOD più profonda, arresto automatico al limite di Google — modalità volo automatica, dettaglio massimo, bake più lento"
   },
   "exportPanel": {
     "osmMissing": "Dato OSM mancante",

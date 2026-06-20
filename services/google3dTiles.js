@@ -65,7 +65,7 @@ const riserStripEnabled = () => {
  *   @param {number} [options.groundNormalThreshold=0.85] |normal.y| above this counts as ground
  *   @param {number} [options.groundDistanceM=2.5] only strip near-flat tris within this many metres of the mapng terrain (keeps flat/gentle roofs)
  *   @param {boolean} [options.cameraSweep=true] sweep the camera through extra stations so facades get refined
- *   @param {'standard'|'high'|'roads'} [options.quality='standard'] 'high' = 25 stations incl. a 4×4 low-altitude grid; 'roads' = high + up to 40 street-level stations along OSM roads
+ *   @param {'standard'|'high'|'roads'|'max'} [options.quality='standard'] 'high' = 25 stations incl. a 4×4 low-altitude grid; 'roads' = high + up to 40 street-level stations along OSM roads; 'max' = roads + a per-cell low-oblique facade ring + errorTarget 3 + a saturation stop (auto fly-mode — pulls Google's finest LOD everywhere)
  *   @param {number} [options.sensorSize] virtual sensor resolution the SSE is measured against (1024 standard, 1536 high/roads) — higher = deeper tiles at the same errorTarget
  *   @param {number} [options.maxWaitMs] hard cap on total bake time; default derives from the station count (2 min + 25 s/station)
  *   @param {number} [options.stabilityMs=2500] queue must stay quiet this long to consider a station done
@@ -138,12 +138,16 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // (Tile-count caps of 8000/6000 are already ample — leave them alone.)
   // High/roads quality pulls several thousand extra tiles — scale the budgets
   // up (and the 8000-tile default count cap, which standard never reaches).
-  const heavyBake = quality === 'high' || quality === 'roads';
+  // 'max' adds a dense low-oblique facade ring + errorTarget 3, pulling more
+  // tiles again than high/roads — give it the biggest budget the browser
+  // fallback can hold (the Node worker uses its own multi-GB heap regardless).
+  const heavyBake = quality === 'high' || quality === 'roads' || quality === 'max';
+  const maxBake = quality === 'max';
   tiles.lruCache.minBytesSize = (heavyBake ? 2.5 : 1.0) * 1024 ** 3;
-  tiles.lruCache.maxBytesSize = (heavyBake ? 3.0 : 1.5) * 1024 ** 3;
+  tiles.lruCache.maxBytesSize = (maxBake ? 3.5 : heavyBake ? 3.0 : 1.5) * 1024 ** 3;
   if (heavyBake) {
-    tiles.lruCache.minSize = 20000;
-    tiles.lruCache.maxSize = 24000;
+    tiles.lruCache.minSize = maxBake ? 24000 : 20000;
+    tiles.lruCache.maxSize = maxBake ? 28000 : 24000;
   }
   tiles.downloadQueue.maxJobs = 32;
   tiles.parseQueue.maxJobs = 8;
@@ -474,7 +478,7 @@ const bakeCacheKey = (
 export function getPreferredBakeQuality() {
   try {
     const q = localStorage.getItem('mapng_google_bake_quality');
-    return q === 'high' || q === 'roads' ? q : 'standard';
+    return q === 'high' || q === 'roads' || q === 'max' ? q : 'standard';
   } catch (_) {
     return 'standard';
   }
@@ -510,11 +514,19 @@ export function getGoogleTilesZOffset() {
   }
 }
 
-const resolveBakeOptions = (options) => ({
-  ...options,
-  quality: options.quality ?? getPreferredBakeQuality(),
-  stripGround: options.stripGround ?? getPreferredStripGround(),
-});
+const resolveBakeOptions = (options) => {
+  const quality = options.quality ?? getPreferredBakeQuality();
+  return {
+    ...options,
+    quality,
+    stripGround: options.stripGround ?? getPreferredStripGround(),
+    // 'max' deepens the global screen-space-error threshold so EVERY station
+    // pulls finer mesh + texture tiles (library-tuned 5 stays for the lighter
+    // tiers). Pinned here — the single choke point — so the cache key, the
+    // Node worker, and the in-browser fallback all resolve the same value.
+    errorTarget: options.errorTarget ?? (quality === 'max' ? 3 : 5),
+  };
+};
 
 const disposeGroup = (group) => {
   group.traverse((child) => {

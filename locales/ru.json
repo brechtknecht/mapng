@@ -238,7 +238,9 @@
     "googleTilesQualityRoads": "+Улицы",
     "googleTilesShowCameras": "Показать позиции камер",
     "googleTilesCamerasLegend": "белый = обзор · фиолетовый = наклонная · синий = сетка · оранжевый = улица",
-    "googleTilesQualityRoadsHint": "Ультра плюс до 40 камер на уровне улицы вдоль дорог OSM — максимальная детализация Google в коридоре движения"
+    "googleTilesQualityRoadsHint": "Ультра плюс до 40 камер на уровне улицы вдоль дорог OSM — максимальная детализация Google в коридоре движения",
+    "googleTilesQualityMax": "Max",
+    "googleTilesQualityMaxHint": "Улицы плюс кольцо низких наклонных камер по ВСЕЙ карте + более глубокий порог LOD, автоостановка на пределе Google — авторежим полёта, максимальная детализация, самый медленный рендер"
   },
   "exportPanel": {
     "osmMissing": "Данные OSM отсутствуют",

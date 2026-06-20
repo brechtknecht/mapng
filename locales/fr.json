@@ -238,7 +238,9 @@
     "googleTilesQualityRoads": "+Rues",
     "googleTilesShowCameras": "Afficher les positions de caméra",
     "googleTilesCamerasLegend": "blanc = vue d'ensemble · violet = oblique · bleu = grille · orange = rue",
-    "googleTilesQualityRoadsHint": "Ultra plus jusqu'à 40 caméras au niveau de la rue le long des routes OSM — le détail maximal de Google sur le corridor"
+    "googleTilesQualityRoadsHint": "Ultra plus jusqu'à 40 caméras au niveau de la rue le long des routes OSM — le détail maximal de Google sur le corridor",
+    "googleTilesQualityMax": "Max",
+    "googleTilesQualityMaxHint": "Rues plus un anneau de caméras obliques basses sur TOUTE la carte + seuil LOD plus profond, arrêt auto à la limite de Google — mode vol auto, détail maximal, cuisson la plus lente"
   },
   "exportPanel": {
     "osmMissing": "Données OSM manquantes",

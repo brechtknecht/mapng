@@ -240,6 +240,8 @@
     "googleTilesShowCameras": "Show camera positions",
     "googleTilesCamerasLegend": "white = overview · purple = oblique · blue = grid · orange = road · cyan = fly mode · cyan boxes = tiles added by the last refine",
     "googleTilesQualityRoadsHint": "Ultra plus up to 40 street-level cameras along the OSM roads — Google's deepest detail in the driving corridor",
+    "googleTilesQualityMax": "Max",
+    "googleTilesQualityMaxHint": "Roads plus a low-oblique facade ring over the WHOLE map + a deeper LOD threshold, auto-stopping at Google's ceiling — auto fly-mode, the most detail possible, slowest bake",
     "googleTilesFly": "Fly mode: refine by view",
     "googleTilesFlyHint": "Fly through the scene first-person and pull Google's deepest tiles exactly where you point the camera",
     "flyClickToLook": "Click the scene to capture the mouse",

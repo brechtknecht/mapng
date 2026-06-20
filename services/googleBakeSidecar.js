@@ -66,7 +66,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
       height: data.height,
       minHeight: data.minHeight,
       heightMap: toBase64(heightMap),
-      osmFeatures: quality === 'roads'
+      osmFeatures: quality === 'roads' || quality === 'max'
         ? (data.osmFeatures ?? []).filter((f) => f.type === 'road')
         : undefined,
     },

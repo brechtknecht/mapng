@@ -239,6 +239,8 @@
     "googleTilesShowCameras": "Kamerapositionen anzeigen",
     "googleTilesCamerasLegend": "weiß = Übersicht · lila = schräg · blau = Raster · orange = Straße · cyan = Flugmodus · Cyan-Boxen = Kacheln des letzten Verfeinerns",
     "googleTilesQualityRoadsHint": "Ultra plus bis zu 40 Straßenkameras entlang der OSM-Straßen — Googles höchstes Detail im Fahrkorridor",
+    "googleTilesQualityMax": "Max",
+    "googleTilesQualityMaxHint": "Straßen plus ein flacher Schrägkamera-Ring über die GESAMTE Karte + tiefere LOD-Schwelle, stoppt automatisch an Googles Grenze — Auto-Flugmodus, maximales Detail, langsamster Bake",
     "googleTilesFly": "Flugmodus: Ansicht verfeinern",
     "googleTilesFlyHint": "In Ego-Perspektive durch die Szene fliegen und Googles tiefste Kacheln genau dort laden, wohin die Kamera zeigt",
     "flyClickToLook": "In die Szene klicken, um die Maus zu fangen",
