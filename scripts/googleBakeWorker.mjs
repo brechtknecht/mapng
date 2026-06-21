@@ -71,6 +71,7 @@ import {
   stripGroundTris,
   SCENE_SIZE,
 } from '../services/googleBakeCore.js';
+import { conformTilesToFloor } from '../services/tileGroundConform.js';
 import { createMetricProjector } from '../services/geoUtils.js';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
@@ -133,6 +134,8 @@ const REFINE_MAX_WAIT_MS = Number(process.env.MAPNG_REFINE_MAX_WAIT_MS) || 18000
 //   MAPNG_STRIP_RISERS=1   re-enable the old magic-threshold deletion
 const WELD_SEAMS = process.env.MAPNG_WELD_SEAMS !== '0';
 const STRIP_RISERS = process.env.MAPNG_STRIP_RISERS === '1';
+//   MAPNG_CONFORM_TILES=0  disable the delta-field floor conform
+const CONFORM_TILES = process.env.MAPNG_CONFORM_TILES !== '0';
 // Weld tolerances (all metres) — tune without code edits, restart to apply.
 //   BAND      vertical reach onto the target ground (raise to close taller seams)
 //   COHERE    a cell welds only if its ground spans ≤ this (real steps survive)
@@ -223,6 +226,39 @@ const applyWeld = (session) => {
   }
   console.info(
     `[bakeWorker] seam weld: moved ${vertsMoved} verts across ${meshesMoved}/${recs.length} meshes ` +
+    `in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
+};
+
+/**
+ * Delta-field conform (googleBakeCore → conformTilesToFloor): seat the tiles onto
+ * the .ter floor. Runs AFTER applyWeld (so it reads the welded, ground-consistent
+ * positions) and BEFORE applyGroundStrip (which needs the ground tris to survive
+ * until measured). Reads from the FULL base index so the street ground is present
+ * even after an earlier merge stripped it; writes Y back into r.positions. Always
+ * recomputed fresh from the welded output, so it stays correct across refines.
+ */
+const applyConform = (session) => {
+  if (!CONFORM_TILES) return;
+  const recs = [];
+  const soup = [];
+  for (const entry of session.outputs.values()) {
+    for (const r of entry.records) {
+      const idx = r.baseIndex ?? r.index;
+      if (!idx) continue;
+      recs.push(r);
+      soup.push({ positions: r.positions, index: idx });
+    }
+  }
+  if (soup.length === 0) return;
+  const t0 = performance.now();
+  const r = conformTilesToFloor(soup, session.data);
+  for (let i = 0; i < recs.length; i++) {
+    if (r.positions[i]) recs[i].positions = r.positions[i];
+  }
+  console.info(
+    `[bakeWorker] tile conform: moved ${r.vertsMoved} verts across ${r.meshesMoved}/${recs.length} meshes, ` +
+    `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m ` +
     `in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
   );
 };
@@ -814,6 +850,7 @@ async function startBake(data, options, outPath) {
     throw new Error('bake worker: tiles loaded but none survived AOI clipping/ground stripping.');
   }
   applyWeld(session);        // close seams while the street ground still exists
+  applyConform(session);     // seat the welded mesh onto the .ter floor (delta field)
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
 
@@ -944,6 +981,7 @@ async function refine(session, revision, stationSpec) {
 
   const diff = rebuildOutputs(session);
   applyWeld(session);        // close seams while the street ground still exists
+  applyConform(session);     // seat the welded mesh onto the .ter floor (delta field)
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
   const resultPath = `${session.outBase}.rev${revision}`;

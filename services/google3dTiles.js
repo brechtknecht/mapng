@@ -14,6 +14,7 @@ import {
   weldSeams,
   stripGroundTris,
 } from './googleBakeCore.js';
+import { conformTilesToFloor } from './tileGroundConform.js';
 import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTilesPersistentCache.js';
 import {
   sidecarAvailable,
@@ -50,6 +51,11 @@ const weldSeamsEnabled = () => {
 };
 const riserStripEnabled = () => {
   try { return localStorage.getItem('mapng_strip_risers') === '1'; } catch (_) { return false; }
+};
+// Delta-field conform — seat the tiles onto the .ter floor (tileGroundConform.js).
+// Default ON; localStorage mapng_conform_tiles='0' disables it.
+const conformTilesEnabled = () => {
+  try { return localStorage.getItem('mapng_conform_tiles') !== '0'; } catch (_) { return true; }
 };
 
 /**
@@ -406,6 +412,29 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       }
     }
     console.info(`[google3dTiles] seam weld: moved ${vertsMoved} verts across ${meshesMoved} meshes`);
+  }
+
+  // Delta-field conform — AFTER the weld (consistent ground), BEFORE the ground
+  // strip (needs the ground tris present to measure the residual). Seats the
+  // whole mesh onto the .ter floor; buildings keep their height above ground.
+  if (conformTilesEnabled()) {
+    const soup = out.children.map((m) => ({
+      positions: m.geometry.attributes.position.array,
+      index: m.geometry.index?.array,
+    }));
+    const r = conformTilesToFloor(soup, data);
+    for (let i = 0; i < out.children.length; i++) {
+      if (r.positions[i]) {
+        const attr = out.children[i].geometry.attributes.position;
+        attr.array.set(r.positions[i]);
+        attr.needsUpdate = true;
+        out.children[i].geometry.computeVertexNormals();
+      }
+    }
+    console.info(
+      `[google3dTiles] tile conform: moved ${r.vertsMoved} verts across ${r.meshesMoved} meshes, ` +
+      `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m`,
+    );
   }
 
   // Ground strip — LAST, after the weld (so welded street risers go with the
