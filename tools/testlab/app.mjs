@@ -78,14 +78,15 @@ const meshFrom = (positions, index, mat) => {
 
 const carpetMat = () => new THREE.MeshStandardMaterial({ color: 0x5aa0ff, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
 const bldMat = () => new THREE.MeshStandardMaterial({ color: 0xe08a3c, roughness: 0.9 });
+const tileMat = () => new THREE.MeshStandardMaterial({ color: 0xb8a98c, roughness: 1, side: THREE.DoubleSide });
+
+const matFor = (kind) => (kind === 'building' ? bldMat() : kind === 'ground' ? carpetMat() : tileMat());
 
 const populate = (which, payload) => {
   const g = groups[which];
   disposeGroup(g);
   g.add(buildTerrainMesh(payload.terrain, payload.minHeight));
-  for (const m of payload.meshes) {
-    g.add(meshFrom(m[which], m.index, m.kind === 'building' ? bldMat() : carpetMat()));
-  }
+  for (const m of payload.meshes) g.add(meshFrom(m[which], m.index, matFor(m.kind)));
 };
 
 const fmtSigned = (v) => (v >= 0 ? '+' : '') + v.toFixed(2);
@@ -93,9 +94,12 @@ const fmtSigned = (v) => (v >= 0 ? '+' : '') + v.toFixed(2);
 const renderStats = (payload) => {
   const s = payload.stats;
   const ok = s.groundResidualAfterM < 0.4;
+  const kept = Math.abs(s.verticalExtentAfterM - s.verticalExtentBeforeM) < Math.max(0.5, s.verticalExtentBeforeM * 0.05);
   document.querySelector('#stats tbody').innerHTML = `
+    <tr><td class="k">source</td><td class="v">${payload.source}</td></tr>
     <tr><td class="k">ground residual before</td><td class="v">${s.groundResidualBeforeM.toFixed(2)} m</td></tr>
     <tr><td class="k">ground residual after</td><td class="v ${ok ? 'good' : 'warn'}">${s.groundResidualAfterM.toFixed(2)} m</td></tr>
+    <tr><td class="k">vertical extent (kept)</td><td class="v ${kept ? 'good' : 'warn'}">${s.verticalExtentBeforeM.toFixed(0)} → ${s.verticalExtentAfterM.toFixed(0)} m</td></tr>
     <tr><td class="k">verts moved</td><td class="v">${s.vertsMoved.toLocaleString()}</td></tr>
     <tr><td class="k">field cells filled</td><td class="v">${s.cellsFilled}</td></tr>`;
 
@@ -107,11 +111,19 @@ const renderStats = (payload) => {
   }).join('');
 };
 
-const query = () => PARAMS.map((k) => `${k}=${document.getElementById(k).value}`).join('&');
+const sourceEl = document.getElementById('source');
+const capture = () => sourceEl.value;
+const query = () => {
+  if (capture()) return `capture=${encodeURIComponent(capture())}`;
+  return PARAMS.map((k) => `${k}=${document.getElementById(k).value}`).join('&');
+};
 
 let timer = null;
 const refresh = async () => {
   for (const k of PARAMS) document.getElementById('l' + k).textContent = Number(document.getElementById(k).value).toFixed(2);
+  const isCap = !!capture();
+  for (const k of PARAMS) document.getElementById(k).disabled = isCap;
+  document.getElementById('synthonly').textContent = isCap ? '(ignored — real capture)' : '';
   const q = query();
   const payload = await fetch(`/api/scene.json?${q}`).then((r) => r.json());
   yScale = payload.unitsPerMeter;
@@ -129,6 +141,20 @@ const schedule = () => { clearTimeout(timer); timer = setTimeout(refresh, 120); 
 // defaults
 const defaults = { base: 1.2, tiltX: 0.6, tiltZ: 0.3, wiggle: 0.4 };
 for (const k of PARAMS) { const el = document.getElementById(k); el.value = defaults[k]; el.addEventListener('input', schedule); }
+sourceEl.addEventListener('change', refresh);
+
+// Populate the real-bake capture list (if any captured via captureRealBake.mjs).
+fetch('/api/captures').then((r) => r.json()).then(({ captures }) => {
+  for (const c of captures) {
+    const o = document.createElement('option');
+    o.value = c.name;
+    o.textContent = c.meta ? `${c.name} — ${c.meta.sizeM}m ${c.meta.quality} (real)` : `${c.name} (real)`;
+    sourceEl.appendChild(o);
+  }
+  document.getElementById('capnote').textContent = captures.length
+    ? `${captures.length} real bake(s) available.`
+    : 'No real bakes yet — run: node tools/testlab/captureRealBake.mjs --lat .. --lng .. --name ..';
+}).catch(() => {});
 
 resize();
 refresh();

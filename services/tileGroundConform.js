@@ -28,11 +28,12 @@ import { createScalarFieldGrid } from './scalarFieldGrid.js';
  * @param {object} [opts]
  * @param {number} [opts.cellM=8]              delta-field cell size (metres).
  * @param {number} [opts.groundDistanceM=2.5]  tri counts as ground if its mean
- *   aboveTerrain is below this (matches stripGroundTris). This is also the
- *   correction CEILING: a residual larger than this isn't recognised as ground
- *   and won't be corrected. The single-point anchor already nulls the bulk
- *   offset at the AOI centre, so the residual across one bake AOI stays within
- *   this band in practice; widen it only if a bake floats by more than ~2.5 m.
+ *   aboveTerrain is within ±this of the terrain (a BAND, not just an upper bound
+ *   — subterranean horizontal geometry must be excluded or it poisons the field).
+ *   This is also the correction CEILING: a residual larger than this isn't
+ *   recognised as ground and won't be corrected. The single-point anchor already
+ *   nulls the bulk offset at the AOI centre, so the residual across one bake AOI
+ *   stays within this band in practice; widen it only if a bake floats by more.
  * @param {number} [opts.groundNormalThreshold=0.85] and is this near-horizontal.
  * @param {number} [opts.maxShiftM=15]         clamp on |D| so a bad cell can't
  *   teleport geometry; the real datum residual is well under this.
@@ -58,8 +59,10 @@ export const conformTilesToFloor = (meshes, data, {
   const aboveTerrain = (x, y, z) => y - (sampleHeightAtScene(data, x, z) - minH);
 
   // --- Pass 1: collect ground-vertex residuals into the field ----------------
+  // residualBefore/After are reported as MEAN ABSOLUTE residual (not signed) so
+  // they're comparable: a signed mean cancels on real data and hides the spread.
   let groundSamples = 0;
-  let residualSum = 0;
+  let residualAbsSum = 0;
   for (const m of meshes) {
     const p = m.positions, idx = m.index;
     if (!p || !idx) continue;
@@ -72,7 +75,13 @@ export const conformTilesToFloor = (meshes, data, {
       const a0 = aboveTerrain(x0, y0, z0);
       const a1 = aboveTerrain(x1, y1, z1);
       const a2 = aboveTerrain(x2, y2, z2);
-      if ((a0 + a1 + a2) / 3 >= groundDistanceM) continue; // not near the floor
+      // Ground sits in a BAND around the terrain — |residual| < groundDistanceM,
+      // not just below the ceiling. Without the lower bound, subterranean
+      // horizontal geometry (underpasses, courtyards, canal/garage floors, photo-
+      // grammetry junk far under the DEM) reads as "ground" with a large NEGATIVE
+      // residual and drags the whole delta field down. (stripGroundTris only needs
+      // the upper bound; a delta field needs both.)
+      if (Math.abs((a0 + a1 + a2) / 3) >= groundDistanceM) continue;
 
       // near-horizontal? (normal computed in a metrically uniform space)
       const ay = y0 * upm, by = y1 * upm, cy = y2 * upm;
@@ -89,7 +98,7 @@ export const conformTilesToFloor = (meshes, data, {
       grid.add(x1, z1, a1);
       grid.add(x2, z2, a2);
       groundSamples += 3;
-      residualSum += a0 + a1 + a2;
+      residualAbsSum += Math.abs(a0) + Math.abs(a1) + Math.abs(a2);
     }
   }
 
@@ -113,9 +122,10 @@ export const conformTilesToFloor = (meshes, data, {
         moved = true;
         vertsMoved++;
       }
-      // residual of conformed ground (for the verification log line)
+      // residual of conformed ground (for the verification log line) — measured
+      // over the SAME band that defined ground, so deep-below verts don't inflate it.
       const before = p[i + 1] - (sampleHeightAtScene(data, x, z) - minH);
-      if (before < groundDistanceM) {
+      if (Math.abs(before) < groundDistanceM) {
         postResidualSum += Math.abs(out[i + 1] - (sampleHeightAtScene(data, x, z) - minH));
         postResidualCount++;
       }
@@ -129,7 +139,7 @@ export const conformTilesToFloor = (meshes, data, {
     vertsMoved,
     meshesMoved,
     cellsFilled: field.filledCount,
-    residualBefore: groundSamples ? residualSum / groundSamples : 0,
+    residualBefore: groundSamples ? residualAbsSum / groundSamples : 0,
     residualAfter: postResidualCount ? postResidualSum / postResidualCount : 0,
     // The built delta field, for inspection/visualisation (e.g. the test lab
     // heatmap). Read-only — callers must not mutate.
