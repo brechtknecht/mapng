@@ -510,7 +510,7 @@ let _bakeCache = null; // { key, promise }
 // v7: route mode conforms each chunk against its slice of the COMBINED terrain
 //     (the driven surface) instead of its own DEM — fixes chunks floating at
 //     seams where per-chunk DEMs disagree. Geometry depends on combined now.
-const BAKE_FORMAT_VERSION = 7;
+export const BAKE_FORMAT_VERSION = 7;
 
 // Cheap order-sensitive hash of a route segment (rounded coords) — keeps the
 // cache key short while still splitting different routes/widths over the same

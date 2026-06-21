@@ -21,7 +21,7 @@
 import { fetchTerrainData } from './terrain';
 import { exportToGLB } from './export3d';
 import { exportBeamNGLevel } from './exportBeamNGLevel';
-import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes } from './google3dTiles';
+import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION } from './google3dTiles';
 import { computeUnitsPerMeter } from './googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
@@ -134,6 +134,10 @@ let _routeAsm = null; // { key, combined, combinedCenter, frame, pieces, preview
 
 const asmKey = (chunks, tierId, chunkSizeM, elevationSource, gpxzApiKey, quality, baseTexture) =>
   JSON.stringify({
+    // Bake geometry version — without this, the in-memory _routeAsm (and the
+    // fast "reuse" path) serve stale per-chunk geometry across conform/weld/strip
+    // changes, so "re-bake the same route" silently does nothing.
+    v: BAKE_FORMAT_VERSION,
     b: chunks.map((c) => [
       Number(c.bounds.north).toFixed(6), Number(c.bounds.south).toFixed(6),
       Number(c.bounds.east).toFixed(6), Number(c.bounds.west).toFixed(6),
