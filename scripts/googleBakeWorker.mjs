@@ -999,6 +999,7 @@ async function exportAssembly(session, revision, spec) {
     worldSize: spec.worldSize,
     sceneSize: SCENE_SIZE,
     zOffsetM: Number.isFinite(spec.zOffsetM) ? spec.zOffsetM : 0,
+    materialPrefix: typeof spec.materialPrefix === 'string' ? spec.materialPrefix : '',
     outDir: path.dirname(session.outBase),
     log: console.info,
   });

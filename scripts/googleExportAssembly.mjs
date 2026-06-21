@@ -39,6 +39,11 @@ export async function assembleGoogleTilesExport(records, {
   sceneSize = 100,
   zOffsetM = 0,
   outDir,
+  // Namespaces the atlas material/texture names. BeamNG resolves materials
+  // GLOBALLY by name, so a multi-tile level (route export) MUST give each tile a
+  // unique prefix or the meshes share one atlas and textures scramble. Empty for
+  // the single-tile export (only one set, no collision).
+  materialPrefix = '',
   log = console.info,
 }) {
   const s = worldSize / sceneSize;
@@ -113,7 +118,7 @@ export async function assembleGoogleTilesExport(records, {
   for (let i = 0; i < atlases.length; i++) {
     const a = atlases[i];
     if (a.entries.length === 0) continue;
-    const matName = `google_atlas_${String(materialNames.length).padStart(2, '0')}`;
+    const matName = `${materialPrefix}google_atlas_${String(materialNames.length).padStart(2, '0')}`;
     const composites = [];
     for (const e of a.entries) {
       if (!e.texture?.bytes?.length) continue; // gray background shows through

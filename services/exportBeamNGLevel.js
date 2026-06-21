@@ -4231,7 +4231,15 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     useGoogle3DTiles = false,
     googleApiKey,
     google3DErrorTarget,
+    // Route mode: instead of baking ONE AOI's Google tiles, the caller
+    // (exportRouteAsBeamNGLevel) supplies N pre-assembled chunk tiles, each
+    // already converted to a BeamNG shape with its own atlas + materials and a
+    // world position. When present the internal single bake is skipped and the
+    // level emits art/shapes/google_tiles_NN/ + one TSStatic per placement.
+    // [{ name, daeBlob?|glbBlob, textureFiles:[{name,ext,data}], materialNames:[], position:[x,y,z] }]
+    googleTilePlacements = null,
   } = options;
+  const routeTilePieces = Array.isArray(googleTilePlacements) ? googleTilePlacements : null;
   // Backward compat: generatePbrMaterials (bool) → pbrSource (string)
   let pbrSource = options.pbrSource;
   if (pbrSource === undefined) {
@@ -4489,7 +4497,7 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       hideBuildingVisuals: !!(useGoogle3DTiles && googleApiKey),
     });
 
-    if (useGoogle3DTiles && googleApiKey) {
+    if (useGoogle3DTiles && googleApiKey && !routeTilePieces) {
       // A failed Google bake must never take down the whole level export —
       // catch, log loudly, and continue with the OSM-only level.
       //
@@ -5144,6 +5152,43 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
     version: 9,
   }, null, 2));
 
+  // ── art/shapes/google_tiles_NN/ (route mode: one folder per chunk tile) ────
+  // Route mode has no OSM, so the single-tile art/shapes block above is skipped;
+  // write each chunk's pre-assembled tile shape + atlas + materials here. Layout
+  // and material shape mirror the single google_tiles folder exactly.
+  if (routeTilePieces?.length) {
+    zip.folder(`${base}/art/shapes`);
+    for (const piece of routeTilePieces) {
+      const dir = `art/shapes/${piece.name}`;
+      zip.folder(`${base}/${dir}`);
+      if (piece.daeBlob) {
+        zip.file(`${base}/${dir}/google_tiles.dae`, piece.daeBlob);
+      } else if (piece.glbBlob) {
+        // Blender bridge was unavailable — ship the GLB + the conversion script.
+        zip.file(`${base}/${dir}/google_tiles.glb`, piece.glbBlob);
+        zip.file(`${base}/${dir}/beamng_glb_to_dae.py`, beamngGlbToDaeScript);
+      }
+      const mats = {};
+      if (piece.textureFiles?.length) {
+        zip.folder(`${base}/${dir}/textures`);
+        for (const tex of piece.textureFiles) {
+          zip.file(`${base}/${dir}/textures/${tex.name}.${tex.ext}`, tex.data);
+          mats[tex.name] = {
+            name: tex.name,
+            mapTo: tex.name,
+            class: 'Material',
+            Stages: [
+              { colorMap: `levels/${levelName}/${dir}/textures/${tex.name}.${tex.ext}` },
+              {}, {}, {},
+            ],
+            translucentBlendOp: 'None',
+          };
+        }
+      }
+      zip.file(`${base}/${dir}/main.materials.json`, JSON.stringify(mats, null, 2));
+    }
+  }
+
   // ── main/items.level.json ──────────────────────────────────────────────────
   zip.file(`${base}/main/items.level.json`,
     toNDJSON([{ class: 'SimGroup', name: 'MissionGroup', persistentId: generatePersistentId() }])
@@ -5345,6 +5390,26 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       prebuildCollisionData: 0,
       useInstanceRenderData: true,
     });
+  }
+
+  // Route mode: one TSStatic per chunk tile, placed at its world offset (from
+  // computeRouteFrame, mapped to BeamNG [east, north, up]). Visual-only like the
+  // single-tile google_tiles object — the terrain is the drive surface.
+  if (routeTilePieces?.length) {
+    for (const piece of routeTilePieces) {
+      otherItems.push({
+        __parent: 'Other',
+        class: 'TSStatic',
+        name: piece.name,
+        persistentId: generatePersistentId(),
+        position: Array.isArray(piece.position) ? piece.position : [0, 0, 0],
+        shapeName: `levels/${levelName}/art/shapes/${piece.name}/google_tiles.dae`,
+        collisionType: 'None',
+        decalType: 'None',
+        prebuildCollisionData: 0,
+        useInstanceRenderData: true,
+      });
+    }
   }
 
   // Diagnostic probe: 4-meter cube floating 5 m above the spawn point using the

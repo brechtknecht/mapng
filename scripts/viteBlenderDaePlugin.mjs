@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, statSync, readFileSync } from 'node:fs';
 import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
@@ -20,37 +20,95 @@ const CONVERT_SCRIPT = path.resolve(
   'beamng_glb_to_dae.py',
 );
 
+// The Blender binary inside a macOS .app bundle.
+const MAC_APP_BIN = 'Contents/MacOS/Blender';
+
+// Collada (.dae) export was REMOVED in Blender 5.0. Reject a 5.x+ binary so the
+// caller gets the clean "install 3.x/4.x" message instead of a cryptic Python
+// error mid-conversion. Returns true when the binary is usable (3.x/4.x) OR the
+// version can't be determined (don't block a possibly-fine install).
+const blenderHasCollada = (bin) => {
+  // macOS .app bundle: read CFBundleShortVersionString from Info.plist (no spawn).
+  const m = bin.match(/^(.*\.app)\/Contents\/MacOS\/Blender$/);
+  if (m) {
+    try {
+      const plist = readFileSync(path.join(m[1], 'Contents', 'Info.plist'), 'utf8');
+      const ver = plist.match(/<key>CFBundleShortVersionString<\/key>\s*<string>([^<]+)<\/string>/);
+      const major = ver ? parseInt(ver[1], 10) : NaN;
+      if (Number.isFinite(major)) return major <= 4;
+    } catch { /* unreadable → don't block */ }
+  }
+  return true;
+};
+
 const findBlender = () => {
   const candidates = [];
   if (process.env.BLENDER_PATH) candidates.push(process.env.BLENDER_PATH);
 
-  // Portable unzips, e.g. Desktop/blender42-portable/blender-4.2.9-windows-x64/blender.exe
+  // Portable unzips on the Desktop, e.g.
+  //   Win:   Desktop/blender42-portable/blender-4.2.9-windows-x64/blender.exe
+  //   macOS: Desktop/blender-4.2.9-macos-arm64/Blender.app/Contents/MacOS/Blender
+  //   Linux: Desktop/blender-4.2.9-linux-x64/blender
   const desktop = path.join(homedir(), 'Desktop');
   try {
     for (const dir of readdirSync(desktop)) {
       if (!/blender/i.test(dir)) continue;
       const sub = path.join(desktop, dir);
+      candidates.push(
+        path.join(sub, 'blender.exe'),
+        path.join(sub, 'blender'),
+        path.join(sub, 'Blender.app', MAC_APP_BIN),
+        path.join(sub, MAC_APP_BIN), // a bare Blender.app dropped on the Desktop
+      );
       try {
         for (const inner of readdirSync(sub)) {
-          if (/^blender-[34]\./i.test(inner)) {
-            candidates.push(path.join(sub, inner, 'blender.exe'));
-          }
+          if (!/^blender-[34]\./i.test(inner)) continue;
+          candidates.push(
+            path.join(sub, inner, 'blender.exe'),
+            path.join(sub, inner, 'blender'),
+            path.join(sub, inner, 'Blender.app', MAC_APP_BIN),
+          );
         }
       } catch { /* not a directory */ }
-      candidates.push(path.join(sub, 'blender.exe'));
     }
   } catch { /* no Desktop */ }
 
-  // Installed versions — only 3.x/4.x still have the Collada exporter.
-  try {
-    const root = 'C:\\Program Files\\Blender Foundation';
-    for (const dir of readdirSync(root)) {
-      const m = dir.match(/^Blender (\d+)\./);
-      if (m && Number(m[1]) <= 4) candidates.push(path.join(root, dir, 'blender.exe'));
-    }
-  } catch { /* not installed */ }
+  if (process.platform === 'darwin') {
+    // Standard installs + Homebrew.
+    candidates.push(
+      '/Applications/Blender.app/' + MAC_APP_BIN,
+      path.join(homedir(), 'Applications/Blender.app', MAC_APP_BIN),
+      '/opt/homebrew/bin/blender',
+      '/usr/local/bin/blender',
+    );
+    // Versioned app bundles, e.g. /Applications/Blender 4.2/Blender.app.
+    try {
+      for (const dir of readdirSync('/Applications')) {
+        if (/^Blender[ -]?[34]/i.test(dir)) {
+          candidates.push(path.join('/Applications', dir, 'Blender.app', MAC_APP_BIN));
+        }
+      }
+    } catch { /* noop */ }
+  } else if (process.platform === 'win32') {
+    // Installed versions — only 3.x/4.x still have the Collada exporter.
+    try {
+      const root = 'C:\\Program Files\\Blender Foundation';
+      for (const dir of readdirSync(root)) {
+        const m = dir.match(/^Blender (\d+)\./);
+        if (m && Number(m[1]) <= 4) candidates.push(path.join(root, dir, 'blender.exe'));
+      }
+    } catch { /* not installed */ }
+  } else {
+    // Linux: common install locations + PATH-style symlinks.
+    candidates.push('/usr/bin/blender', '/usr/local/bin/blender', '/opt/blender/blender');
+  }
 
-  return candidates.find((c) => c && existsSync(c)) ?? null;
+  // BLENDER_PATH is trusted as-is (explicit override); otherwise skip a 5.x+
+  // .app bundle that can't produce Collada.
+  const override = process.env.BLENDER_PATH;
+  return candidates.find((c) =>
+    c && existsSync(c) && (c === override || blenderHasCollada(c)),
+  ) ?? null;
 };
 
 const runBlender = (blender, glbPath, daePath) => new Promise((resolve, reject) => {

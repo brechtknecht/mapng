@@ -98,6 +98,7 @@
         @fetch-route="handleFetchRoute"
         @clear-route="store.clearRoute"
         @bake-route="handleBakeRoute"
+        @export-beamng="handleExportRouteBeamNG"
         @cancel-bake="handleCancelRouteBake"
       />
     </AppSidebar>
@@ -250,6 +251,7 @@ import { computeUploadedCropBounds } from './services/uploadBounds';
 import { fetchRoute } from './services/googleRoutes';
 import { chunkRoute } from './services/routeCorridor';
 import { bakeAndExportRoute } from './services/routeBake';
+import { exportRouteAsBeamNGLevel } from './services/exportRouteLevel';
 import {
   computeGridTiles,
   computeGridTilesWithOffsets,
@@ -524,7 +526,7 @@ const handleBakeRoute = async () => {
   routeError.value = '';
   routeBakeProgress.value = { chunk: 0, total: routeChunks.value.length, phase: 'terrain', detail: '' };
   try {
-    const { blob, previewChunks, worldBoundsM } = await bakeAndExportRoute(routeChunks.value, {
+    const result = await bakeAndExportRoute(routeChunks.value, {
       tierId: corridorTier.value,
       chunkSizeM: routeChunkSizeM.value,
       concurrency: routeConcurrency.value,
@@ -533,18 +535,64 @@ const handleBakeRoute = async () => {
       onProgress: (p) => { routeBakeProgress.value = p; },
       signal: routeBakeAbort.signal,
     });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    const date = new Date().toISOString().slice(0, 10);
-    link.download = `MapNG_Route_${date}_${routeChunks.value.length}chunks.zip`;
-    link.click();
-    URL.revokeObjectURL(link.href);
+    const { previewChunks, worldBoundsM } = result;
+    downloadExportResult(result, `MapNG_Route_${new Date().toISOString().slice(0, 10)}_${routeChunks.value.length}chunks.zip`);
     // Show the stitched route in the 3D preview tab (same content as the export).
     routePreview.value = { chunks: previewChunks, worldBounds: worldBoundsM };
     previewMode.value = true;
   } catch (err) {
     if (err?.name === 'AbortError') return;
     console.error('route bake failed', err);
+    routeError.value = err?.message || String(err);
+  } finally {
+    routeBaking.value = false;
+    routeBakeProgress.value = null;
+  }
+};
+
+// Download a zip-export result. Two shapes: the dev zip-sidecar returns a
+// same-origin GET `url` that streams straight to disk (no multi-GB heap Blob);
+// the prod fallback returns a `blob` we object-URL.
+const downloadExportResult = (result, fallbackName) => {
+  const link = document.createElement('a');
+  let objectUrl = null;
+  if (result.url) {
+    link.href = result.url;
+  } else {
+    objectUrl = URL.createObjectURL(result.blob);
+    link.href = objectUrl;
+  }
+  link.download = result.filename || fallbackName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+};
+
+// Assemble the route corridor into ONE drivable BeamNG level (vs the raw GLB zip).
+const handleExportRouteBeamNG = async () => {
+  if (!routeChunks.value.length || routeBaking.value) return;
+  const tilesApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  if (!tilesApiKey) {
+    routeError.value = 'Set VITE_GOOGLE_MAPS_API_KEY (tiles credential) to export the corridor.';
+    return;
+  }
+  routeBakeAbort = new AbortController();
+  routeBaking.value = true;
+  routeError.value = '';
+  routeBakeProgress.value = { chunk: 0, total: routeChunks.value.length, phase: 'terrain', detail: '' };
+  try {
+    const result = await exportRouteAsBeamNGLevel(routeChunks.value, {
+      tierId: corridorTier.value,
+      chunkSizeM: routeChunkSizeM.value,
+      googleApiKey: tilesApiKey,
+      onProgress: (p) => { routeBakeProgress.value = p; },
+      signal: routeBakeAbort.signal,
+    });
+    downloadExportResult(result, `MapNG_RouteLevel_${new Date().toISOString().slice(0, 10)}.zip`);
+  } catch (err) {
+    if (err?.name === 'AbortError') return;
+    console.error('route BeamNG level export failed', err);
     routeError.value = err?.message || String(err);
   } finally {
     routeBaking.value = false;

@@ -21,6 +21,7 @@ import { getGoogleTilesZOffset, googleBakeSidecarAvailable } from './google3dTil
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
 import { createRouteProgress } from './routeProgress';
+import { zipSidecarAvailable, compressZipViaSidecar } from './zipExportSidecar';
 
 const pad2 = (n) => String(n).padStart(2, '0');
 
@@ -49,7 +50,13 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // override to both), so the terrain box lines up with each chunk's bounds.
   const chunkSizeM = resolveChunkSizeM(tierId, opts.chunkSizeM);
   const total = chunks.length;
-  const zip = new JSZip();
+  // Archive entries recorded as a path→content map rather than built into a
+  // JSZip up front: a long route's GLBs sum to multiple GB, and JSZip's
+  // generateAsync({type:'blob'}) materialises the whole archive in one heap
+  // Blob — past ~2 GB the ArrayBuffer cap is hit and JSZip throws
+  // "Bug : can't construct the Blob." The dev zip sidecar streams each entry to
+  // disk instead (no giant in-heap blob); JSZip stays the prod fallback.
+  const zipEntries = new Map(); // path -> Blob | string
   const chunkBlobs = []; // kept in memory for the in-app stitched preview
 
   // Per-chunk progress (reusable util) — drives the map's live chunk fill and
@@ -220,7 +227,7 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // Assemble in route order — the pool finishes chunks out of order.
   for (let i = 0; i < total; i++) {
     const r = results[i];
-    zip.file(`${r.folder}/model.glb`, r.blob);
+    zipEntries.set(`${r.folder}/model.glb`, r.blob);
     chunkBlobs.push(r.blob);
     manifest.chunks.push(r.entry);
   }
@@ -239,16 +246,40 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   manifest.chunks.forEach((c, i) => { c.placement = frame.placements[i]; });
 
   onProgress?.({ ...progress.snapshot(), phase: 'zip', detail: 'Packaging archive' });
-  zip.file('manifest.json', JSON.stringify(manifest, null, 2));
-  const archive = await zip.generateAsync({ type: 'blob', streamFiles: true, compression: 'STORE' });
+  zipEntries.set('manifest.json', JSON.stringify(manifest, null, 2));
+
+  const filename = `MapNG_Route_${manifest.createdAt.slice(0, 10)}_${total}chunks.zip`;
 
   // previewChunks: kept-in-memory GLB blobs + placements for the in-app stitched
   // 3D preview (RoutePreview loads + positions them — same content as the export).
+  // Built from chunkBlobs (NOT zipEntries — the sidecar drains that map as it
+  // uploads), so the preview survives the streaming archive.
   const previewChunks = manifest.chunks.map((c, i) => ({
     index: i,
     blob: chunkBlobs[i],
     placement: c.placement,
   }));
 
-  return { blob: archive, manifest, previewChunks, worldBoundsM: frame.worldBoundsM };
+  // Stream the archive to disk via the dev sidecar when available — never
+  // builds a single multi-GB heap Blob. Returns a same-origin GET URL the
+  // caller streams straight to disk. Falls back to in-browser JSZip (prod),
+  // which keeps the old memory ceiling but is the only option there.
+  let archive;
+  if (await zipSidecarAvailable()) {
+    const { url, jobId } = await compressZipViaSidecar(
+      { dirs: [], entries: zipEntries },
+      {
+        filename,
+        onProgress: ({ step, pct }) =>
+          onProgress?.({ ...progress.snapshot(), phase: 'zip', detail: step, zipPct: pct }),
+      },
+    );
+    archive = { url, jobId };
+  } else {
+    const zip = new JSZip();
+    for (const [p, content] of zipEntries) zip.file(p, content);
+    archive = { blob: await zip.generateAsync({ type: 'blob', streamFiles: true, compression: 'STORE' }) };
+  }
+
+  return { ...archive, filename, manifest, previewChunks, worldBoundsM: frame.worldBoundsM };
 }

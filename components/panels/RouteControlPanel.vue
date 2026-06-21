@@ -209,13 +209,22 @@
           block
           variant="primary"
           class="!bg-[#FF6600] hover:!bg-[#E65C00] !text-white"
+          @click="$emit('export-beamng')"
+        >
+          <Download :size="14" />
+          {{ t('route.exportBeamng', { chunks: chunkCount }) }}
+        </BaseButton>
+        <BaseButton
+          block
+          variant="secondary"
+          class="mt-2"
           @click="$emit('bake-route')"
         >
           <Download :size="14" />
           {{ t('route.bakeExport', { chunks: chunkCount }) }}
         </BaseButton>
         <p class="text-[10px] text-gray-400 dark:text-gray-500 mt-2 leading-snug">
-          {{ t('route.bakeNote') }}
+          {{ t('route.exportBeamngNote') }}
         </p>
       </template>
     </BaseCard>
@@ -259,6 +268,7 @@ defineEmits([
   'fetch-route',
   'clear-route',
   'bake-route',
+  'export-beamng',
   'cancel-bake',
 ]);
 
