@@ -19,6 +19,7 @@ import {
   gpxzCacheKey,
   usgsCacheKey,
   terrainTileCacheKey,
+  satelliteTileCacheKey,
 } from "./elevationCache.js";
 
 // Constants
@@ -736,6 +737,35 @@ const loadTerrainTileCached = async (url, z, x, y, signal) => {
   finally { URL.revokeObjectURL(objUrl); }
 };
 
+// Load an ArcGIS World Imagery satellite tile, served from the persistent cache
+// when present. Satellite (Z17) tiles are the bulk of a route export's network
+// traffic and were previously re-downloaded for every overlapping corridor chunk
+// (~220 m overlap) and on every reload. Caching them per z/x/y — exactly like the
+// Terrarium elevation tiles — eliminates that redundant download. Falls back to
+// the uncached Image path on any cache/fetch trouble so behaviour never regresses.
+const loadSatelliteTileCached = async (url, z, x, y, signal) => {
+  const key = satelliteTileCacheKey(z, x, y);
+  const cached = await getElevationCache(key);
+  if (cached?.blob) {
+    const objUrl = URL.createObjectURL(cached.blob);
+    try { return await loadImage(objUrl, signal); }
+    finally { URL.revokeObjectURL(objUrl); }
+  }
+  let blob;
+  try {
+    const resp = await fetch(url, { signal });
+    if (!resp.ok) return loadImage(url, signal);
+    blob = await resp.blob();
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return loadImage(url, signal); // network hiccup: let the Image path retry
+  }
+  putElevationCache(key, { blob });
+  const objUrl = URL.createObjectURL(blob);
+  try { return await loadImage(objUrl, signal); }
+  finally { URL.revokeObjectURL(objUrl); }
+};
+
 const SAT_TEX_MAX_SIZE = 8192;
 
 // Converts a satellite canvas to a blob URL, capping at SAT_TEX_MAX_SIZE to
@@ -1117,7 +1147,7 @@ export const fetchTerrainData = async (
         const wrappedTx = ((tx % numTiles) + numTiles) % numTiles;
 
         const satUrl = `${SATELLITE_API_URL}/${SATELLITE_ZOOM}/${ty}/${wrappedTx}`;
-        const sImg = await loadImage(satUrl, signal);
+        const sImg = await loadSatelliteTileCached(satUrl, SATELLITE_ZOOM, wrappedTx, ty, signal);
         if (sImg) {
           satTilesSucceeded++;
           tempSatCtx.clearRect(0, 0, TILE_SIZE, TILE_SIZE);
@@ -1468,7 +1498,7 @@ export const loadTerrainFromTif = async (
     const numTiles = Math.pow(2, SATELLITE_ZOOM);
     const wrappedTx = ((tx % numTiles) + numTiles) % numTiles;
     const satUrl = `${SATELLITE_API_URL}/${SATELLITE_ZOOM}/${ty}/${wrappedTx}`;
-    const sImg = await loadImage(satUrl, signal);
+    const sImg = await loadSatelliteTileCached(satUrl, SATELLITE_ZOOM, wrappedTx, ty, signal);
     const drawX = (tx - satMinTileX) * TILE_SIZE;
     const drawY = (ty - satMinTileY) * TILE_SIZE;
     if (sImg) sCtx.drawImage(sImg, drawX, drawY);
@@ -1749,7 +1779,7 @@ export const loadTerrainFromLaz = async (
     const numTiles  = Math.pow(2, SATELLITE_ZOOM);
     const wrappedTx = ((tx % numTiles) + numTiles) % numTiles;
     const satUrl    = `${SATELLITE_API_URL}/${SATELLITE_ZOOM}/${ty}/${wrappedTx}`;
-    const sImg = await loadImage(satUrl, signal);
+    const sImg = await loadSatelliteTileCached(satUrl, SATELLITE_ZOOM, wrappedTx, ty, signal);
     const drawX = (tx - satMinTileX) * TILE_SIZE;
     const drawY = (ty - satMinTileY) * TILE_SIZE;
     if (sImg) sCtx.drawImage(sImg, drawX, drawY);

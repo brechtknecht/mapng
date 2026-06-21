@@ -168,15 +168,47 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     const useUSGS = src === 'usgs', useGPXZ = src === 'gpxz', useKRON86 = src === 'kron86';
 
     // 1) Terrain per chunk.
+    //
+    // The chunks are independent fetches that get composited afterwards, so we
+    // run several at once instead of strictly back-to-back — this overlaps each
+    // chunk's OSM Overpass round-trip + tile downloads + off-thread resample.
+    // GPXZ/USGS keep a low cap: each already fans out its own internal requests
+    // (and GPXZ is rate-limited), so too many parallel chunks would just trip
+    // throttling. The global-tile path is network-bound, so a few more help.
+    //
+    // Texture work is scoped to the ONE base texture the composite will use:
+    // a satellite floor needs no OSM at all, so we skip the per-chunk Overpass
+    // query and both texture bakes entirely (the single biggest serial cost on
+    // the standard tiers). osm/hybrid still pull OSM and bake only their own
+    // texture. (The composite's cross-texture fallback is lost in trade, but a
+    // wholesale satellite miss is rare and the off-corridor filler covers gaps.)
+    const tex = String(baseTexture || 'satellite').toLowerCase();
+    const includeOSM = tex === 'osm' || tex === 'hybrid';
+    const genOpts = {
+      generateOSMTextureAsset: tex === 'osm',
+      generateHybridTextureAsset: tex === 'hybrid',
+    };
+    const terrainConcurrency = (useGPXZ || useUSGS) ? 2 : 4;
+
     const terrains = new Array(total);
-    for (let i = 0; i < total; i++) {
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      report(i, 'terrain', `Fetching terrain ${i + 1}/${total}`);
-      terrains[i] = await fetchTerrainData(
-        chunks[i].center, chunkSizeM, true, useUSGS, useGPXZ, useKRON86, gpxzApiKey, undefined,
-        undefined, signal,
-      );
-    }
+    let terrainDone = 0;
+    report(0, 'terrain', `Fetching terrain 0/${total}`);
+    let nextChunk = 0;
+    const terrainWorker = async () => {
+      while (nextChunk < total) {
+        const i = nextChunk++;
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        terrains[i] = await fetchTerrainData(
+          chunks[i].center, chunkSizeM, includeOSM, useUSGS, useGPXZ, useKRON86, gpxzApiKey,
+          undefined, undefined, signal, genOpts,
+        );
+        terrainDone++;
+        report(terrainDone, 'terrain', `Fetching terrain ${terrainDone}/${total}`);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(terrainConcurrency, total) }, terrainWorker),
+    );
 
     // 2) One composited terrain + texture spanning the route bbox.
     report(total, 'terrain', 'Compositing route terrain');

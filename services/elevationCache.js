@@ -17,9 +17,17 @@
 const DB_NAME = 'mapng-elevation';
 const STORE = 'elev';
 const META_KEY = '__meta__';
-// Source rasters can be tens of MB each; keep the working set bounded but large
-// enough to hold a typical multi-chunk route plus a few single tiles.
-const MAX_ENTRIES = 120;
+// The store holds two very different payload classes, so they get independent
+// LRU budgets (a single shared cap would let a route's hundreds of small tiles
+// evict the multi-MB rasters — or evict earlier tiles of the same route
+// mid-fetch — defeating the cache):
+//   - source rasters ("gpxz|…", "usgs|…"): tens of MB each → keep the working
+//     set tight.
+//   - global tiles ("terr|…", "sat|…"): ~20–40 KB JPEG/PNG each → a route can
+//     touch hundreds, so allow a much larger count for a few MB total.
+const MAX_RASTER_ENTRIES = 120;
+const MAX_TILE_ENTRIES = 6000;
+const isTileKey = (key) => key.startsWith('terr|') || key.startsWith('sat|');
 
 const hasIdb = () => typeof indexedDB !== 'undefined';
 
@@ -86,6 +94,11 @@ export const usgsCacheKey = (bounds) => `usgs|${boundsKey(bounds)}`;
 
 export const terrainTileCacheKey = (z, x, y) => `terr|${z}|${x}|${y}`;
 
+// ArcGIS World Imagery satellite tiles are effectively immutable per z/x/y, so
+// the same tile is reused across overlapping route chunks (corridor chunks
+// overlap by ~220 m) and across reloads — the same logic as Terrarium tiles.
+export const satelliteTileCacheKey = (z, x, y) => `sat|${z}|${x}|${y}`;
+
 // Touch the LRU timestamp and prune the oldest entries past MAX_ENTRIES.
 const touchAndPrune = async (key) => {
   let meta;
@@ -95,13 +108,24 @@ const touchAndPrune = async (key) => {
     return; // meta bookkeeping is best-effort
   }
   meta[key] = stamp();
-  const keys = Object.keys(meta).sort((a, b) => meta[a] - meta[b]);
-  while (keys.length > MAX_ENTRIES) {
-    const oldest = keys.shift();
-    try { await idbDelete(oldest); } catch (_) { /* best-effort */ }
-    mem.delete(oldest);
-    delete meta[oldest];
+  // Prune each payload class against its own cap so small tiles and heavy
+  // rasters never compete for the same slots.
+  const tileKeys = [];
+  const rasterKeys = [];
+  for (const k of Object.keys(meta)) {
+    (isTileKey(k) ? tileKeys : rasterKeys).push(k);
   }
+  const pruneBucket = async (bucketKeys, cap) => {
+    bucketKeys.sort((a, b) => meta[a] - meta[b]);
+    while (bucketKeys.length > cap) {
+      const oldest = bucketKeys.shift();
+      try { await idbDelete(oldest); } catch (_) { /* best-effort */ }
+      mem.delete(oldest);
+      delete meta[oldest];
+    }
+  };
+  await pruneBucket(tileKeys, MAX_TILE_ENTRIES);
+  await pruneBucket(rasterKeys, MAX_RASTER_ENTRIES);
   try { await idbPut(META_KEY, meta); } catch (_) { /* best-effort */ }
 };
 
