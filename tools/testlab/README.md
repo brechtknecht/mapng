@@ -45,6 +45,24 @@ GET /api/captures                       → list captured bakes
 floor; conform should lower it. `verticalExtent…M` must stay ≈ unchanged (a
 flattening regression would collapse it).
 
+## Multi-chunk route model
+
+The single-chunk view doesn't catch route-mode seating bugs. `routeScene.mjs`
+models the real route vertical pipeline — a route-wide shared anchor, the conform
+applied PER CHUNK against that chunk's own terrain, the **combined** terrain the
+level actually drives on (`buildCombinedRouteTerrain`), and `baseUp` placement —
+then measures each chunk's residual against the combined surface.
+
+```bash
+npm run test:route    # tests/routeConform.test.mjs
+```
+
+Key result: a route-wide geoid drift is fully absorbed by the per-chunk conform,
+but where adjacent chunks' DEMs disagree (different elevation tiles, or the
+coarser combined grid smoothing slopes) the per-chunk conform leaves a residual
+vs the combined surface — the "one chunk lifted ~1 m" symptom. Conforming against
+the **combined** terrain instead removes it (`conformMode: 'combined'`).
+
 ## Files
 
 | file | role |
