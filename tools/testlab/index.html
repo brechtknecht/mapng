@@ -35,7 +35,7 @@
 <body>
 <header>
   <h1>Conform Test Lab — seat Google tiles onto the .ter floor (S2)</h1>
-  <p>Left = <b>before</b> (tile ground drifts above the floor), right = <b>after</b> (real <code>conformTilesToFloor</code> applied). Blue sheet = tile ground · green = .ter floor · orange = buildings.</p>
+  <p>Left = <b>before</b>, right = <b>after</b> (real <code>conformTilesToFloor</code>). Tiles are coloured by distance from the .ter floor — <b style="color:#5aa0ff">blue = below</b>, <b style="color:#d4d8e0">grey = on the floor (accurate)</b>, <b style="color:#ef4444">red = above</b>. A good conform turns colour → grey on the right. Faint grid = the floor.</p>
 </header>
 <div id="wrap">
   <div id="view">
@@ -43,6 +43,10 @@
     <div class="vlabel after">AFTER</div>
   </div>
   <aside>
+    <h2>Tile colour = distance from floor (±2 m)</h2>
+    <div style="height:14px;border-radius:3px;background:linear-gradient(90deg,#3473ff,#d4d8e0,#ef4444)"></div>
+    <div class="legend"><span>−2 m (below)</span><span>on floor</span><span>+2 m (above)</span></div>
+
     <h2>Scene source</h2>
     <div class="ctl"><select id="source" style="width:100%"><option value="">synthetic (sliders below)</option></select></div>
     <p id="capnote" style="color:#98a2b3;font-size:11px;margin:2px 0 0"></p>

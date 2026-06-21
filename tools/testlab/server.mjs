@@ -159,13 +159,28 @@ const server = http.createServer((req, res) => {
     if (p === '/api/scene.json') {
       const params = sceneParamsFrom(url.searchParams);
       const { scene, r, buildings, vExtentBefore, vExtentAfter } = runScene(params);
+      const minH = scene.data.minHeight;
+      // Per-vertex residual (metres above/below the floor) via the REAL sampler,
+      // so the viewer can colour tiles by how far they sit off the floor.
+      const residualsOf = (positions) => {
+        const out = new Float32Array(positions.length / 3);
+        for (let i = 0, j = 0; i < positions.length; i += 3, j++) {
+          out[j] = positions[i + 1] - (sampleHeightAtScene(scene.data, positions[i], positions[i + 2]) - minH);
+        }
+        return Array.from(out);
+      };
       // before/after positions per mesh; index shared (conform never re-indexes).
-      const meshes = scene.soup.map((m, i) => ({
-        kind: m.kind || (i === 0 && scene.source === 'synthetic' ? 'ground' : 'tile'),
-        index: Array.from(m.index),
-        before: Array.from(m.positions),
-        after: Array.from(r.positions[i] || m.positions),
-      }));
+      const meshes = scene.soup.map((m, i) => {
+        const after = r.positions[i] || m.positions;
+        return {
+          kind: m.kind || (i === 0 && scene.source === 'synthetic' ? 'ground' : 'tile'),
+          index: Array.from(m.index),
+          before: Array.from(m.positions),
+          after: Array.from(after),
+          residualBefore: residualsOf(m.positions),
+          residualAfter: residualsOf(after),
+        };
+      });
       return sendJson(res, {
         params,
         source: scene.source,

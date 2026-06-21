@@ -15,9 +15,8 @@ renderer.setPixelRatio(Math.min(2, devicePixelRatio));
 viewEl.appendChild(renderer.domElement);
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x14171c);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x404048, 1.1));
-const sun = new THREE.DirectionalLight(0xffffff, 1.4); sun.position.set(40, 120, 30); scene.add(sun);
+scene.background = new THREE.Color(0x0f1115);
+const RES_CLAMP = 2.0; // metres: residual at which the blue/red ramp saturates
 
 const camera = new THREE.PerspectiveCamera(45, 1, 0.1, 5000);
 camera.position.set(0, 140, 190);
@@ -41,8 +40,8 @@ const disposeGroup = (g) => {
   for (const c of [...g.children]) { c.geometry?.dispose(); c.material?.dispose(); g.remove(c); }
 };
 
-// Build a terrain reference surface from the DEM heightMap (metres above datum,
-// scaled to scene units by yScale — matches how the bake preview displays Y).
+// The .ter floor as a faint wireframe reference — present but never competing
+// with the colour-coded tiles that sit on it.
 const buildTerrainMesh = (terrain, minHeight) => {
   const { width: W, height: H, heightMap } = terrain;
   const geo = new THREE.BufferGeometry();
@@ -56,37 +55,64 @@ const buildTerrainMesh = (terrain, minHeight) => {
     }
   }
   const idx = [];
-  for (let r = 0; r < H - 1; r++) for (let c = 0; c < W - 1; c++) {
-    const a = r * W + c;
-    idx.push(a, a + 1, a + W, a + 1, a + W + 1, a + W);
+  for (let r = 0; r < H - 1; r += 4) for (let c = 0; c < W - 1; c += 4) {
+    const a = r * W + c, b = r * W + Math.min(c + 4, W - 1), d = Math.min(r + 4, H - 1) * W + c;
+    idx.push(a, b, a, d); // sparse grid lines
   }
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setIndex(idx); geo.computeVertexNormals();
-  return new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: 0x3f7d4f, roughness: 1, flatShading: false }));
+  geo.setIndex(idx);
+  return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: 0x47506a }));
 };
 
-const meshFrom = (positions, index, mat) => {
+// Diverging residual ramp: blue = below the floor, near-black-grey = on it
+// (accurate), red = above. Saturates at ±RES_CLAMP metres.
+const lerp = (a, b, t) => a + (b - a) * t;
+const residualColor = (out, o, res) => {
+  const t = Math.max(-1, Math.min(1, res / RES_CLAMP));
+  // on-floor colour is a neutral light grey so "accurate" reads as uncoloured
+  const mid = [0.82, 0.84, 0.88];
+  const lo = [0.20, 0.45, 1.0];  // blue (below)
+  const hi = [1.0, 0.25, 0.22];  // red (above)
+  const end = t < 0 ? lo : hi;
+  const k = Math.abs(t);
+  out[o] = lerp(mid[0], end[0], k);
+  out[o + 1] = lerp(mid[1], end[1], k);
+  out[o + 2] = lerp(mid[2], end[2], k);
+};
+
+// Tile/ground mesh coloured per-vertex by residual (unlit → crisp colours).
+const residualMesh = (positions, index, residual) => {
   const geo = new THREE.BufferGeometry();
   const pos = new Float32Array(positions.length);
-  for (let i = 0; i < positions.length; i += 3) {
+  const col = new Float32Array(positions.length);
+  for (let i = 0, v = 0; i < positions.length; i += 3, v++) {
     pos[i] = positions[i]; pos[i + 1] = positions[i + 1] * yScale; pos[i + 2] = positions[i + 2];
+    residualColor(col, i, residual[v]);
   }
   geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-  geo.setIndex(index); geo.computeVertexNormals();
-  return new THREE.Mesh(geo, mat);
+  geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  geo.setIndex(index);
+  return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, side: THREE.DoubleSide }));
 };
 
-const carpetMat = () => new THREE.MeshStandardMaterial({ color: 0x5aa0ff, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
-const bldMat = () => new THREE.MeshStandardMaterial({ color: 0xe08a3c, roughness: 0.9 });
-const tileMat = () => new THREE.MeshStandardMaterial({ color: 0xb8a98c, roughness: 1, side: THREE.DoubleSide });
-
-const matFor = (kind) => (kind === 'building' ? bldMat() : kind === 'ground' ? carpetMat() : tileMat());
+// Buildings are legitimately above the floor — show them solid, not as "drift".
+const buildingMesh = (positions, index) => {
+  const geo = new THREE.BufferGeometry();
+  const pos = new Float32Array(positions.length);
+  for (let i = 0; i < positions.length; i += 3) { pos[i] = positions[i]; pos[i + 1] = positions[i + 1] * yScale; pos[i + 2] = positions[i + 2]; }
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setIndex(index);
+  return new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: 0x6b7280, side: THREE.DoubleSide }));
+};
 
 const populate = (which, payload) => {
   const g = groups[which];
   disposeGroup(g);
   g.add(buildTerrainMesh(payload.terrain, payload.minHeight));
-  for (const m of payload.meshes) g.add(meshFrom(m[which], m.index, matFor(m.kind)));
+  const resKey = which === 'before' ? 'residualBefore' : 'residualAfter';
+  for (const m of payload.meshes) {
+    g.add(m.kind === 'building' ? buildingMesh(m[which], m.index) : residualMesh(m[which], m.index, m[resKey]));
+  }
 };
 
 const fmtSigned = (v) => (v >= 0 ? '+' : '') + v.toFixed(2);
