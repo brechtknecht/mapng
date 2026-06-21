@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Conform Test Lab — Google tiles → .ter floor (S2)</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 13px/1.4 system-ui, sans-serif; background: #14171c; color: #e6e9ee; }
+  header { padding: 10px 14px; border-bottom: 1px solid #2a2f37; }
+  header h1 { font-size: 15px; margin: 0 0 2px; }
+  header p { margin: 0; color: #98a2b3; font-size: 12px; }
+  #wrap { display: grid; grid-template-columns: 1fr 320px; height: calc(100vh - 52px); }
+  #view { position: relative; }
+  #view canvas { display: block; width: 100%; height: 100%; }
+  .vlabel { position: absolute; top: 8px; font-weight: 600; color: #cbd5e1; text-shadow: 0 1px 2px #000; }
+  .vlabel.before { left: 16px; } .vlabel.after { right: 16px; }
+  aside { border-left: 1px solid #2a2f37; padding: 12px 14px; overflow: auto; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em; color: #98a2b3; margin: 14px 0 6px; }
+  .ctl { margin: 8px 0; }
+  .ctl label { display: flex; justify-content: space-between; color: #cbd5e1; }
+  .ctl input[type=range] { width: 100%; }
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 2px 0; } td.k { color: #98a2b3; } td.v { text-align: right; font-variant-numeric: tabular-nums; }
+  .good { color: #4ade80; } .warn { color: #fbbf24; }
+  img#field { width: 100%; border: 1px solid #2a2f37; border-radius: 4px; image-rendering: pixelated; }
+  .legend { display:flex; justify-content:space-between; color:#98a2b3; font-size:11px; }
+  code { background:#1f242c; padding:1px 4px; border-radius:3px; }
+</style>
+<script type="importmap">
+{ "imports": { "three": "/vendor/three.module.js", "three/addons/controls/OrbitControls.js": "/vendor/OrbitControls.js" } }
+</script>
+</head>
+<body>
+<header>
+  <h1>Conform Test Lab — seat Google tiles onto the .ter floor (S2)</h1>
+  <p>Left = <b>before</b> (tile ground drifts above the floor), right = <b>after</b> (real <code>conformTilesToFloor</code> applied). Blue sheet = tile ground · green = .ter floor · orange = buildings.</p>
+</header>
+<div id="wrap">
+  <div id="view">
+    <div class="vlabel before">BEFORE</div>
+    <div class="vlabel after">AFTER</div>
+  </div>
+  <aside>
+    <h2>Drift parameters (metres)</h2>
+    <div class="ctl"><label>base lift <span id="lbase"></span></label><input id="base" type="range" min="0" max="2.4" step="0.05"></div>
+    <div class="ctl"><label>tilt X <span id="ltiltX"></span></label><input id="tiltX" type="range" min="-1.5" max="1.5" step="0.05"></div>
+    <div class="ctl"><label>tilt Z <span id="ltiltZ"></span></label><input id="tiltZ" type="range" min="-1.5" max="1.5" step="0.05"></div>
+    <div class="ctl"><label>wiggle <span id="lwiggle"></span></label><input id="wiggle" type="range" min="0" max="1.2" step="0.05"></div>
+
+    <h2>Conform stats</h2>
+    <table id="stats"><tbody></tbody></table>
+
+    <h2>Delta field D(x,z)</h2>
+    <img id="field" alt="delta field heatmap" />
+    <div class="legend"><span id="fmin"></span><span>low → high (m)</span><span id="fmax"></span></div>
+
+    <h2>Buildings (height must survive)</h2>
+    <table id="bld"><tbody></tbody></table>
+  </aside>
+</div>
+<script type="module" src="/app.mjs"></script>
+</body>
+</html>

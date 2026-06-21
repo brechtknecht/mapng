@@ -131,5 +131,9 @@ export const conformTilesToFloor = (meshes, data, {
     cellsFilled: field.filledCount,
     residualBefore: groundSamples ? residualSum / groundSamples : 0,
     residualAfter: postResidualCount ? postResidualSum / postResidualCount : 0,
+    // The built delta field, for inspection/visualisation (e.g. the test lab
+    // heatmap). Read-only — callers must not mutate.
+    fieldValues: field.values,
+    fieldN: field.cellsPerSide,
   };
 };
