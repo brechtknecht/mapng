@@ -100,7 +100,16 @@ export const createScalarFieldGrid = ({ cellM = 8, unitsPerMeter } = {}) => {
       );
     };
 
-    return { sample, values, cellsPerSide: n, filledCount };
+    // Cell index for an XZ — lets callers bin per-cell diagnostics on the same grid.
+    const cellIndex = (x, z) => {
+      const cx = Math.min(n - 1, Math.max(0, Math.floor(((x + HALF) / SCENE_SIZE) * n)));
+      const cz = Math.min(n - 1, Math.max(0, Math.floor(((z + HALF) / SCENE_SIZE) * n)));
+      return cz * n + cx;
+    };
+
+    // `filled` is the PRE-inpaint coverage mask (1 = had real ground samples);
+    // inpaint works on a copy, so this still marks which cells were measured vs guessed.
+    return { sample, values, filled, cellIndex, cellsPerSide: n, filledCount };
   };
 
   return { add, build, cellsPerSide: n };

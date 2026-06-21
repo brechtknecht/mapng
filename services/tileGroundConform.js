@@ -26,7 +26,9 @@ import { createScalarFieldGrid } from './scalarFieldGrid.js';
  *   positions are [sceneX, metersY, sceneZ]; metersY is above the .ter datum.
  * @param {object} data  mapng terrain (heightMap, width, height, minHeight, bounds).
  * @param {object} [opts]
- * @param {number} [opts.cellM=8]              delta-field cell size (metres).
+ * @param {number} [opts.cellM=6]              delta-field cell size (metres).
+ *   Smaller = follows local ground better (measured: monotonic residual drop down
+ *   to ~4 m on dense AOIs); 6 keeps enough samples/cell on sparse/rural AOIs.
  * @param {number} [opts.groundDistanceM=2.5]  tri counts as ground if its mean
  *   aboveTerrain is within ±this of the terrain (a BAND, not just an upper bound
  *   — subterranean horizontal geometry must be excluded or it poisons the field).
@@ -37,18 +39,23 @@ import { createScalarFieldGrid } from './scalarFieldGrid.js';
  * @param {number} [opts.groundNormalThreshold=0.85] and is this near-horizontal.
  * @param {number} [opts.maxShiftM=15]         clamp on |D| so a bad cell can't
  *   teleport geometry; the real datum residual is well under this.
- * @param {number} [opts.smoothPasses=2]       delta-field blur passes.
+ * @param {number} [opts.smoothPasses=0]       delta-field blur passes. Default 0:
+ *   field.sample already bilinearly interpolates between cell centres, so the
+ *   applied shift is continuous WITHOUT blur. Extra passes measurably worsen the
+ *   residual — they smear a cell's correction across real ground discontinuities
+ *   (curbs, embankment edges, terrace steps), pushing already-accurate spots off.
  * @returns {{ positions:Array<Float32Array|null>, vertsMoved:number,
  *   meshesMoved:number, cellsFilled:number, residualBefore:number,
  *   residualAfter:number }}
  *   positions[i] is a NEW array when mesh i moved, else null (caller keeps its own).
  */
 export const conformTilesToFloor = (meshes, data, {
-  cellM = 8,
+  cellM = 6,
   groundDistanceM = 2.5,
   groundNormalThreshold = 0.85,
   maxShiftM = 15,
-  smoothPasses = 2,
+  smoothPasses = 0,
+  diagnostics = false,
 } = {}) => {
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
   const upm = computeUnitsPerMeter(data); // metres-Y → scene units, to metricise normals
@@ -104,6 +111,18 @@ export const conformTilesToFloor = (meshes, data, {
 
   const field = grid.build({ smoothPasses, fallback: 0 });
 
+  // Optional per-cell diagnostics (opt-in — normal bakes don't pay for it). Lets
+  // the test lab show WHERE the residual stays / grows and whether that
+  // correlates with cells that had no real ground samples (inpaint-guessed D).
+  const nCells = field.cellsPerSide * field.cellsPerSide;
+  const diag = diagnostics ? {
+    coverage: field.filled,                  // 1 = had real ground samples
+    afterAbsSum: new Float64Array(nCells),   // Σ|after residual| of ground verts
+    beforeAbsSum: new Float64Array(nCells),  // Σ|before residual| of ground verts
+    count: new Float64Array(nCells),         // ground verts per cell
+    worsened: 0, improved: 0,                // ground verts whose |residual| grew / shrank
+  } : null;
+
   // --- Pass 2: shift every vertex down by D(x,z) -----------------------------
   let vertsMoved = 0, meshesMoved = 0;
   let postResidualSum = 0, postResidualCount = 0;
@@ -124,10 +143,20 @@ export const conformTilesToFloor = (meshes, data, {
       }
       // residual of conformed ground (for the verification log line) — measured
       // over the SAME band that defined ground, so deep-below verts don't inflate it.
-      const before = p[i + 1] - (sampleHeightAtScene(data, x, z) - minH);
+      const terr = sampleHeightAtScene(data, x, z) - minH;
+      const before = p[i + 1] - terr;
       if (Math.abs(before) < groundDistanceM) {
-        postResidualSum += Math.abs(out[i + 1] - (sampleHeightAtScene(data, x, z) - minH));
+        const after = out[i + 1] - terr;
+        postResidualSum += Math.abs(after);
         postResidualCount++;
+        if (diag) {
+          const c = field.cellIndex(x, z);
+          diag.afterAbsSum[c] += Math.abs(after);
+          diag.beforeAbsSum[c] += Math.abs(before);
+          diag.count[c] += 1;
+          if (Math.abs(after) > Math.abs(before) + 1e-6) diag.worsened++;
+          else if (Math.abs(after) < Math.abs(before) - 1e-6) diag.improved++;
+        }
       }
     }
     if (moved) { meshesMoved++; return out; }
@@ -145,5 +174,6 @@ export const conformTilesToFloor = (meshes, data, {
     // heatmap). Read-only — callers must not mutate.
     fieldValues: field.values,
     fieldN: field.cellsPerSide,
+    diag,
   };
 };
