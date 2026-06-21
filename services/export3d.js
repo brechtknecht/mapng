@@ -1560,6 +1560,7 @@ export const exportToGLB = async (data, options = {}) => {
     googleQuality, // optional: override bake quality tier ('high'|'roads'|'max'); omit to use the persisted preference
     corridorMask, // optional route mode: { segment: [{lat,lng}], halfWidthM } — clip Google tiles to the buffer
     googleZOffsetM, // optional override for the tiles' vertical offset (metres); omit → the global slider value
+    googleGroundOffsetM, // route mode: one route-wide vertical anchor (metres) shared by every chunk so seams stay continuous
   } = options;
   const googleZOff = typeof googleZOffsetM === 'number' ? googleZOffsetM : getGoogleTilesZOffset();
   const resolvedIncludeCenterTile = typeof includeCenterTile === 'boolean'
@@ -1598,6 +1599,9 @@ export const exportToGLB = async (data, options = {}) => {
             corridorHalfWidthM: corridorMask.halfWidthM,
             memoryCache: false,
           } : {}),
+          // Route mode: seat this chunk on the shared route-wide vertical anchor
+          // so the preview matches the .dae and adjacent chunks don't float.
+          ...(Number.isFinite(googleGroundOffsetM) ? { sharedGroundOffsetM: googleGroundOffsetM } : {}),
           onProgress: (p) => {
             onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`);
             // Structured sweep progress (station/stations, tile counts) for a
@@ -1608,6 +1612,9 @@ export const exportToGLB = async (data, options = {}) => {
         // Surface bake telemetry (station/tile counts, bake ms) for the route
         // manifest — undefined on an IndexedDB/in-memory cache hit.
         options.onBakeStats?.(googleGroup.userData?.bakeStats);
+        // Surface the effective vertical anchor so a route can capture chunk 0's
+        // and share it with every other chunk (continuous seams).
+        options.onGroundOffset?.(googleGroup.userData?.groundOffsetM);
         // Clone the mesh nodes (geometry/material stay shared) — the cached
         // group is owned by the bake cache and may be parented into the 3D
         // preview scene right now; scene.add() on it directly would steal it.

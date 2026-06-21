@@ -707,11 +707,22 @@ export const createTileMeshTransformer = (data, frame, ellipsoid, googleGroundAl
   // The Node worker skips this — its consumer (deserializeGroup) recomputes
   // normals on restore anyway, so shipping them would be pure waste.
   computeNormals = true,
+  // Route mode: a single, route-wide vertical anchor (metres) shared by every
+  // chunk. Each chunk would otherwise re-seat Google's ground onto the local
+  // DEM at its OWN centre, so adjacent chunks disagree at the shared seam and
+  // the next one floats. Passing one constant here keeps the Google tiles the
+  // single continuous mesh they already are — see exportRouteLevel.
+  groundOffsetM = null,
 } = {}) => {
   const projector = createMetricProjector(data.bounds, data.width, data.height);
   const mapngGroundY = sampleHeightAtScene(data, 0, 0);
   const halfScene = SCENE_SIZE / 2;
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
+  // The per-chunk anchor: lift Google's ground (ellipsoidal) to sit on the
+  // mapng terrain at THIS chunk's centre. Route mode overrides it with one
+  // route-wide value so chunks stay co-continuous.
+  const localGroundOffset = mapngGroundY - googleGroundAlt;
+  const groundOffset = Number.isFinite(groundOffsetM) ? groundOffsetM : localGroundOffset;
   // Output Y is meters while X/Z are scene units — anisotropic. The ground-
   // normal test below must run in a metrically uniform space or sloped
   // hillsides stop counting as ground; scale Y by this when building tris.
@@ -747,8 +758,10 @@ export const createTileMeshTransformer = (data, frame, ellipsoid, googleGroundAl
       const v = p.y / (data.height - 1);
       const sceneX = u * SCENE_SIZE - halfScene;
       const sceneZ = v * SCENE_SIZE - halfScene;
-      // Terrain top above minHeight + altitude above Google's local ground.
-      const beamZMeters = (mapngGroundY - minH) + (cart.height - googleGroundAlt);
+      // Terrain top above minHeight + altitude above the anchor's ground.
+      // groundOffset is per-chunk by default, or one route-wide constant so
+      // adjacent chunks share a vertical datum and seams stay continuous.
+      const beamZMeters = (groundOffset - minH) + cart.height;
 
       newPositions[i * 3]     = sceneX;
       newPositions[i * 3 + 1] = beamZMeters;
@@ -808,6 +821,9 @@ export const createTileMeshTransformer = (data, frame, ellipsoid, googleGroundAl
   // Expose anchor info for the orchestrators' log lines.
   transform.mapngGroundY = mapngGroundY;
   transform.minH = minH;
+  // The effective vertical anchor used (route-wide override when given, else the
+  // local per-chunk value). The route reads chunk 0's to share it downstream.
+  transform.groundOffsetM = groundOffset;
   return transform;
 };
 

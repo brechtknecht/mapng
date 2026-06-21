@@ -52,7 +52,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
   const {
     apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
     cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
-    corridorSegment, corridorHalfWidthM,
+    corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
   } = options;
   const corridorMode = Array.isArray(corridorSegment) && corridorSegment.length >= 2;
   const heightMap = data.heightMap instanceof Float32Array
@@ -77,7 +77,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
     options: {
       apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
       cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
-      corridorSegment, corridorHalfWidthM,
+      corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
     },
   };
 };

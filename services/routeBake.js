@@ -121,6 +121,9 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // Results land here keyed by index, then get assembled in route order below —
   // the manifest/zip/preview must stay ordered regardless of completion order.
   const results = new Array(total);
+  // One route-wide Google vertical anchor, captured from chunk 0 (baked first)
+  // and reused by every later chunk so the stitched chunks don't float apart.
+  let sharedGroundOffsetM = null;
   let nextIdx = 0;
   const claim = () => (nextIdx < total ? nextIdx++ : -1);
   // Keep terrain fetches primed `limit` chunks ahead of the claim cursor so the
@@ -153,6 +156,11 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       // to the buffer as a final safety trim — most of each box is outside
       // ±halfWidth, but the corridor stations mean little is baked there now.
       corridorMask: { segment: chunk.segment, halfWidthM: tier.halfWidthM },
+      // One route-wide vertical anchor for the Google tiles, taken from chunk 0
+      // (baked first) and shared by all others — otherwise each chunk re-seats
+      // Google's ground on its own centre's DEM and neighbours float at seams.
+      ...(sharedGroundOffsetM != null ? { googleGroundOffsetM: sharedGroundOffsetM } : {}),
+      onGroundOffset: (off) => { if (i === 0 && Number.isFinite(off)) sharedGroundOffsetM = off; },
       onMaskStats: (s) => { maskStats = s; },
       onBakeStats: (s) => { if (s) bakeStats = s; },
       // Structured sweep progress → per-chunk map fill (station/stations).
@@ -202,6 +210,16 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
     progress.setPhase(i, 'done', 'complete');
   };
 
+  // Process one chunk with its error surfaced on that chunk's box, then rethrown.
+  const poolWorkerStep = async (i) => {
+    try {
+      await processChunk(i);
+    } catch (err) {
+      if (err?.name !== 'AbortError') progress.setPhase(i, 'error', err?.message ?? 'bake failed');
+      throw err;
+    }
+  };
+
   // One pool worker pulls chunk indices until the queue drains; `limit` of them
   // run in parallel. A throw (incl. AbortError) propagates out of Promise.all.
   const poolWorker = async () => {
@@ -210,18 +228,21 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       const i = claim();
       if (i === -1) return;
       primePrefetch();
-      try {
-        await processChunk(i);
-      } catch (err) {
-        // Surface the failure on that chunk's box, then propagate.
-        if (err?.name !== 'AbortError') progress.setPhase(i, 'error', err?.message ?? 'bake failed');
-        throw err;
-      }
+      await poolWorkerStep(i);
     }
   };
 
   onProgress?.(progress.snapshot()); // initial all-pending snapshot
   primePrefetch();
+  // Bake chunk 0 alone first to learn the shared vertical anchor; every other
+  // chunk then seats on it, so adjacent chunks meet at the seam instead of
+  // floating. Costs one chunk of serial latency up front, then the pool fans
+  // out the rest `limit`-wide as before.
+  if (total > 0) {
+    const first = claim(); // index 0
+    primePrefetch();
+    await poolWorkerStep(first);
+  }
   await Promise.all(Array.from({ length: limit }, () => poolWorker()));
 
   // Assemble in route order — the pool finishes chunks out of order.

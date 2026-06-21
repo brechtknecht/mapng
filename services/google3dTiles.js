@@ -114,6 +114,9 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     // export, which keeps the full box-covering sweep.
     corridorSegment = null,
     corridorHalfWidthM = 0,
+    // Route mode: one route-wide vertical anchor (metres) shared by every chunk
+    // so adjacent chunks stay co-continuous at their seams. null → per-chunk.
+    sharedGroundOffsetM = null,
     onProgress,
   } = options;
 
@@ -293,6 +296,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // can be welded onto the street before it's removed. Mirrors the worker.
   const transformMesh = createTileMeshTransformer(data, frame, WGS84_ELLIPSOID, googleGroundAlt, {
     stripGround: false,
+    ...(Number.isFinite(sharedGroundOffsetM) ? { groundOffsetM: sharedGroundOffsetM } : {}),
   });
   console.info(
     `[google3dTiles] vertical anchor: googleGroundAlt=${googleGroundAlt.toFixed(1)}m (ellipsoidal), ` +
@@ -312,6 +316,9 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     timedOut,
     elapsedMs: Math.round(elapsedMs),
   };
+  // The effective vertical anchor — route chunk 0 reports it so every later
+  // chunk + the preview share one datum (no per-chunk seam float).
+  out.userData.groundOffsetM = transformMesh.groundOffsetM;
 
   let outputMeshIdx = 0;
   forEachBakeMesh((node, sceneIdx) => {
@@ -489,6 +496,7 @@ const bakeCacheKey = (
     sensorSize = quality === 'standard' ? 1024 : 1536,
     corridorSegment = null,
     corridorHalfWidthM = 0,
+    sharedGroundOffsetM = null,
   } = {},
 ) => {
   const b = data.bounds;
@@ -502,10 +510,16 @@ const bakeCacheKey = (
   const corridor = Array.isArray(corridorSegment) && corridorSegment.length >= 2
     ? `|corr=${corridorHalfWidthM}:${corridorSegment.length}:${hashSegment(corridorSegment)}`
     : '';
+  // The route-wide vertical anchor changes the baked Y of every vertex, so a
+  // chunk baked with one MUST key apart from its per-chunk (natural) bake.
+  // Empty for the area/single-tile path, so its key is byte-for-byte unchanged.
+  const anchor = Number.isFinite(sharedGroundOffsetM)
+    ? `|gz=${Number(sharedGroundOffsetM).toFixed(2)}`
+    : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
     `|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}` +
-    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}${corridor}`
+    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}${corridor}${anchor}`
   );
 };
 

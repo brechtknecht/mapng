@@ -607,7 +607,12 @@ const raceEndpoints = (endpoints, query) => {
   });
 };
 
-export const fetchOSMData = async (bounds) => {
+// Fetch OSM features AND the per-request metadata in one call. Returns the info
+// alongside the features so a caller can keep it locally instead of reading the
+// module-global getLastOSMRequestInfo() — essential when several fetches run
+// concurrently (e.g. the route bake's parallel chunks), where the global would
+// otherwise be clobbered by whichever request finishes last.
+export const fetchOSMDataWithInfo = async (bounds) => {
   console.log(`[OSM] Fetching data for bounds: N:${bounds.north}, S:${bounds.south}, E:${bounds.east}, W:${bounds.west}`);
 
   const query = buildQuery(bounds);
@@ -622,27 +627,33 @@ export const fetchOSMData = async (bounds) => {
 
     console.log(`[OSM] Winner: ${endpoint} — ${data.elements?.length || 0} elements`);
 
-    lastOSMRequestInfo = {
+    const requestInfo = {
       ...queryParams,
       endpointUsed: endpoint,
       elementCount: data.elements?.length || 0,
       startedAt,
       completedAt: new Date().toISOString(),
     };
+    lastOSMRequestInfo = requestInfo;
 
     const features = parseOverpassResponse(data, bounds);
     console.log(`[OSM] Parsed ${features.length} features.`);
-    return features;
+    return { features, requestInfo };
 
   } catch (error) {
     console.error("[OSM] All endpoints failed:", error.message);
-    lastOSMRequestInfo = {
+    const requestInfo = {
       ...queryParams,
       endpointUsed: null,
       error: error.message,
       startedAt,
       completedAt: new Date().toISOString(),
     };
-    return [];
+    lastOSMRequestInfo = requestInfo;
+    return { features: [], requestInfo };
   }
+};
+
+export const fetchOSMData = async (bounds) => {
+  return (await fetchOSMDataWithInfo(bounds)).features;
 };

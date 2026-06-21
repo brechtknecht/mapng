@@ -43,6 +43,7 @@
       </TresGroup>
 
       <OrbitControls
+        v-if="!flyMode"
         make-default
         :min-distance="2"
         :max-distance="maxDistance"
@@ -50,7 +51,55 @@
         :enable-damping="true"
         :damping-factor="0.05"
       />
+      <FlyControls3D
+        v-if="flyMode"
+        :fov="flyFov"
+        @locked-change="flyLocked = $event"
+      />
     </TresCanvas>
+
+    <!-- Fly-mode toggle + HUD: ego-camera fly with keyboard + gamepad, same as
+         the single-tile preview (route chunks are pre-baked, so no refine). -->
+    <template v-if="!loading && !loadError">
+      <button
+        @click="flyMode = !flyMode"
+        :class="[
+          'absolute bottom-4 right-4 z-20 flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-lg shadow-xl backdrop-blur transition-colors',
+          flyMode ? 'bg-gray-900/80 hover:bg-black text-white' : 'bg-[#0f766e]/90 hover:bg-[#0c5d56] text-white',
+        ]"
+      >
+        <Plane :size="14" />
+        {{ flyMode ? t('route.flyExit') : t('route.fly') }}
+      </button>
+
+      <div
+        v-if="flyMode"
+        class="absolute top-4 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2 pointer-events-none"
+      >
+        <div
+          v-if="!flyLocked"
+          class="px-3 py-1.5 bg-black/70 backdrop-blur rounded-md text-xs text-white font-medium"
+        >
+          {{ t('route.flyClickToLook') }}
+        </div>
+        <div class="flex items-center gap-3 px-4 py-2.5 bg-black/70 backdrop-blur rounded-lg shadow-xl pointer-events-auto">
+          <label class="flex items-center gap-1.5 text-[10px] text-gray-300">
+            {{ t('preview.flyFov') }}
+            <input type="range" min="30" max="110" step="1" v-model.number="flyFov" class="w-20 accent-[#0f766e]" />
+            <span class="w-6 text-right tabular-nums">{{ flyFov }}°</span>
+          </label>
+          <button
+            @click="flyMode = false"
+            class="px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] font-medium rounded-md transition-colors"
+          >
+            {{ t('route.flyExit') }}
+          </button>
+        </div>
+        <div class="px-3 py-1 bg-black/50 backdrop-blur rounded text-[10px] text-gray-300">
+          {{ t('route.flyHint') }}
+        </div>
+      </div>
+    </template>
 
     <!-- Loading overlay -->
     <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
@@ -64,12 +113,16 @@
 
 <script setup>
 import { ref, computed, shallowRef, onMounted, onUnmounted, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import * as THREE from 'three';
 import { TresCanvas } from '@tresjs/core';
 import { OrbitControls, Environment } from '@tresjs/cientos';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Loader2 } from 'lucide-vue-next';
+import { Loader2, Plane } from 'lucide-vue-next';
 import CSMLight from './CSMLight.vue';
+import FlyControls3D from './FlyControls3D.vue';
+
+const { t } = useI18n({ useScope: 'global' });
 
 const props = defineProps({
   chunks: { type: Array, default: () => [] }, // [{ index, blob, placement }]
@@ -82,6 +135,11 @@ const hdrFile = '/hdr/kloofendal_48d_partly_cloudy_puresky_4k.hdr';
 const loaded = shallowRef([]); // [{ index, object, placement }]
 const loading = ref(true);
 const loadError = ref('');
+
+// Fly mode: swap OrbitControls for the ego-camera (keyboard + gamepad).
+const flyMode = ref(false);
+const flyLocked = ref(false);
+const flyFov = ref(70);
 
 // Center the route at the origin so the camera/controls frame it.
 const rootOffset = computed(() => {

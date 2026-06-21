@@ -146,7 +146,9 @@
         @update:elevation-source="$emit('set-elevation-source', $event)"
         @update:gpxz-api-key="$emit('set-gpxz-key', $event)"
       />
-      <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+      <!-- Tile height offset only shifts the live preview; before the first
+           bake/export there's no tileset to see, so keep it hidden until then. -->
+      <div v-if="hasPreview" class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
         <div class="flex items-center justify-between mb-1">
           <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('route.tileZOffset') }}</span>
           <span class="text-[11px] font-mono text-gray-500 dark:text-gray-400">{{ zOffsetM.toFixed(1) }} m</span>
@@ -284,6 +286,7 @@ const props = defineProps({
   elevationSource: { type: String, default: 'default' },
   gpxzApiKey: { type: String, default: '' },
   zOffsetM: { type: Number, default: 0 },
+  hasPreview: { type: Boolean, default: false }, // a baked/exported preview exists
   activePoint: { type: String, default: null }, // 'start' | 'end' | null
   chunkCount: { type: Number, default: 0 },
   baking: { type: Boolean, default: false },

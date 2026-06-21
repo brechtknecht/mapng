@@ -25,7 +25,7 @@ const getPixelLatLng = (x, y, width, height, toWGS84, targetBounds) => {
     return toWGS84.forward([localX, localY]);
 };
 
-const getOutputBounds = (toWGS84, width, height, targetBounds) => {
+export const getOutputBounds = (toWGS84, width, height, targetBounds) => {
     if (targetBounds && Number.isFinite(targetBounds.north) && Number.isFinite(targetBounds.south)
         && Number.isFinite(targetBounds.east) && Number.isFinite(targetBounds.west)) {
         return {

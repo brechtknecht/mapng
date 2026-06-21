@@ -1,4 +1,4 @@
-import { fetchOSMData, getLastOSMRequestInfo, getOSMQueryParameters } from "./osm";
+import { fetchOSMData, fetchOSMDataWithInfo, getLastOSMRequestInfo, getOSMQueryParameters } from "./osm";
 import { parseTifFile } from "./tifLoader";
 export { parseTifFile };
 import { parseLazFile } from "./lazLoader";
@@ -10,8 +10,16 @@ import {
   resampleHeightAndImageOffThread,
   resampleImageOffThread,
 } from "./resamplerClient";
+import { getOutputBounds } from "./terrainResampler";
 import { createLocalToWGS84 } from "./geoUtils";
 import { fetchKron86GridForBounds, isWithinKron86Coverage } from "./kron86.js";
+import {
+  getElevationCache,
+  putElevationCache,
+  gpxzCacheKey,
+  usgsCacheKey,
+  terrainTileCacheKey,
+} from "./elevationCache.js";
 
 // Constants
 const TILE_SIZE = 256;
@@ -207,6 +215,24 @@ export function getGPXZRateLimitInfo() {
 const NO_DATA_VALUE = -99999;
 
 /**
+ * Re-parse cached GeoTIFF ArrayBuffers back into the { image, raster, arrayBuffer }
+ * shape the live GPXZ/USGS fetch paths produce — so a cache hit skips the network
+ * entirely while downstream code stays identical to a fresh fetch.
+ */
+const parseGeoTiffBuffers = async (buffers) => {
+  const out = [];
+  for (const arrayBuffer of buffers) {
+    const tiff = await GeoTIFF.fromArrayBuffer(arrayBuffer);
+    const image = await tiff.getImage();
+    const rasters = await image.readRasters();
+    const raster = rasters[0];
+    await tiff.close();
+    out.push({ image, raster, arrayBuffer });
+  }
+  return out;
+};
+
+/**
  * Fetch high-resolution elevation data from the GPXZ hires-raster API.
  *
  * Flow:
@@ -223,6 +249,26 @@ const NO_DATA_VALUE = -99999;
 const fetchGPXZRaw = async (bounds, apiKey, onProgress, signal) => {
   try {
     signal?.throwIfAborted();
+
+    // 0. Cache: identical bounds + api-key → reuse the previously fetched DEM
+    // bytes instead of re-probing and re-downloading every chunk.
+    const cacheKey = gpxzCacheKey(bounds, apiKey);
+    const cached = await getElevationCache(cacheKey);
+    if (cached?.buffers?.length) {
+      try {
+        onProgress?.('Using cached GPXZ elevation data...');
+        const data = await parseGeoTiffBuffers(cached.buffers);
+        return {
+          data,
+          smooth: !!cached.smooth,
+          rawArrayBuffers: cached.buffers,
+          hadChunkFailures: !!cached.hadChunkFailures,
+        };
+      } catch (e) {
+        console.warn('[GPXZ] Cached buffers unreadable, refetching:', e);
+      }
+    }
+
     // 1. Probe rate limits if not already known
     if (!gpxzRateLimitInfo) {
       onProgress?.('Checking GPXZ account limits...');
@@ -458,6 +504,15 @@ const fetchGPXZRaw = async (bounds, apiKey, onProgress, signal) => {
     if (hadChunkFailures) {
       console.warn(`[GPXZ] ${requests.length - validResults.length}/${requests.length} chunks failed. Terrarium fallback will be enabled for gap recovery.`);
     }
+    // Only cache complete fetches — a partial result (some chunks failed) would
+    // otherwise be served forever, hiding gaps a retry could fill.
+    if (!hadChunkFailures) {
+      putElevationCache(cacheKey, {
+        buffers: rawArrayBuffers,
+        smooth: shouldSmooth,
+        hadChunkFailures,
+      });
+    }
     return { data: validResults, smooth: shouldSmooth, rawArrayBuffers, hadChunkFailures };
   } catch (e) {
     console.error("Failed to fetch GPXZ terrain:", e);
@@ -484,6 +539,21 @@ const fetchUSGSRaw = async (bounds, onProgress, signal) => {
 
   try {
     signal?.throwIfAborted();
+
+    // 0. Cache: identical bounds → reuse the previously downloaded DEM tiles
+    // instead of re-querying the catalogue and re-downloading the GeoTIFFs.
+    const cacheKey = usgsCacheKey(bounds);
+    const cached = await getElevationCache(cacheKey);
+    if (cached?.buffers?.length) {
+      try {
+        onProgress?.('Using cached USGS elevation data...');
+        const data = await parseGeoTiffBuffers(cached.buffers);
+        return { data, rawArrayBuffers: cached.buffers };
+      } catch (e) {
+        console.warn('[USGS] Cached buffers unreadable, refetching:', e);
+      }
+    }
+
     // 1. Query USGS API
     // Round coordinates to 6 decimal places to improve cache hit rate and reduce query string length
     const bbox = `${bounds.west.toFixed(6)},${bounds.south.toFixed(6)},${bounds.east.toFixed(6)},${bounds.north.toFixed(6)}`;
@@ -583,6 +653,11 @@ const fetchUSGSRaw = async (bounds, onProgress, signal) => {
       return null;
     }
 
+    // Cache only when every catalogued tile downloaded — a partial set would be
+    // served forever, hiding tiles a retry could recover.
+    if (results.length === data.items.length) {
+      putElevationCache(cacheKey, { buffers: rawArrayBuffers });
+    }
     return { data: results, rawArrayBuffers };
   } catch (e) {
     console.warn("Failed to load USGS terrain:", e);
@@ -632,6 +707,33 @@ const loadImage = (url, signal) => {
     img.onerror = () => { signal?.removeEventListener('abort', onAbort); resolve(null); };
     img.src = url;
   });
+};
+
+// Load a Terrarium elevation PNG, served from the persistent cache when present.
+// Terrarium tiles are immutable per z/x/y, so the same tile is reused across any
+// overlapping single-tile or route fetch (and across reloads). Falls back to the
+// uncached Image path on any cache/fetch trouble so behaviour never regresses.
+const loadTerrainTileCached = async (url, z, x, y, signal) => {
+  const key = terrainTileCacheKey(z, x, y);
+  const cached = await getElevationCache(key);
+  if (cached?.blob) {
+    const objUrl = URL.createObjectURL(cached.blob);
+    try { return await loadImage(objUrl, signal); }
+    finally { URL.revokeObjectURL(objUrl); }
+  }
+  let blob;
+  try {
+    const resp = await fetch(url, { signal });
+    if (!resp.ok) return loadImage(url, signal);
+    blob = await resp.blob();
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    return loadImage(url, signal); // network hiccup: let the Image path retry
+  }
+  putElevationCache(key, { blob });
+  const objUrl = URL.createObjectURL(blob);
+  try { return await loadImage(objUrl, signal); }
+  finally { URL.revokeObjectURL(objUrl); }
 };
 
 const SAT_TEX_MAX_SIZE = 8192;
@@ -779,6 +881,23 @@ export const fetchTerrainData = async (
         west: normalizeLng(Number(targetBounds.west)),
       }
     : computeMetricFetchBounds(normalizedCenter, width, height);
+
+  // OSM is an independent Overpass query (often the slowest, most variable call
+  // in this fetch) that only needs the final metric output bounds — which are
+  // deterministic from center + size, identical to what the resample returns
+  // (getOutputBounds, same createLocalToWGS84 projection). Kick it off now so its
+  // round-trip overlaps the elevation/satellite tile download + resample instead
+  // of running serially after them. Awaited just before terrainData assembly.
+  // fetchOSMDataWithInfo never rejects (it catches internally → empty features),
+  // so no unhandled-rejection guard is needed. Each call keeps its own
+  // requestInfo, avoiding the getLastOSMRequestInfo() race under parallel chunks.
+  const osmOutputBounds = getOutputBounds(
+    createLocalToWGS84(normalizedCenter.lat, normalizedCenter.lng),
+    width,
+    height,
+    targetBounds,
+  );
+  const osmPromise = includeOSM ? fetchOSMDataWithInfo(osmOutputBounds) : null;
 
   // 2. Try GPXZ / USGS
   let rawData = null;
@@ -981,7 +1100,7 @@ export const fetchTerrainData = async (
         const wrappedTx = ((tx % numTiles) + numTiles) % numTiles;
 
         const terrainUrl = `${TILE_API_URL}/${TERRAIN_ZOOM}/${wrappedTx}/${ty}.png`;
-        const tImg = await loadImage(terrainUrl, signal);
+        const tImg = await loadTerrainTileCached(terrainUrl, TERRAIN_ZOOM, wrappedTx, ty, signal);
         if (tImg) {
           terrainTilesSucceeded++;
           tCtx.drawImage(tImg, drawX, drawY);
@@ -1177,15 +1296,17 @@ export const fetchTerrainData = async (
   if (minHeight === Infinity) minHeight = 0;
   if (maxHeight === -Infinity) maxHeight = 0;
 
-  // 7. Fetch OSM Data
+  // 7. Await OSM Data (the request was started up front so its latency overlaps
+  // the tile fetch + resample above; by now it's usually already settled).
   let osmFeatures = [];
   let osmRequestInfo = null;
-  if (includeOSM) {
+  if (includeOSM && osmPromise) {
     signal?.throwIfAborted();
     onProgress?.("Fetching OpenStreetMap data...");
-    osmFeatures = await fetchOSMData(finalBounds);
-    osmRequestInfo = getLastOSMRequestInfo() || {
-      ...getOSMQueryParameters(finalBounds),
+    const osmResult = await osmPromise;
+    osmFeatures = osmResult.features;
+    osmRequestInfo = osmResult.requestInfo || {
+      ...getOSMQueryParameters(osmOutputBounds),
       endpointUsed: null,
       startedAt: new Date().toISOString(),
       completedAt: new Date().toISOString(),

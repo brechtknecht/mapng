@@ -194,6 +194,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     //    and encode a z-offset-FREE preview GLB (the preview shifts tiles live).
     const pieces = [];
     const previewBlobs = new Array(total).fill(null);
+    // One route-wide vertical anchor for the Google tiles, captured from chunk 0
+    // and reused by every later chunk (.dae) AND every preview GLB. Each chunk
+    // would otherwise re-seat Google's ground onto its OWN centre's DEM height,
+    // so neighbours disagree at the shared seam and the next chunk floats.
+    let sharedGroundOffsetM = null;
     for (let i = 0; i < total; i++) {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
       report(i, 'tiles', `Assembling tiles ${i + 1}/${total}`);
@@ -204,12 +209,19 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           quality: tier.googleQuality,
           corridorSegment: chunks[i].segment,
           corridorHalfWidthM: tier.halfWidthM,
+          // Chunk 0 bakes with its natural anchor and reports it back; chunks
+          // 1..N seat on that same value so the rail stays continuous.
+          ...(sharedGroundOffsetM != null ? { sharedGroundOffsetM } : {}),
           onProgress: (p) => report(i, 'tiles', `Tiles ${i + 1}/${total}: ${p.visible ?? 0} loaded`),
         },
         // Unique material prefix per chunk so BeamNG's global material resolution
         // doesn't cross-wire textures. zOffsetM:0 — z-offset is positional.
         { worldSize: chunkSizeM, zOffsetM: 0, materialPrefix: `c${pad2(i)}_` },
       );
+      if (i === 0 && Number.isFinite(exported?.groundOffsetM)) {
+        sharedGroundOffsetM = exported.groundOffsetM;
+        console.info(`[routeLevel] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (from chunk 0)`);
+      }
       report(i, 'tiles', `Converting tiles ${i + 1}/${total} to DAE`);
       const dae = await convertGlbToDae(exported.glbPath);
       console.info(
@@ -245,6 +257,9 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         googleQuality: tier.googleQuality,
         centerTextureType: 'osm',
         googleZOffsetM: 0,
+        // Same shared anchor as the .dae so the preview is WYSIWYG and chunks
+        // line up. Chunk 0's preview reuses the value chunk 0's .dae produced.
+        ...(sharedGroundOffsetM != null ? { googleGroundOffsetM: sharedGroundOffsetM } : {}),
         corridorMask: { segment: chunks[i].segment, halfWidthM: tier.halfWidthM },
       });
     }

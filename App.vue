@@ -88,6 +88,7 @@
         :elevation-source="routeElevationSource"
         :gpxz-api-key="routeGpxzApiKey"
         :z-offset-m="googleTilesZOffsetM"
+        :has-preview="!!routePreview"
         :active-point="routeActivePoint"
         :chunk-count="routeChunks.length"
         :baking="routeBaking"

@@ -672,6 +672,9 @@ async function startBake(data, options, outPath) {
     // the in-browser bake so the sidecar produces the identical corridor result.
     corridorSegment = null,
     corridorHalfWidthM = 0,
+    // Route mode: one route-wide vertical anchor (metres) shared by every chunk
+    // so adjacent chunks don't float at their shared seam. null → per-chunk.
+    sharedGroundOffsetM = null,
   } = options;
 
   if (!apiKey) throw new Error('bake worker: missing apiKey');
@@ -771,6 +774,7 @@ async function startBake(data, options, outPath) {
   // weld can flatten street risers onto a street surface that still exists.
   const transformMesh = createTileMeshTransformer(data, frame, WGS84_ELLIPSOID, googleGroundAlt, {
     stripGround: false, computeNormals: false,
+    ...(Number.isFinite(sharedGroundOffsetM) ? { groundOffsetM: sharedGroundOffsetM } : {}),
   });
   console.info(
     `[bakeWorker] vertical anchor: googleGroundAlt=${googleGroundAlt.toFixed(1)}m (ellipsoidal), ` +
@@ -1012,6 +1016,9 @@ async function exportAssembly(session, revision, spec) {
     textures: result.textures,
     materialNames: result.materialNames,
     meshes: result.meshCount,
+    // The effective vertical anchor this bake used — chunk 0 of a route reports
+    // it back so every later chunk (and the preview) seats on the same datum.
+    groundOffsetM: session.transformMesh?.groundOffsetM,
   });
 }
 
