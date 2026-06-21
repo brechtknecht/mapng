@@ -500,8 +500,14 @@ let _bakeCache = null; // { key, promise }
 
 // Bump when the bake output format/semantics change — persisted bakes from
 // older versions are then simply never matched (and age out via LRU prune).
+// This MUST be bumped on any change to the conform / weld / strip geometry
+// passes (services/tileGroundConform.js et al.), or stale cached/session bakes
+// from the previous behaviour get silently reused.
 // v5: cross-tile seam-riser strip (removes the LOD-transition tile-edge walls).
-const BAKE_FORMAT_VERSION = 5;
+// v6: delta-field tile→floor conform (tileGroundConform) — symmetric ground
+//     band + no field smoothing. Invalidates early buggy-conform bakes that
+//     could lift tiles several metres (unbounded ground detection).
+const BAKE_FORMAT_VERSION = 6;
 
 // Cheap order-sensitive hash of a route segment (rounded coords) — keeps the
 // cache key short while still splitting different routes/widths over the same
