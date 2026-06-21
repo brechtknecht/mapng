@@ -26,6 +26,35 @@ export function sampleHeightAt(terrain, lat, lng) {
 }
 
 /**
+ * Resample the combined route terrain onto a chunk's own grid/bounds — the
+ * heightMap a chunk should BAKE/CONFORM against so its Google tiles seat on the
+ * surface the level actually drives on (the combined terrain), not on the chunk's
+ * independently-fetched DEM. Where adjacent chunks' DEMs disagree (different
+ * elevation tiles, or the coarser combined grid smoothing slopes) the two differ,
+ * and conforming against the per-chunk DEM leaves the tiles floating vs combined.
+ *
+ * Returns just the heightMap (chunk.width × chunk.height); the caller keeps the
+ * chunk's bounds/minHeight (datum) and texture canvases so placement via baseUp
+ * stays consistent.
+ *
+ * @param {object} combined  buildCombinedRouteTerrain() result
+ * @param {object} chunk     per-chunk TerrainData (bounds, width, height)
+ * @returns {Float32Array}
+ */
+export function sampleCombinedHeightMap(combined, chunk) {
+  const { bounds: b, width: w, height: h } = chunk;
+  const out = new Float32Array(w * h);
+  for (let row = 0; row < h; row++) {
+    const lat = b.north - (row / (h - 1)) * (b.north - b.south);
+    for (let col = 0; col < w; col++) {
+      const lng = b.west + (col / (w - 1)) * (b.east - b.west);
+      out[row * w + col] = sampleHeightAt(combined, lat, lng);
+    }
+  }
+  return out;
+}
+
+/**
  * Composite the per-chunk heightmaps into ONE square terrainData spanning the
  * route bbox. Off-corridor pixels (the bulk of a diagonal route's square box)
  * stay at a flat filler floor — they're hidden, the player stays on the road.

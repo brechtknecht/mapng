@@ -25,7 +25,7 @@ import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSessi
 import { computeUnitsPerMeter } from './googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
-import { buildCombinedRouteTerrain } from './routeTerrainComposite';
+import { buildCombinedRouteTerrain, sampleCombinedHeightMap } from './routeTerrainComposite';
 import { createRouteProgress } from './routeProgress';
 
 const DEG = Math.PI / 180;
@@ -272,8 +272,16 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       // up front so the session-end below recomputes the exact bake key.
       const assemblyAnchor = sharedGroundOffsetM;
       progress.setPhase(i, 'bake', `assembling tiles ${i + 1}/${total}`);
+      // Bake/conform against this chunk's SLICE OF THE COMBINED terrain (the
+      // surface the level drives on), not its independently-fetched DEM. Keeps
+      // the chunk's bounds/minHeight (datum) + texture canvases so baseUp
+      // placement is unchanged; only the heights the tiles seat on change, so the
+      // conform seats them on the combined surface and they don't float at chunk
+      // seams where DEMs disagree. See sampleCombinedHeightMap + the route conform
+      // tests (tests/routeConform.test.mjs).
+      const bakeTerrain = { ...terrains[i], heightMap: sampleCombinedHeightMap(combined, terrains[i]) };
       const exported = await exportGoogleTilesViaSidecar(
-        terrains[i],
+        bakeTerrain,
         {
           apiKey: googleApiKey,
           quality: tier.googleQuality,
@@ -320,7 +328,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       // z-offset-free preview GLB (googleZOffsetM:0) — RoutePreview applies the
       // live z-offset to the tiles. Reuses the SAME cached bake (no re-bake).
       progress.setPhase(i, 'encode', `encoding preview ${i + 1}/${total}`);
-      previewBlobs[i] = await exportToGLB(terrains[i], {
+      previewBlobs[i] = await exportToGLB(bakeTerrain, {
         returnBlob: true,
         useGoogle3DTiles: true,
         googleApiKey,

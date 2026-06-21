@@ -507,7 +507,10 @@ let _bakeCache = null; // { key, promise }
 // v6: delta-field tile→floor conform (tileGroundConform) — symmetric ground
 //     band + no field smoothing. Invalidates early buggy-conform bakes that
 //     could lift tiles several metres (unbounded ground detection).
-const BAKE_FORMAT_VERSION = 6;
+// v7: route mode conforms each chunk against its slice of the COMBINED terrain
+//     (the driven surface) instead of its own DEM — fixes chunks floating at
+//     seams where per-chunk DEMs disagree. Geometry depends on combined now.
+const BAKE_FORMAT_VERSION = 7;
 
 // Cheap order-sensitive hash of a route segment (rounded coords) — keeps the
 // cache key short while still splitting different routes/widths over the same

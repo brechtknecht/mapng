@@ -12,7 +12,7 @@
 // controllable.
 
 import { conformTilesToFloor } from '../../services/tileGroundConform.js';
-import { buildCombinedRouteTerrain, sampleHeightAt } from '../../services/routeTerrainComposite.js';
+import { buildCombinedRouteTerrain, sampleHeightAt, sampleCombinedHeightMap } from '../../services/routeTerrainComposite.js';
 import { SCENE_SIZE } from '../../services/googleBakeCore.js';
 
 const HALF = SCENE_SIZE / 2;
@@ -120,24 +120,13 @@ export const buildSyntheticRoute = ({
 // Resample the combined terrain onto a chunk's bounds/grid, so the conform can
 // optionally target the combined surface (the proposed fix) instead of the
 // per-chunk terrain.
-const combinedAsChunk = (combined, chunkTerrain) => {
-  const b = chunkTerrain.bounds, n = chunkTerrain.width;
-  const heightMap = new Float32Array(n * n);
-  let maxHeight = -Infinity;
-  for (let row = 0; row < n; row++) {
-    const lat = b.north - (row / (n - 1)) * (b.north - b.south);
-    for (let col = 0; col < n; col++) {
-      const lng = b.west + (col / (n - 1)) * (b.east - b.west);
-      const h = sampleHeightAt(combined, lat, lng);
-      heightMap[row * n + col] = h;
-      if (h > maxHeight) maxHeight = h;
-    }
-  }
-  // Keep the chunk's OWN minHeight as the datum: placement uses baseUp =
-  // chunkTerrain.minHeight − combined.minHeight, so the conform must seat tiles
-  // in the chunk's datum (Y above chunkMinHeight) for worldZ to land on combined.
-  return { width: n, height: n, minHeight: chunkTerrain.minHeight, maxHeight, heightMap, bounds: b };
-};
+// The exact terrain exportRouteLevel now bakes each chunk against: the combined
+// heights on the chunk's grid, keeping the chunk's bounds + minHeight (datum) so
+// baseUp placement is unchanged. Uses the SAME service helper as the app.
+const combinedAsChunk = (combined, chunkTerrain) => ({
+  ...chunkTerrain,
+  heightMap: sampleCombinedHeightMap(combined, chunkTerrain),
+});
 
 /**
  * Run the route vertical pipeline and measure per-chunk residual vs the COMBINED
