@@ -51,7 +51,15 @@ const heapMb = () => {
 };
 
 const MAX_BODY_BYTES = 512 * 1024 * 1024;
-const MAX_FINISHED_JOBS = 3; // result files in tmp are big — prune like the IndexedDB cache
+const MAX_FINISHED_JOBS = 3; // transient (un-retained) result files in tmp — prune hard
+// Retained jobs: their worker has been freed (RAM reclaimed) but their workDir
+// is deliberately kept on disk — a route export reads every chunk's files at
+// the final zip, and "fast re-export" (tweak z-offset) reuses them. The current
+// run must keep ALL its chunks' files until the zip, so the route export purges
+// the PREVIOUS run's retained files when it starts a fresh bake (DELETE
+// /jobs?retained=1); this cap is only a disk backstop against pathological
+// accumulation (aborted runs, no fresh bake since).
+const MAX_RETAINED_JOBS = 200;
 const MAX_BUFFERED_EVENTS = 1500; // SSE replay buffer cap per job
 const SESSION_IDLE_MS = (() => {
   const env = Number(process.env.MAPNG_BAKE_SESSION_IDLE_MS);
@@ -90,14 +98,19 @@ export default function googleBakePlugin() {
 
   const pruneFinished = () => {
     // Live sessions are exempt — their worker holds the warm bake state.
-    const finished = [...jobs.values()]
-      .filter((j) => j.status !== 'running' && !j.sessionAlive)
-      .sort((a, b) => a.finishedAt - b.finishedAt);
-    while (finished.length > MAX_FINISHED_JOBS) {
-      const oldest = finished.shift();
-      console.log(`[google-bake] pruning finished job ${oldest.id} (${oldest.status})`);
-      cleanupJob(oldest);
-    }
+    const finished = [...jobs.values()].filter((j) => j.status !== 'running' && !j.sessionAlive);
+    // Two LRU buckets: retained jobs (worker freed, files kept for the export +
+    // re-export) get a generous cap; everything else is pruned hard.
+    const prune = (bucket, cap, label) => {
+      bucket.sort((a, b) => a.finishedAt - b.finishedAt);
+      while (bucket.length > cap) {
+        const oldest = bucket.shift();
+        console.log(`[google-bake] pruning ${label} job ${oldest.id} (${oldest.status})`);
+        cleanupJob(oldest);
+      }
+    };
+    prune(finished.filter((j) => !j.retain), MAX_FINISHED_JOBS, 'finished');
+    prune(finished.filter((j) => j.retain), MAX_RETAINED_JOBS, 'retained');
   };
 
   const startJob = async (body) => {
@@ -113,6 +126,9 @@ export default function googleBakePlugin() {
       error: null,
       startedAt: Date.now(),
       finishedAt: 0,
+      // Worker freed but workDir kept on disk (route export / fast re-export).
+      // Exempt from the hard MAX_FINISHED_JOBS prune; bounded by MAX_RETAINED_JOBS.
+      retain: false,
       // Live-session state (worker stays resident after the base bake).
       sessionAlive: false,
       revision: 0,
@@ -331,6 +347,19 @@ export default function googleBakePlugin() {
             return;
           }
 
+          // DELETE /jobs?retained=1 — purge every RETAINED job (worker already
+          // freed; this removes their kept workDirs). The route export calls
+          // this when it starts a FRESH bake, dropping the previous run's files
+          // so disk doesn't accumulate route-over-route. Live sessions and the
+          // current run's own (not-yet-created) jobs are untouched.
+          if (req.method === 'DELETE' && segments[0] === 'jobs' && url.searchParams.get('retained') === '1') {
+            const retained = [...jobs.values()].filter((j) => j.retain);
+            for (const j of retained) await cleanupJob(j);
+            console.log(`[google-bake] purged ${retained.length} retained job(s)`);
+            sendJson(res, 200, { ok: true, purged: retained.length });
+            return;
+          }
+
           // POST / — start or join a job. body.ensureSession=true means the
           // caller needs a LIVE session (fly-mode refinement): a finished job
           // whose worker has died is then re-baked instead of joined.
@@ -434,10 +463,20 @@ export default function googleBakePlugin() {
             return;
           }
 
-          // DELETE /<id>
+          // DELETE /<id>[?keepFiles=1]
+          // keepFiles: free the worker process (reclaim RAM) but KEEP the
+          // workDir — a route export reads every chunk's files at the final zip
+          // and fast re-export reuses them. Without it: full purge (worker +
+          // files), used by the Raw-GLB bake which keeps nothing server-side.
           if (req.method === 'DELETE' && segments.length === 1) {
-            killJob(job, 'client cancel');
-            await cleanupJob(job);
+            const keepFiles = url.searchParams.get('keepFiles') === '1';
+            if (keepFiles) {
+              job.retain = true; // exempt from the hard prune; close→pruneFinished keeps it
+              killJob(job, 'end session (keep files)');
+            } else {
+              killJob(job, 'client cancel');
+              await cleanupJob(job);
+            }
             sendJson(res, 200, { ok: true });
             return;
           }

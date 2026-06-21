@@ -21,11 +21,12 @@
 import { fetchTerrainData } from './terrain';
 import { exportToGLB } from './export3d';
 import { exportBeamNGLevel } from './exportBeamNGLevel';
-import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset } from './google3dTiles';
+import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes } from './google3dTiles';
 import { computeUnitsPerMeter } from './googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
 import { buildCombinedRouteTerrain } from './routeTerrainComposite';
+import { createRouteProgress } from './routeProgress';
 
 const DEG = Math.PI / 180;
 const M_PER_DEG_LAT = 111320;
@@ -147,6 +148,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     elevationSource = 'default',
     gpxzApiKey = '',
     baseTexture = 'satellite',
+    // How many chunks to assemble (sidecar bake + DAE convert + preview encode)
+    // concurrently. Each chunk fans out to its own keyed sidecar bake job +
+    // its own Blender process, so several run safely in parallel; bounded
+    // because each is heap/CPU heavy. Mirrors routeBake.js's bake pool.
+    concurrency = 2,
   } = opts;
   if (!Array.isArray(chunks) || chunks.length === 0) throw new Error('exportRouteAsBeamNGLevel: no chunks');
   if (!googleApiKey) throw new Error('exportRouteAsBeamNGLevel: missing tiles credential');
@@ -154,7 +160,15 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
   const tier = getCorridorTier(tierId);
   const chunkSizeM = resolveChunkSizeM(tierId, opts.chunkSizeM);
   const total = chunks.length;
-  const report = (chunk, phase, detail) => onProgress?.({ chunk, total, phase, detail });
+  // Per-chunk progress (same tracker the Raw-GLB bake uses) so the map overlay
+  // lights up every chunk that's in flight — terrain fetches run several at a
+  // time, so multiple boxes glow at once. The legacy single-`chunk` shape this
+  // replaced carried no per-chunk array, so the map showed nothing and the
+  // parallelism was invisible (looked strictly sequential). See routeProgress.js.
+  const progress = createRouteProgress(total, onProgress);
+  // Route-wide step lines (compositing, level build) aren't per-chunk; spread
+  // the current snapshot and just override its detail so the panel bar updates.
+  const announce = (detail) => onProgress?.({ ...progress.snapshot(), detail });
   // z-offset is applied as the tile TSStatic POSITION (not baked into the tile
   // geometry), so changing it never invalidates the cached assembly.
   const zOffsetM = Number.isFinite(opts.zOffsetM) ? opts.zOffsetM : getGoogleTilesZOffset();
@@ -164,6 +178,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
 
   if (!asm) {
     // ---- EXPENSIVE pipeline (runs once per route/settings) ------------------
+    // Drop the PREVIOUS run's retained per-chunk files before we create this
+    // run's — keeps tmp at ~one route's worth instead of accumulating. The
+    // cache-reuse path (else branch) skips this so fast re-export keeps its
+    // files. Best-effort; never blocks the bake.
+    await purgeRetainedBakes();
     const src = String(elevationSource || 'default').toLowerCase();
     const useUSGS = src === 'usgs', useGPXZ = src === 'gpxz', useKRON86 = src === 'kron86';
 
@@ -191,19 +210,24 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     const terrainConcurrency = (useGPXZ || useUSGS) ? 2 : 4;
 
     const terrains = new Array(total);
-    let terrainDone = 0;
-    report(0, 'terrain', `Fetching terrain 0/${total}`);
     let nextChunk = 0;
     const terrainWorker = async () => {
       while (nextChunk < total) {
         const i = nextChunk++;
         if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        // Box i goes 'terrain' (sky blue, counted active) ONLY while its fetch is
+        // actually in flight — with `terrainConcurrency` workers that's a small
+        // rolling set, which is the real degree of fetch parallelism. The moment
+        // the fetch settles we drop it back to 'pending' so it is NOT counted as
+        // active: the tile bake below is strictly serial (one shared renderer), so
+        // leaving fetched-but-unbaked chunks "active" would inflate the parallel
+        // badge to the full chunk count while only one box is truly being worked.
+        progress.setPhase(i, 'terrain', 'fetching terrain + OSM');
         terrains[i] = await fetchTerrainData(
           chunks[i].center, chunkSizeM, includeOSM, useUSGS, useGPXZ, useKRON86, gpxzApiKey,
           undefined, undefined, signal, genOpts,
         );
-        terrainDone++;
-        report(terrainDone, 'terrain', `Fetching terrain ${terrainDone}/${total}`);
+        progress.setPhase(i, 'pending', 'terrain fetched, queued for tile bake');
       }
     };
     await Promise.all(
@@ -211,7 +235,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     );
 
     // 2) One composited terrain + texture spanning the route bbox.
-    report(total, 'terrain', 'Compositing route terrain');
+    announce('Compositing route terrain');
     const combined = buildCombinedRouteTerrain(terrains);
     const routeTexture = await compositeRouteTexture(terrains, combined.bounds, baseTexture);
     if (routeTexture) combined.osmTextureCanvas = routeTexture;
@@ -224,16 +248,30 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // 3) Per chunk: assemble the BeamNG tile shape (z-offset = 0 — applied as
     //    TSStatic position later), convert to DAE, compute the BASE placement,
     //    and encode a z-offset-FREE preview GLB (the preview shifts tiles live).
-    const pieces = [];
+    //    Indexed (not push) because the bake pool finishes chunks out of order.
+    const pieces = new Array(total);
     const previewBlobs = new Array(total).fill(null);
+    // Small per-chunk values computeRouteFrame needs at the end. Captured here
+    // so each chunk's HEAVY terrainData (heightmap + texture canvases, tens of
+    // MB) can be released the moment its assembly finishes, instead of pinning
+    // all N terrains in memory for the whole run — the steady memory creep that
+    // made long routes slow down as they progressed.
+    const frameInputs = new Array(total);
     // One route-wide vertical anchor for the Google tiles, captured from chunk 0
     // and reused by every later chunk (.dae) AND every preview GLB. Each chunk
     // would otherwise re-seat Google's ground onto its OWN centre's DEM height,
     // so neighbours disagree at the shared seam and the next chunk floats.
     let sharedGroundOffsetM = null;
-    for (let i = 0; i < total; i++) {
+
+    // Assemble ONE chunk: keyed sidecar bake → Blender DAE → preview GLB. All
+    // three are per-chunk independent, so the pool below runs several at once.
+    const assembleChunk = async (i) => {
       if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
-      report(i, 'tiles', `Assembling tiles ${i + 1}/${total}`);
+      // The anchor THIS chunk's bake uses: null for chunk 0 (bakes natural,
+      // then sets the shared value), the shared value for chunks 1..N. Captured
+      // up front so the session-end below recomputes the exact bake key.
+      const assemblyAnchor = sharedGroundOffsetM;
+      progress.setPhase(i, 'bake', `assembling tiles ${i + 1}/${total}`);
       const exported = await exportGoogleTilesViaSidecar(
         terrains[i],
         {
@@ -243,8 +281,8 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           corridorHalfWidthM: tier.halfWidthM,
           // Chunk 0 bakes with its natural anchor and reports it back; chunks
           // 1..N seat on that same value so the rail stays continuous.
-          ...(sharedGroundOffsetM != null ? { sharedGroundOffsetM } : {}),
-          onProgress: (p) => report(i, 'tiles', `Tiles ${i + 1}/${total}: ${p.visible ?? 0} loaded`),
+          ...(assemblyAnchor != null ? { sharedGroundOffsetM: assemblyAnchor } : {}),
+          onProgress: (p) => progress.setPhase(i, 'bake', `tiles ${i + 1}/${total}: ${p.visible ?? 0} loaded`),
         },
         // Unique material prefix per chunk so BeamNG's global material resolution
         // doesn't cross-wire textures. zOffsetM:0 — z-offset is positional.
@@ -254,7 +292,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         sharedGroundOffsetM = exported.groundOffsetM;
         console.info(`[routeLevel] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (from chunk 0)`);
       }
-      report(i, 'tiles', `Converting tiles ${i + 1}/${total} to DAE`);
+      progress.setPhase(i, 'bake', `converting tiles ${i + 1}/${total} to DAE`);
       const dae = await convertGlbToDae(exported.glbPath);
       console.info(
         `[routeLevel] chunk ${i + 1}/${total}: ${exported.meshes ?? '?'} meshes, ` +
@@ -266,7 +304,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       const north = (chunks[i].center.lat - combinedCenter.lat) * M_PER_DEG_LAT;
       const baseUp = (terrains[i].minHeight ?? 0) - combined.minHeight; // datum lift, no z-offset
 
-      pieces.push({
+      pieces[i] = {
         name: `google_tiles_${pad2(i)}`,
         daeBlob: dae,
         glbBlob: dae ? null : { fromPath: exported.glbPath, size: exported.glbBytes ?? 0 },
@@ -277,11 +315,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         east: Math.round(east * 100) / 100,
         north: Math.round(north * 100) / 100,
         baseUp: Math.round(baseUp * 100) / 100,
-      });
+      };
 
       // z-offset-free preview GLB (googleZOffsetM:0) — RoutePreview applies the
       // live z-offset to the tiles. Reuses the SAME cached bake (no re-bake).
-      report(i, 'tiles', `Encoding preview ${i + 1}/${total}`);
+      progress.setPhase(i, 'encode', `encoding preview ${i + 1}/${total}`);
       previewBlobs[i] = await exportToGLB(terrains[i], {
         returnBlob: true,
         useGoogle3DTiles: true,
@@ -294,16 +332,56 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         ...(sharedGroundOffsetM != null ? { googleGroundOffsetM: sharedGroundOffsetM } : {}),
         corridorMask: { segment: chunks[i].segment, halfWidthM: tier.halfWidthM },
       });
-    }
+      progress.setPhase(i, 'done', 'complete');
 
-    const frame = computeRouteFrame(
-      chunks.map((c, i) => ({
-        center: c.center,
+      // Capture the cheap values computeRouteFrame needs + the bake-key inputs,
+      // THEN release this chunk's heavy terrainData so only the in-flight chunks
+      // stay resident (the steady memory creep on long routes).
+      frameInputs[i] = {
+        center: chunks[i].center,
         unitsPerMeter: computeUnitsPerMeter(terrains[i]),
         minHeight: terrains[i].minHeight,
-      })),
-      chunkSizeM,
-    );
+      };
+      // bakeCacheKey only reads bounds/width/height — a tiny stub matches the
+      // bake's key exactly without pinning the multi-MB terrainData.
+      const keyData = { bounds: terrains[i].bounds, width: terrains[i].width, height: terrains[i].height };
+      terrains[i] = null;
+
+      // Free the resident sidecar worker(s) for this chunk to reclaim RAM — the
+      // bake is now on disk + in IndexedDB. keepFiles:true is ESSENTIAL: the
+      // final zip (step 4) reads this chunk's server-side GLB/DAE/PNGs, and fast
+      // re-export reuses them, so we keep the workDir while dropping the process.
+      // Chunk 0 bakes under TWO keys (natural for the .dae, anchored for the
+      // preview); chunks 1..N share one. Fire-and-forget; never block the pipe.
+      const previewAnchor = sharedGroundOffsetM;
+      const endSession = (anchor) => endGoogleTilesSession(keyData, {
+        quality: tier.googleQuality,
+        corridorSegment: chunks[i].segment,
+        corridorHalfWidthM: tier.halfWidthM,
+        ...(anchor != null ? { sharedGroundOffsetM: anchor } : {}),
+      }, { keepFiles: true }).catch(() => {});
+      endSession(assemblyAnchor);
+      if (previewAnchor !== assemblyAnchor) endSession(previewAnchor);
+    };
+
+    // Chunk 0 alone first to learn the shared vertical anchor (every later chunk
+    // seats on it), THEN fan the rest out `limit`-wide — the same one-up-front
+    // pattern routeBake.js uses. Now multiple chunks bake at once (multiple
+    // orange boxes), not strictly one after another.
+    await assembleChunk(0);
+    let nextAsm = 1;
+    const limit = Math.max(1, Math.min(concurrency, Math.max(1, total - 1)));
+    const assembleWorker = async () => {
+      for (;;) {
+        if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+        const i = nextAsm++;
+        if (i >= total) return;
+        await assembleChunk(i);
+      }
+    };
+    await Promise.all(Array.from({ length: limit }, assembleWorker));
+
+    const frame = computeRouteFrame(frameInputs, chunkSizeM);
     const previewChunks = chunks.map((c, i) => ({
       index: i,
       blob: previewBlobs[i],
@@ -313,12 +391,13 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     asm = { key, combined, combinedCenter, frame, pieces, previewChunks };
     _routeAsm = asm;
   } else {
-    report(0, 'level', 'Reusing fetched terrain + baked tiles');
+    for (let i = 0; i < total; i++) progress.setPhase(i, 'done');
+    announce('Reusing fetched terrain + baked tiles');
   }
 
   // 4) Place tiles (z-offset → TSStatic Z) and build the level. Spawn at the
   //    ROUTE START (chunk 0) so the player lands on the corridor.
-  report(total, 'level', 'Building BeamNG level');
+  announce('Building BeamNG level');
   const date = new Date().toISOString().slice(0, 10);
   const placedPieces = asm.pieces.map((p) => ({
     ...p,
@@ -338,7 +417,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     applyFoundations: false,
     roadType: 'none',
     pbrSource: 'none',
-    onProgress: (p) => report(total, 'level', p?.step),
+    onProgress: (p) => announce(p?.step),
   });
 
   const flat = res.download

@@ -17,7 +17,7 @@ import JSZip from 'jszip';
 import { fetchTerrainData } from './terrain';
 import { exportToGLB } from './export3d';
 import { computeUnitsPerMeter } from './googleBakeCore';
-import { getGoogleTilesZOffset, googleBakeSidecarAvailable } from './google3dTiles';
+import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from './google3dTiles';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
 import { createRouteProgress } from './routeProgress';
@@ -146,6 +146,9 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
     let maskStats = { ran: false, reason: 'not-invoked' };
     let bakeStats = null;
     const bakeT0 = performance.now();
+    // The anchor THIS chunk's bake uses (null for chunk 0, the shared value for
+    // 1..N). Captured so the session-end below recomputes the exact bake key.
+    const anchorAtBake = sharedGroundOffsetM;
     const blob = await exportToGLB(terrainData, {
       returnBlob: true,
       useGoogle3DTiles: true,
@@ -159,7 +162,7 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       // One route-wide vertical anchor for the Google tiles, taken from chunk 0
       // (baked first) and shared by all others — otherwise each chunk re-seats
       // Google's ground on its own centre's DEM and neighbours float at seams.
-      ...(sharedGroundOffsetM != null ? { googleGroundOffsetM: sharedGroundOffsetM } : {}),
+      ...(anchorAtBake != null ? { googleGroundOffsetM: anchorAtBake } : {}),
       onGroundOffset: (off) => { if (i === 0 && Number.isFinite(off)) sharedGroundOffsetM = off; },
       onMaskStats: (s) => { maskStats = s; },
       onBakeStats: (s) => { if (s) bakeStats = s; },
@@ -170,6 +173,17 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       },
     });
     const exportMs = Math.round(performance.now() - bakeT0);
+
+    // Free this chunk's resident sidecar worker now that its GLB is encoded and
+    // the bake is persisted (IndexedDB) — a route bake never refines. Without
+    // this, every chunk's multi-GB worker stays alive until the ~15 min idle
+    // reaper, piling up across the run until the machine swaps. Fire-and-forget.
+    endGoogleTilesSession(terrainData, {
+      quality: tier.googleQuality,
+      corridorSegment: chunk.segment,
+      corridorHalfWidthM: tier.halfWidthM,
+      ...(anchorAtBake != null ? { sharedGroundOffsetM: anchorAtBake } : {}),
+    }).catch(() => {});
 
     results[i] = {
       folder,

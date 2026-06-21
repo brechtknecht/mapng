@@ -22,7 +22,11 @@ import {
   bakeRefinementViaSidecar,
   ensureSidecarSession,
   exportAssemblyViaSidecar,
+  endBakeSession,
+  purgeRetainedBakes,
 } from './googleBakeSidecar.js';
+
+export { purgeRetainedBakes };
 
 export { sidecarAvailable as googleBakeSidecarAvailable };
 
@@ -763,6 +767,20 @@ export async function exportGoogleTilesViaSidecar(data, options, spec) {
   const key = bakeCacheKey(data, bakeOptions);
   await ensureSidecarSession(data, bakeOptions, key, onProgress);
   return exportAssemblyViaSidecar(key, spec, onProgress);
+}
+
+/**
+ * End the resident sidecar bake session for THIS data+options, freeing its
+ * worker process. Recomputes the exact cache key the bake used (same
+ * resolveBakeOptions → bakeCacheKey path), so the caller passes the same
+ * `data` and bake options it baked with. No-op (harmless) if the key doesn't
+ * match a live session. Route exports call this per chunk so resident workers
+ * stay bounded by concurrency instead of growing with route length — see
+ * endBakeSession() for the why.
+ */
+export async function endGoogleTilesSession(data, options = {}, { keepFiles = false } = {}) {
+  const key = bakeCacheKey(data, resolveBakeOptions(options));
+  await endBakeSession(key, { keepFiles });
 }
 
 /** Dispose a bake group's geometries, materials and textures (see refineGoogleTilesBake). */

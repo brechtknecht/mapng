@@ -375,6 +375,49 @@ export async function exportAssemblyViaSidecar(key, spec, onProgress) {
 }
 
 /**
+ * End the LIVE worker session for a bake key, freeing its resident child
+ * process. Best-effort: the baked result already lives on the sidecar's disk
+ * AND in IndexedDB, so any later re-run restores it — we only drop the warm
+ * in-memory session, which a batch route export never refines.
+ *
+ * Without this, EVERY chunk of a long route leaves a multi-GB worker resident
+ * until the idle reaper fires (~15 min), so workers pile up across the run
+ * until the machine swaps — the classic "the bake slows down the longer it
+ * goes". Calling this as each chunk completes keeps resident workers bounded by
+ * the concurrency, not by the route length.
+ */
+export async function endBakeSession(key, { keepFiles = false } = {}) {
+  try {
+    const probe = await fetch(`/api/google-bake/jobs?key=${encodeURIComponent(key)}`);
+    if (!probe.ok) return; // no job for this key (already reaped / never baked here)
+    const { jobId } = await probe.json();
+    if (!jobId) return;
+    // keepFiles=true frees the worker but keeps its workDir on disk — REQUIRED
+    // for the BeamNG route export, whose final zip reads each chunk's server
+    // files (and whose fast re-export reuses them). The Raw-GLB bake passes
+    // keepFiles=false to also reclaim the disk (it keeps nothing server-side).
+    await fetch(`/api/google-bake/${jobId}${keepFiles ? '?keepFiles=1' : ''}`, { method: 'DELETE' });
+  } catch (_) {
+    /* best-effort: the idle reaper / prune collects it eventually */
+  }
+}
+
+/**
+ * Purge every RETAINED bake job (worker already freed; this drops their kept
+ * workDirs on disk). The route export calls this when starting a FRESH bake so
+ * the PREVIOUS run's per-chunk files don't accumulate run-over-run. The current
+ * run keeps all its own files (created after this call) for its final zip and
+ * for fast re-export. Best-effort.
+ */
+export async function purgeRetainedBakes() {
+  try {
+    await fetch('/api/google-bake/jobs?retained=1', { method: 'DELETE' });
+  } catch (_) {
+    /* best-effort: the retained-jobs cap collects them eventually */
+  }
+}
+
+/**
  * Restore-only probe: if the sidecar holds a FINISHED job for this key
  * (e.g. the page reloaded right after a bake, before IndexedDB persisted,
  * or the persist failed on quota), fetch and decode it. Never starts a bake,

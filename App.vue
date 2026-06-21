@@ -596,6 +596,7 @@ const handleExportRouteBeamNG = async () => {
     const result = await exportRouteAsBeamNGLevel(routeChunks.value, {
       tierId: corridorTier.value,
       chunkSizeM: routeChunkSizeM.value,
+      concurrency: routeConcurrency.value,
       googleApiKey: tilesApiKey,
       elevationSource: routeElevationSource.value,
       gpxzApiKey: routeGpxzApiKey.value,

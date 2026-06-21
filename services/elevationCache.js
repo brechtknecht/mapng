@@ -99,34 +99,67 @@ export const terrainTileCacheKey = (z, x, y) => `terr|${z}|${x}|${y}`;
 // overlap by ~220 m) and across reloads — the same logic as Terrarium tiles.
 export const satelliteTileCacheKey = (z, x, y) => `sat|${z}|${x}|${y}`;
 
-// Touch the LRU timestamp and prune the oldest entries past MAX_ENTRIES.
+// The LRU index, cached in memory. Previously every tile write re-read the
+// whole META_KEY object, sorted ALL its keys, and rewrote it to IndexedDB —
+// so per-write cost grew with cache size (thousands of sat tiles on a long
+// route), making the cache itself slow down as it filled. Now: the index lives
+// in memory, the expensive sort runs ONLY when a bucket is actually over cap,
+// and the rewrite to disk is debounced.
+let _meta = null;          // module cache of the LRU index { key: stamp }
+let _metaDirty = false;    // unflushed in-memory changes
+let _metaFlushTimer = null;
+const META_FLUSH_MS = 3000;
+
+const loadMeta = async () => {
+  if (_meta) return _meta;
+  try { _meta = (await idbGet(META_KEY)) || {}; }
+  catch (_) { _meta = {}; }
+  return _meta;
+};
+
+const flushMeta = () => {
+  _metaFlushTimer = null;
+  if (!_metaDirty || !_meta) return;
+  _metaDirty = false;
+  idbPut(META_KEY, _meta).catch(() => { /* best-effort */ });
+};
+
+const scheduleMetaFlush = () => {
+  if (_metaFlushTimer || !_metaDirty) return;
+  _metaFlushTimer = setTimeout(flushMeta, META_FLUSH_MS);
+  _metaFlushTimer?.unref?.(); // no-op in the browser
+};
+
+// Touch the LRU timestamp and, only when a payload class is over its cap,
+// evict its oldest entries.
 const touchAndPrune = async (key) => {
-  let meta;
-  try {
-    meta = (await idbGet(META_KEY)) || {};
-  } catch (_) {
-    return; // meta bookkeeping is best-effort
-  }
+  const meta = await loadMeta();
   meta[key] = stamp();
-  // Prune each payload class against its own cap so small tiles and heavy
-  // rasters never compete for the same slots.
-  const tileKeys = [];
-  const rasterKeys = [];
-  for (const k of Object.keys(meta)) {
-    (isTileKey(k) ? tileKeys : rasterKeys).push(k);
+  _metaDirty = true;
+
+  // O(n) integer count — no allocation, no sort — to decide whether a bucket
+  // even needs eviction. The sort (O(n log n)) only runs on an actual overflow.
+  let tileCount = 0;
+  let rasterCount = 0;
+  for (const k in meta) {
+    if (isTileKey(k)) tileCount++; else rasterCount++;
   }
-  const pruneBucket = async (bucketKeys, cap) => {
-    bucketKeys.sort((a, b) => meta[a] - meta[b]);
-    while (bucketKeys.length > cap) {
-      const oldest = bucketKeys.shift();
-      try { await idbDelete(oldest); } catch (_) { /* best-effort */ }
-      mem.delete(oldest);
-      delete meta[oldest];
-    }
-  };
-  await pruneBucket(tileKeys, MAX_TILE_ENTRIES);
-  await pruneBucket(rasterKeys, MAX_RASTER_ENTRIES);
-  try { await idbPut(META_KEY, meta); } catch (_) { /* best-effort */ }
+  if (tileCount > MAX_TILE_ENTRIES) await evictBucket(meta, true, MAX_TILE_ENTRIES);
+  if (rasterCount > MAX_RASTER_ENTRIES) await evictBucket(meta, false, MAX_RASTER_ENTRIES);
+
+  scheduleMetaFlush();
+};
+
+const evictBucket = async (meta, tiles, cap) => {
+  const keys = Object.keys(meta)
+    .filter((k) => isTileKey(k) === tiles)
+    .sort((a, b) => meta[a] - meta[b]);
+  while (keys.length > cap) {
+    const oldest = keys.shift();
+    try { await idbDelete(oldest); } catch (_) { /* best-effort */ }
+    mem.delete(oldest);
+    delete meta[oldest];
+  }
 };
 
 // Date.now is fine in the browser; only the workflow runtime forbids it. A
@@ -177,6 +210,11 @@ export async function putElevationCache(key, value) {
 /** Wipe the whole elevation cache (debug / "force refetch"). */
 export async function clearElevationCache() {
   mem.clear();
+  // Drop the in-memory LRU index too, and cancel any pending flush, so it
+  // doesn't rewrite a stale index over the just-cleared store.
+  _meta = {};
+  _metaDirty = false;
+  if (_metaFlushTimer) { clearTimeout(_metaFlushTimer); _metaFlushTimer = null; }
   if (!hasIdb()) return;
   try {
     const db = await openDb();
