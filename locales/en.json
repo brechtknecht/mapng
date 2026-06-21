@@ -50,6 +50,8 @@
     "chunkSizeEffective": "{size} m boxes · {res}px terrain · ~{chunks} pieces",
     "concurrency": "Parallel fetches",
     "concurrencyHint": "How many chunks bake at once (dev sidecar only). Higher = faster but more RAM and Google tile quota.",
+    "tileZOffset": "Tile height offset",
+    "tileZOffsetHint": "Raise/lower the Google tiles relative to the terrain (metres) to seat them on the road.",
     "parallelBaking": "{n}× in parallel",
     "fetchRoute": "Fetch route",
     "fetching": "Fetching route…",

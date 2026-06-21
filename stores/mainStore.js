@@ -88,6 +88,19 @@ export const useMainStore = defineStore('main', () => {
       return Number.isFinite(v) ? Math.max(1, Math.min(4, v)) : 2;
     })(),
   );
+  // Route export's OWN elevation source (so the route tab is self-contained,
+  // not leaking from the single-tile generate flow).
+  const routeElevationSource = ref(localStorage.getItem('mapng_route_elevation') || 'default');
+  const routeGpxzApiKey = ref(localStorage.getItem('mapng_route_gpxz_key') || '');
+  // Google-tiles vertical offset (metres). Shared with the 3D-preview slider via
+  // the same key so the BeamNG export, the route preview, and the single-tile
+  // path all agree; surfaced in the route tab so it's settable there too.
+  const googleTilesZOffsetM = ref(
+    (() => {
+      const v = parseFloat(localStorage.getItem('mapng_google_bake_zoffset'));
+      return Number.isFinite(v) ? v : 0;
+    })(),
+  );
 
   // --- Actions ---
   function setCenter(newCenter) {
@@ -166,6 +179,22 @@ export const useMainStore = defineStore('main', () => {
     localStorage.setItem('mapng_route_concurrency', String(v));
   }
 
+  function setRouteElevationSource(s) {
+    routeElevationSource.value = String(s || 'default').toLowerCase();
+    localStorage.setItem('mapng_route_elevation', routeElevationSource.value);
+  }
+
+  function setRouteGpxzApiKey(k) {
+    routeGpxzApiKey.value = String(k || '');
+    localStorage.setItem('mapng_route_gpxz_key', routeGpxzApiKey.value);
+  }
+
+  function setGoogleTilesZOffsetM(z) {
+    const v = Number.isFinite(Number(z)) ? Number(z) : 0;
+    googleTilesZOffsetM.value = v;
+    localStorage.setItem('mapng_google_bake_zoffset', String(v));
+  }
+
   function clearRoute() {
     routePolyline.value = [];
     routeDistanceM.value = 0;
@@ -231,6 +260,9 @@ export const useMainStore = defineStore('main', () => {
     corridorTier,
     routeChunkSizeM,
     routeConcurrency,
+    routeElevationSource,
+    routeGpxzApiKey,
+    googleTilesZOffsetM,
     // Actions
     setCenter,
     setZoom,
@@ -244,6 +276,9 @@ export const useMainStore = defineStore('main', () => {
     setCorridorTier,
     setRouteChunkSizeM,
     setRouteConcurrency,
+    setRouteElevationSource,
+    setRouteGpxzApiKey,
+    setGoogleTilesZOffsetM,
     clearRoute,
     setBatchGridCols,
     setBatchGridRows,

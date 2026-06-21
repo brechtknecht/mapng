@@ -85,6 +85,9 @@
         :corridor-tier="corridorTier"
         :chunk-size-m="routeChunkSizeM"
         :concurrency="routeConcurrency"
+        :elevation-source="routeElevationSource"
+        :gpxz-api-key="routeGpxzApiKey"
+        :z-offset-m="googleTilesZOffsetM"
         :active-point="routeActivePoint"
         :chunk-count="routeChunks.length"
         :baking="routeBaking"
@@ -95,6 +98,9 @@
         @set-corridor-tier="store.setCorridorTier"
         @set-chunk-size="store.setRouteChunkSizeM"
         @set-concurrency="store.setRouteConcurrency"
+        @set-elevation-source="store.setRouteElevationSource"
+        @set-gpxz-key="store.setRouteGpxzApiKey"
+        @set-z-offset="store.setGoogleTilesZOffsetM"
         @fetch-route="handleFetchRoute"
         @clear-route="store.clearRoute"
         @bake-route="handleBakeRoute"
@@ -149,6 +155,7 @@
                 v-if="routeMode && routePreview && previewMode"
                 :chunks="routePreview.chunks"
                 :world-bounds="routePreview.worldBounds"
+                :z-offset-m="googleTilesZOffsetM"
               />
               <Preview3D
                 v-else-if="terrainData && previewMode && !routeMode"
@@ -303,7 +310,10 @@ const {
   routeError,
   corridorTier,
   routeChunkSizeM,
-  routeConcurrency
+  routeConcurrency,
+  routeElevationSource,
+  routeGpxzApiKey,
+  googleTilesZOffsetM
 } = storeToRefs(store);
 
 const showStackInfo = ref(false);
@@ -586,10 +596,17 @@ const handleExportRouteBeamNG = async () => {
       tierId: corridorTier.value,
       chunkSizeM: routeChunkSizeM.value,
       googleApiKey: tilesApiKey,
+      elevationSource: routeElevationSource.value,
+      gpxzApiKey: routeGpxzApiKey.value,
       onProgress: (p) => { routeBakeProgress.value = p; },
       signal: routeBakeAbort.signal,
     });
     downloadExportResult(result, `MapNG_RouteLevel_${new Date().toISOString().slice(0, 10)}.zip`);
+    // Show the stitched route in the 3D preview tab, same as the Raw-GLB export.
+    if (result.previewChunks) {
+      routePreview.value = { chunks: result.previewChunks, worldBounds: result.worldBoundsM };
+      previewMode.value = true;
+    }
   } catch (err) {
     if (err?.name === 'AbortError') return;
     console.error('route BeamNG level export failed', err);

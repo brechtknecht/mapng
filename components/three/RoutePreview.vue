@@ -74,6 +74,7 @@ import CSMLight from './CSMLight.vue';
 const props = defineProps({
   chunks: { type: Array, default: () => [] }, // [{ index, blob, placement }]
   worldBounds: { type: Object, default: null }, // { minX, maxX, minZ, maxZ, widthM, depthM }
+  zOffsetM: { type: Number, default: 0 }, // live tile height offset (metres)
 });
 
 const hdrFile = '/hdr/kloofendal_48d_partly_cloudy_puresky_4k.hdr';
@@ -116,6 +117,15 @@ const disposeObject = (obj) => {
 const parseChunk = (arrayBuffer) =>
   new Promise((resolve, reject) => loader.parse(arrayBuffer, '', (gltf) => resolve(gltf.scene), reject));
 
+// Live tile height: shift ONLY the GoogleTiles3D subgroup (not the terrain).
+// Scene-unit Y = metres ÷ placement.scale (placement.scale = 1/unitsPerMeter).
+const applyTileZOffset = () => {
+  for (const c of loaded.value) {
+    if (!c.tilesNode || !(c.placement?.scale > 0)) continue;
+    c.tilesNode.position.y = props.zOffsetM / c.placement.scale;
+  }
+};
+
 const loadAll = async () => {
   loading.value = true;
   loadError.value = '';
@@ -125,9 +135,11 @@ const loadAll = async () => {
       if (!c?.blob) continue;
       const buf = await c.blob.arrayBuffer();
       const object = await parseChunk(buf);
-      out.push({ index: c.index, object, placement: c.placement });
+      const tilesNode = object.getObjectByName('GoogleTiles3D') || null;
+      out.push({ index: c.index, object, placement: c.placement, tilesNode });
       loaded.value = [...out]; // progressive reveal
     }
+    applyTileZOffset();
   } catch (err) {
     console.error('RoutePreview load failed', err);
     loadError.value = err?.message || String(err);
@@ -146,6 +158,9 @@ watch(
     loadAll();
   },
 );
+
+// Live drag of the tile height offset from the route panel slider.
+watch(() => props.zOffsetM, applyTileZOffset);
 
 onUnmounted(() => {
   loaded.value.forEach((c) => disposeObject(c.object));

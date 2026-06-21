@@ -138,6 +138,34 @@
       </div>
     </BaseCard>
 
+    <!-- Terrain elevation source + tile z-offset (self-contained for the route) -->
+    <BaseCard>
+      <ElevationSourceSelector
+        :elevation-source="elevationSource"
+        :gpxz-api-key="gpxzApiKey"
+        @update:elevation-source="$emit('set-elevation-source', $event)"
+        @update:gpxz-api-key="$emit('set-gpxz-key', $event)"
+      />
+      <div class="mt-3 pt-3 border-t border-gray-200 dark:border-gray-700">
+        <div class="flex items-center justify-between mb-1">
+          <span class="text-sm font-medium text-gray-700 dark:text-gray-300">{{ t('route.tileZOffset') }}</span>
+          <span class="text-[11px] font-mono text-gray-500 dark:text-gray-400">{{ zOffsetM.toFixed(1) }} m</span>
+        </div>
+        <input
+          type="range"
+          min="-10"
+          max="10"
+          step="0.1"
+          :value="zOffsetM"
+          class="w-full accent-[#0f766e]"
+          @input="$emit('set-z-offset', Number($event.target.value))"
+        />
+        <p class="text-[10px] text-gray-400 dark:text-gray-500 mt-1 leading-snug">
+          {{ t('route.tileZOffsetHint') }}
+        </p>
+      </div>
+    </BaseCard>
+
     <!-- Fetch / result -->
     <div class="space-y-2">
       <BaseButton
@@ -238,6 +266,7 @@ import { Route, ArrowUpDown, Loader2, Check, X, Download } from 'lucide-vue-next
 import BaseCard from '../base/BaseCard.vue';
 import BaseButton from '../base/BaseButton.vue';
 import PointRow from '../map/RoutePointRow.vue';
+import ElevationSourceSelector from '../map/ElevationSourceSelector.vue';
 import { CORRIDOR_TIERS, CHUNK_SIZE_PRESETS, resolveChunkSizeM, getCorridorTier } from '../../services/routeCorridor';
 
 const { t } = useI18n({ useScope: 'global' });
@@ -252,6 +281,9 @@ const props = defineProps({
   corridorTier: { type: String, default: 'standard' },
   chunkSizeM: { type: Number, default: null }, // null = Auto (follow the tier)
   concurrency: { type: Number, default: 2 }, // parallel chunk bakes (1–4)
+  elevationSource: { type: String, default: 'default' },
+  gpxzApiKey: { type: String, default: '' },
+  zOffsetM: { type: Number, default: 0 },
   activePoint: { type: String, default: null }, // 'start' | 'end' | null
   chunkCount: { type: Number, default: 0 },
   baking: { type: Boolean, default: false },
@@ -265,6 +297,9 @@ defineEmits([
   'set-corridor-tier',
   'set-chunk-size',
   'set-concurrency',
+  'set-elevation-source',
+  'set-gpxz-key',
+  'set-z-offset',
   'fetch-route',
   'clear-route',
   'bake-route',

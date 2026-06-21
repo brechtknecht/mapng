@@ -1559,7 +1559,9 @@ export const exportToGLB = async (data, options = {}) => {
     stripGoogleGround,
     googleQuality, // optional: override bake quality tier ('high'|'roads'|'max'); omit to use the persisted preference
     corridorMask, // optional route mode: { segment: [{lat,lng}], halfWidthM } — clip Google tiles to the buffer
+    googleZOffsetM, // optional override for the tiles' vertical offset (metres); omit → the global slider value
   } = options;
+  const googleZOff = typeof googleZOffsetM === 'number' ? googleZOffsetM : getGoogleTilesZOffset();
   const resolvedIncludeCenterTile = typeof includeCenterTile === 'boolean'
     ? includeCenterTile
     : tileSelection !== 'surroundings-only';
@@ -1621,7 +1623,7 @@ export const exportToGLB = async (data, options = {}) => {
           options.onMaskStats?.(maskStats);
         }
         googleWrapper.scale.y = computeUnitsPerMeter(data);
-        googleWrapper.position.y = getGoogleTilesZOffset() * computeUnitsPerMeter(data);
+        googleWrapper.position.y = googleZOff * computeUnitsPerMeter(data);
         scene.add(googleWrapper);
       }
     }
@@ -1683,7 +1685,9 @@ export const exportToDAE = async (data, options = {}) => {
     stripGoogleGround,
     googleQuality, // optional: override bake quality tier ('high'|'roads'|'max'); omit to use the persisted preference
     corridorMask, // optional route mode: { segment: [{lat,lng}], halfWidthM } — clip Google tiles to the buffer
+    googleZOffsetM, // optional override for the tiles' vertical offset (metres); omit → the global slider value
   } = options;
+  const googleZOff = typeof googleZOffsetM === 'number' ? googleZOffsetM : getGoogleTilesZOffset();
   const resolvedIncludeCenterTile = typeof includeCenterTile === 'boolean'
     ? includeCenterTile
     : tileSelection !== 'surroundings-only';
@@ -1715,7 +1719,7 @@ export const exportToDAE = async (data, options = {}) => {
         googleWrapper.name = 'GoogleTiles3D';
         for (const child of googleGroup.children) googleWrapper.add(child.clone());
         googleWrapper.scale.y = computeUnitsPerMeter(data);
-        googleWrapper.position.y = getGoogleTilesZOffset() * computeUnitsPerMeter(data);
+        googleWrapper.position.y = googleZOff * computeUnitsPerMeter(data);
         scene.add(googleWrapper);
       }
     }
