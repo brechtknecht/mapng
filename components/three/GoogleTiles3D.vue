@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useGoogleTilesStore } from '../../stores/googleTilesStore.js';
-import { computeUnitsPerMeter, sampleHeightAtScene } from '../../services/google3dTiles.js';
+import { computeUnitsPerMeter, sampleHeightAtScene, TILE_RENDER_BIAS_M } from '../../services/google3dTiles.js';
 
 const props = defineProps({
   terrainData: { required: true },
@@ -51,9 +51,13 @@ const cameraMarkers = computed(() => {
   });
 });
 
-// Manual vertical lift: zOffset is real metres; the group's Y is scaled by upm
-// (TresGroup scale below), so the parent-space offset is metres·upm.
-const offsetY = computed(() => zOffset.value * upm.value);
+// Vertical lift: the user's manual zOffset (real metres) PLUS the fixed render
+// bias the exports already apply (TILE_RENDER_BIAS_M). The bias seats the tiles a
+// hair above the .ter surface they were conformed onto so the two opaque ground
+// surfaces don't z-fight where they sit coplanar — worst on now-flat roads. Y is
+// scaled by upm (TresGroup scale below), so the parent-space offset is metres·upm.
+// Keeping this in sync with the GLB/level exports makes the preview match them.
+const offsetY = computed(() => (zOffset.value + TILE_RENDER_BIAS_M) * upm.value);
 
 // Debug overlay for the LAST refinement: the worker reports the scene-space
 // footprints of every tile the refine actually ADDED (rects are already in

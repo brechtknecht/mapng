@@ -121,6 +121,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Loader2, Plane } from 'lucide-vue-next';
 import CSMLight from './CSMLight.vue';
 import FlyControls3D from './FlyControls3D.vue';
+import { TILE_RENDER_BIAS_M } from '../../services/google3dTiles.js';
 
 const { t } = useI18n({ useScope: 'global' });
 
@@ -177,10 +178,14 @@ const parseChunk = (arrayBuffer) =>
 
 // Live tile height: shift ONLY the GoogleTiles3D subgroup (not the terrain).
 // Scene-unit Y = metres ÷ placement.scale (placement.scale = 1/unitsPerMeter).
+// Includes TILE_RENDER_BIAS_M — the fixed lift that seats the opaque Google tiles
+// just above the terrain mesh so they OCCLUDE it instead of z-fighting on roads
+// (the single-tile preview applies the same bias; without it the route view sits
+// the tiles coplanar with the terrain → the street z-fight you were seeing).
 const applyTileZOffset = () => {
   for (const c of loaded.value) {
     if (!c.tilesNode || !(c.placement?.scale > 0)) continue;
-    c.tilesNode.position.y = props.zOffsetM / c.placement.scale;
+    c.tilesNode.position.y = (props.zOffsetM + TILE_RENDER_BIAS_M) / c.placement.scale;
   }
 };
 
