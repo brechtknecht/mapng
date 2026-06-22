@@ -245,8 +245,13 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     );
 
     // 2) One composited terrain + texture spanning the route bbox.
+    // 1 m/px to MATCH the per-chunk DEM the single-tile bake conforms onto — at the
+    // old 2 m/px the tiles seated on a half-resolution, smoothed surface, which is
+    // why route roads looked coarse/misaligned vs single-tile (which uses 1 m/px).
+    // (For very long routes the square combined still caps at maxSize px; raise
+    // maxSize too if a long route degrades.)
     announce('Compositing route terrain');
-    const combined = buildCombinedRouteTerrain(terrains);
+    const combined = buildCombinedRouteTerrain(terrains, { targetMetersPerPixel: 1 });
     const routeTexture = await compositeRouteTexture(terrains, combined.bounds, baseTexture);
     if (routeTexture) combined.osmTextureCanvas = routeTexture;
     const combinedCenter = {
