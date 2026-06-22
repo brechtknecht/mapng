@@ -60,3 +60,49 @@ test('non-drivable ways and empty input yield no mask', () => {
   // a building (not a road) is ignored.
   assert.equal(buildGroundMask([{ type: 'building', geometry: [{ lat: C_LAT, lng: 0 }] }], DATA), null);
 });
+
+// ── Phase 2: flat-ground area polygons ──────────────────────────────────────
+// A ~40 m square centred on the AOI, given as a lat/lng ring (the parser's shape).
+const lngM = (m) => m / 111320; // metres → deg lng (cos≈1 at this latitude)
+const C = 100 / 111320;          // AOI centre (lat == lng here) → scene (0,0)
+const squareRing = () => {
+  const c = C, h = lngM(20);
+  return [
+    { lat: c - h, lng: c - h }, { lat: c - h, lng: c + h },
+    { lat: c + h, lng: c + h }, { lat: c + h, lng: c - h },
+  ];
+};
+const areaFeature = (tags, extra = {}) => ({ type: 'landuse', tags, geometry: squareRing(), ...extra });
+
+test('a parking polygon fills its interior with w≈1 and feathers outside', () => {
+  const mask = buildGroundMask([areaFeature({ amenity: 'parking' })], DATA);
+  assert.ok(mask, 'a parking area produces a mask');
+  assert.ok(mask.sample(0, 0) > 0.95, `interior solid, got ${mask.sample(0, 0)}`);
+  assert.ok(mask.sample(zM(10), zM(10)) > 0.9, `well inside is solid`);
+  assert.ok(mask.sample(zM(40), zM(40)) < 0.05, `far outside is 0`);
+});
+
+test('a pedestrian area=yes is filled; a pedestrian LINE is not', () => {
+  // Pedestrian areas arrive as type 'road' with a closed ring — must be filled.
+  const area = buildGroundMask([{ type: 'road', tags: { highway: 'pedestrian', area: 'yes' }, geometry: squareRing() }], DATA);
+  assert.ok(area && area.sample(0, 0) > 0.95, 'pedestrian area filled');
+  // A pedestrian line (no area=yes) stays excluded.
+  assert.equal(buildGroundMask([roadFeature({ highway: 'pedestrian' })], DATA), null);
+});
+
+test('buildings and bridged/tunnelled areas are never filled', () => {
+  assert.equal(buildGroundMask([areaFeature({ building: 'yes', amenity: 'parking' })], DATA), null);
+  assert.equal(buildGroundMask([areaFeature({ amenity: 'parking', bridge: 'yes' })], DATA), null);
+  assert.equal(buildGroundMask([areaFeature({ amenity: 'parking', layer: '1' })], DATA), null);
+});
+
+test('a hole (e.g. a building in a parking lot) is punched out of the fill', () => {
+  const c = C, hh = lngM(5);
+  const hole = [
+    { lat: c - hh, lng: c - hh }, { lat: c - hh, lng: c + hh },
+    { lat: c + hh, lng: c + hh }, { lat: c + hh, lng: c - hh },
+  ];
+  const mask = buildGroundMask([areaFeature({ amenity: 'parking' }, { holes: [hole] })], DATA);
+  assert.ok(mask.sample(0, 0) < 0.05, `hole centre is cut out, got ${mask.sample(0, 0)}`);
+  assert.ok(mask.sample(zM(12), zM(12)) > 0.9, `outside the hole still filled`);
+});

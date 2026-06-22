@@ -207,8 +207,10 @@ Extend `tests/tileGroundConform.test.mjs`:
    cache key.
 2. Verify in the conform lab/diagnostics on a dense urban AOI and a rural one;
    read the new `vertsSnapped` / `maxFloatFixedM` log line (no screenshots).
-3. Phase 2: extend mask to flat-area OSM polygons (parking/plaza/landuse) through
-   the same path; add their width/area handling and tests.
+3. Phase 2 (DONE): mask now also fills flat-ground area polygons (amenity=parking,
+   place=square, area=yes pedestrian/footway/living_street/service, area:highway)
+   via `stampPolygon` — interior w=1, feathered outer edge, holes punched out,
+   bridges/tunnels/buildings excluded. Same blend/snap path as roads.
 
 ## Out of scope
 
