@@ -54,10 +54,27 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
     cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
     corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
   } = options;
-  const corridorMode = Array.isArray(corridorSegment) && corridorSegment.length >= 2;
   const heightMap = data.heightMap instanceof Float32Array
     ? data.heightMap
     : new Float32Array(data.heightMap);
+  // Ship the ground the conform mask snaps onto: roads PLUS flat-ground area
+  // polygons (parking, squares, pedestrian areas). The worker uses these ONLY
+  // for the conform mask now (station selection in corridor mode comes from
+  // corridorSegment, NOT OSM), so send them in EVERY mode and quality — incl.
+  // corridor/route bakes, which is where the road z-fight was. Bounded to that
+  // subset to keep the payload small.
+  const allOsm = data.osmFeatures ?? [];
+  const pickedOsm = allOsm.filter((f) => {
+    if (f.type === 'road') return true;
+    const t = f.tags || {};
+    return t.amenity === 'parking' || t.place === 'square' || t['area:highway'] ||
+      (t.area === 'yes' && ['pedestrian', 'footway', 'living_street', 'service'].includes(t.highway));
+  });
+  const corridor = Array.isArray(corridorSegment) && corridorSegment.length >= 2;
+  console.info(
+    `[roadmask] sidecar payload: osmFeatures in data=${allOsm.length}, shipped=${pickedOsm.length}, ` +
+    `corridor=${corridor}, quality=${quality}`,
+  );
   return {
     key,
     force,
@@ -68,11 +85,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
       height: data.height,
       minHeight: data.minHeight,
       heightMap: toBase64(heightMap),
-      // Corridor mode drives stations from corridorSegment, not the OSM
-      // network — don't ship the road features the worker won't read.
-      osmFeatures: !corridorMode && (quality === 'roads' || quality === 'max')
-        ? (data.osmFeatures ?? []).filter((f) => f.type === 'road')
-        : undefined,
+      osmFeatures: pickedOsm.length ? pickedOsm : undefined,
     },
     options: {
       apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,

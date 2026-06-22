@@ -72,6 +72,7 @@ import {
   SCENE_SIZE,
 } from '../services/googleBakeCore.js';
 import { conformTilesToFloor } from '../services/tileGroundConform.js';
+import { buildGroundMask } from '../services/groundMask.js';
 import { createMetricProjector } from '../services/geoUtils.js';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
@@ -136,6 +137,8 @@ const WELD_SEAMS = process.env.MAPNG_WELD_SEAMS !== '0';
 const STRIP_RISERS = process.env.MAPNG_STRIP_RISERS === '1';
 //   MAPNG_CONFORM_TILES=0  disable the delta-field floor conform
 const CONFORM_TILES = process.env.MAPNG_CONFORM_TILES !== '0';
+//   MAPNG_CONFORM_ROADMASK=0  disable the semantic road/area mask snap (groundMask)
+const CONFORM_ROADMASK = process.env.MAPNG_CONFORM_ROADMASK !== '0';
 // Weld tolerances (all metres) — tune without code edits, restart to apply.
 //   BAND      vertical reach onto the target ground (raise to close taller seams)
 //   COHERE    a cell welds only if its ground spans ≤ this (real steps survive)
@@ -252,14 +255,24 @@ const applyConform = (session) => {
   }
   if (soup.length === 0) return;
   const t0 = performance.now();
-  const r = conformTilesToFloor(soup, session.data);
+  // Semantic road/area mask — full-res snap of known flat ground onto the DEM,
+  // flattening photogrammetry wiggle and pulling down floaters the ±band can't
+  // reach. Null when disabled or this AOI shipped no OSM ground (e.g. corridor /
+  // non-road quality), in which case the delta field runs alone (prior behaviour).
+  const osmFeatures = session.data.osmFeatures;
+  const osmCount = Array.isArray(osmFeatures) ? osmFeatures.length : 0;
+  const groundMask = CONFORM_ROADMASK ? buildGroundMask(osmFeatures, session.data) : null;
+  const r = conformTilesToFloor(soup, session.data, { groundMask });
   for (let i = 0; i < recs.length; i++) {
     if (r.positions[i]) recs[i].positions = r.positions[i];
   }
   console.info(
-    `[bakeWorker] tile conform: moved ${r.vertsMoved} verts across ${r.meshesMoved}/${recs.length} meshes, ` +
-    `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m ` +
-    `in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+    `[bakeWorker] [roadmask] tile conform: moved ${r.vertsMoved} verts across ${r.meshesMoved}/${recs.length} meshes, ` +
+    `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m` +
+    (groundMask
+      ? `, snapped ${r.vertsSnapped} ground verts (max float fixed ${r.maxFloatFixedM.toFixed(1)}m)`
+      : ` (mask off/none — osm features received=${osmCount}, roadmask=${CONFORM_ROADMASK})`) +
+    ` in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
   );
 };
 

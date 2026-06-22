@@ -206,7 +206,13 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // texture. (The composite's cross-texture fallback is lost in trade, but a
     // wholesale satellite miss is rare and the off-corridor filler covers gaps.)
     const tex = String(baseTexture || 'satellite').toLowerCase();
-    const includeOSM = tex === 'osm' || tex === 'hybrid';
+    // Always fetch OSM FEATURES — the conform road mask (groundMask) snaps the
+    // Google street onto the DEM and needs the road geometry regardless of the
+    // chosen base texture. Without this a satellite route fetched no OSM, so the
+    // mask was off and streets stayed bumpy (single-tile worked because it pulls
+    // OSM independently). Texture-ASSET generation stays gated by `tex` below, so
+    // a satellite route still gets NO OSM texture — just the features for the mask.
+    const includeOSM = true;
     const genOpts = {
       generateOSMTextureAsset: tex === 'osm',
       generateHybridTextureAsset: tex === 'hybrid',
