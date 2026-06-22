@@ -52,6 +52,12 @@ import { createScalarFieldGrid } from './scalarFieldGrid.js';
  *   snap into the delta-field result at road edges so the mesh does not tear.
  * @param {number} [opts.roadEpsM=0.02]        metres above the DEM a fully-masked
  *   (w=1) vertex is seated, matching the road-surface offset / z-fight bias.
+ * @param {number} [opts.maxSnapM=5]           snap CEILING: a masked vertex more
+ *   than this far off the DEM is NOT snapped. A real road floats a few metres at
+ *   most; a vertex tens of metres up is a flat roof / overpass / tree merely
+ *   overlapping a road pixel, and snapping it would tear a thin vertical spike.
+ *   Also: a vertex shared with any non-horizontal tri (a facade/curb) is never
+ *   snapped, so the snap can't pull a wall vertex down off its wall.
  * @returns {{ positions:Array<Float32Array|null>, vertsMoved:number,
  *   meshesMoved:number, cellsFilled:number, residualBefore:number,
  *   residualAfter:number }}
@@ -65,6 +71,7 @@ export const conformTilesToFloor = (meshes, data, {
   smoothPasses = 0,
   groundMask = null,
   roadEpsM = 0.02,
+  maxSnapM = 5,
   diagnostics = false,
 } = {}) => {
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
@@ -82,7 +89,16 @@ export const conformTilesToFloor = (meshes, data, {
   // the band — a road floating beyond groundDistanceM is exactly the floater we
   // want to snap, yet its tris never enter the delta field. Marked here, used in
   // Pass 2. (Null/skipped entirely when no mask, keeping the fast path intact.)
-  const horizFlags = groundMask
+  // Two per-vertex flags for the snap (mask only):
+  //  horizCand — vertex is touched by a near-horizontal tri (road-surface candidate)
+  //  nonHoriz  — vertex is touched by ANY non-horizontal tri (a facade/curb/wall)
+  // We snap only horizCand && !nonHoriz, so a vertex shared with a vertical face is
+  // never pulled to the floor — that pull is what tore thin vertical spikes off
+  // walls in the corridor bake (low oblique cameras capture facades over roads).
+  const horizCandFlags = groundMask
+    ? meshes.map((m) => (m.positions ? new Uint8Array(m.positions.length / 3) : null))
+    : null;
+  const nonHorizFlags = groundMask
     ? meshes.map((m) => (m.positions ? new Uint8Array(m.positions.length / 3) : null))
     : null;
 
@@ -117,11 +133,18 @@ export const conformTilesToFloor = (meshes, data, {
       const nlen = Math.sqrt(nx * nx + ny * ny + nz * nz);
       const isHoriz = nlen > 1e-12 && Math.abs(ny) / nlen > groundNormalThreshold;
 
-      // Snap gate: near-horizontal regardless of band (this is what reaches the
-      // floaters). Vertical facades / curb risers over a road pixel stay unflagged.
-      if (groundMask && isHoriz) {
-        const hf = horizFlags[mi];
-        if (hf) { hf[i0] = 1; hf[i1] = 1; hf[i2] = 1; }
+      // Snap gates (mask only): mark horizontal road candidates, AND separately
+      // mark every vertex that touches a non-horizontal tri so Pass 2 can exclude
+      // facade/curb-shared vertices. Band-independent — a floating road tri is out
+      // of band but still a candidate.
+      if (groundMask) {
+        if (isHoriz) {
+          const hc = horizCandFlags[mi];
+          if (hc) { hc[i0] = 1; hc[i1] = 1; hc[i2] = 1; }
+        } else {
+          const nh = nonHorizFlags[mi];
+          if (nh) { nh[i0] = 1; nh[i1] = 1; nh[i2] = 1; }
+        }
       }
 
       // Delta-field gate: ground sits in a BAND around the terrain —
@@ -166,7 +189,8 @@ export const conformTilesToFloor = (meshes, data, {
   const positions = meshes.map((m, mi) => {
     const p = m.positions;
     if (!p) return null;
-    const hf = horizFlags ? horizFlags[mi] : null;
+    const hc = horizCandFlags ? horizCandFlags[mi] : null;
+    const nh = nonHorizFlags ? nonHorizFlags[mi] : null;
     const out = new Float32Array(p.length);
     out.set(p);
     let moved = false;
@@ -177,8 +201,12 @@ export const conformTilesToFloor = (meshes, data, {
       const terr = sampleHeightAtScene(data, x, z) - minH;
       let newY = p[i + 1] - d;
 
-      if (groundMask && hf && hf[i / 3]) {
-        const w = groundMask.sample(x, z);
+      const vi = i / 3;
+      // Snap only a horizontal road candidate that is NOT shared with a vertical
+      // face (no spike) AND sits within maxSnapM of the DEM (not a roof/overpass).
+      if (groundMask && hc && hc[vi] && !nh[vi]) {
+        const floatBefore = Math.abs(p[i + 1] - terr);
+        const w = floatBefore <= maxSnapM ? groundMask.sample(x, z) : 0;
         if (w > 0) {
           const ySnap = terr + roadEpsM;
           newY = newY * (1 - w) + ySnap * w;
@@ -186,7 +214,6 @@ export const conformTilesToFloor = (meshes, data, {
             vertsSnapped++;
             // float the smooth field could NOT correct (beyond its band) but the
             // snap did — the headline number for the floater fix.
-            const floatBefore = Math.abs(p[i + 1] - terr);
             if (floatBefore >= groundDistanceM && floatBefore > maxFloatFixedM) {
               maxFloatFixedM = floatBefore;
             }
