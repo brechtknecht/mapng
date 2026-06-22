@@ -10,6 +10,7 @@ import {
   getGoogleTilesZOffset,
   exportGoogleTilesViaSidecar,
   googleBakeSidecarAvailable,
+  TILE_RENDER_BIAS_M,
 } from './google3dTiles.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import beamngGlbToDaeScript from '../scripts/beamng_glb_to_dae.py?raw';
@@ -5378,7 +5379,10 @@ export async function exportBeamNGLevel(terrainData, center, options = {}) {
       class: 'TSStatic',
       name: 'google_tiles',
       persistentId: generatePersistentId(),
-      position: [0, 0, 0],
+      // Z = render-bias epsilon: lift the visual tiles a hair off the coplanar
+      // .ter surface they were conformed onto so they don't z-fight (see
+      // TILE_RENDER_BIAS_M). Drive surface (terrain) unchanged.
+      position: [0, 0, TILE_RENDER_BIAS_M],
       // The .dae does not exist in the fresh zip — it's produced by the
       // one-time Blender conversion (see README_CONVERT.txt in the google_tiles
       // folder). Until then BeamNG logs a missing shape and renders nothing.

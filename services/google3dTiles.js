@@ -594,6 +594,14 @@ export function getPreferredStripGround() {
   }
 }
 
+// Render bias (metres) lifting the VISUAL Google tiles a hair above the .ter
+// surface they were conformed onto, so the two no longer z-fight where they sit
+// coplanar. Purely visual — the car still drives on the terrain just beneath,
+// and terrain still shows beyond the tile footprint (the useful far texture).
+// Distinct from the user z-offset slider (a trim, default 0); this is a fixed
+// depth-bias epsilon. Tune up if z-fighting persists at far view distances.
+export const TILE_RENDER_BIAS_M = 0.15;
+
 /**
  * Manual vertical lift (real metres) set via the preview's z-offset slider.
  * Display-side only — NOT part of the bake or its cache key — but the export

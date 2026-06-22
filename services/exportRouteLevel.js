@@ -21,7 +21,7 @@
 import { fetchTerrainData } from './terrain';
 import { exportToGLB } from './export3d';
 import { exportBeamNGLevel } from './exportBeamNGLevel';
-import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION } from './google3dTiles';
+import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION, TILE_RENDER_BIAS_M } from './google3dTiles';
 import { computeUnitsPerMeter } from './googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
@@ -413,7 +413,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
   const date = new Date().toISOString().slice(0, 10);
   const placedPieces = asm.pieces.map((p) => ({
     ...p,
-    position: [p.east, p.north, Math.round((p.baseUp + zOffsetM) * 100) / 100],
+    position: [p.east, p.north, Math.round((p.baseUp + zOffsetM + TILE_RENDER_BIAS_M) * 100) / 100],
   }));
   const res = await exportBeamNGLevel(asm.combined, chunks[0].center, {
     googleTilePlacements: placedPieces,
