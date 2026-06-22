@@ -15,6 +15,7 @@ import {
   stripGroundTris,
 } from './googleBakeCore.js';
 import { conformTilesToFloor } from './tileGroundConform.js';
+import { buildGroundMask } from './groundMask.js';
 import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTilesPersistentCache.js';
 import {
   sidecarAvailable,
@@ -56,6 +57,13 @@ const riserStripEnabled = () => {
 // Default ON; localStorage mapng_conform_tiles='0' disables it.
 const conformTilesEnabled = () => {
   try { return localStorage.getItem('mapng_conform_tiles') !== '0'; } catch (_) { return true; }
+};
+
+// Sub-flag for the semantic road-mask SNAP layered on the delta-field conform
+// (groundMask.js): full-res flatten of road wiggle + pull-down of floaters the
+// ±band leaves behind. Default ON; mapng_conform_roadmask='0' → delta field only.
+const conformRoadmaskEnabled = () => {
+  try { return localStorage.getItem('mapng_conform_roadmask') !== '0'; } catch (_) { return true; }
 };
 
 /**
@@ -422,7 +430,14 @@ export async function bakeGoogle3DTiles(data, options = {}) {
       positions: m.geometry.attributes.position.array,
       index: m.geometry.index?.array,
     }));
-    const r = conformTilesToFloor(soup, data);
+    // Semantic road mask (full-res, vector-clean) — lets the conform snap known
+    // flat ground onto the DEM, flattening photogrammetry wiggle and seating
+    // floaters the ±band can't reach. Null (delta field only) when disabled or
+    // when this AOI carries no OSM roads.
+    const groundMask = conformRoadmaskEnabled()
+      ? buildGroundMask(data.osmFeatures, data)
+      : null;
+    const r = conformTilesToFloor(soup, data, { groundMask });
     for (let i = 0; i < out.children.length; i++) {
       if (r.positions[i]) {
         const attr = out.children[i].geometry.attributes.position;
@@ -433,7 +448,10 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     }
     console.info(
       `[google3dTiles] tile conform: moved ${r.vertsMoved} verts across ${r.meshesMoved} meshes, ` +
-      `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m`,
+      `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m` +
+      (groundMask
+        ? `, snapped ${r.vertsSnapped} road verts (max float fixed ${r.maxFloatFixedM.toFixed(1)}m)`
+        : ' (road mask off/none)'),
     );
   }
 
@@ -510,7 +528,7 @@ let _bakeCache = null; // { key, promise }
 // v7: route mode conforms each chunk against its slice of the COMBINED terrain
 //     (the driven surface) instead of its own DEM — fixes chunks floating at
 //     seams where per-chunk DEMs disagree. Geometry depends on combined now.
-export const BAKE_FORMAT_VERSION = 7;
+export const BAKE_FORMAT_VERSION = 8;
 
 // Cheap order-sensitive hash of a route segment (rounded coords) — keeps the
 // cache key short while still splitting different routes/widths over the same

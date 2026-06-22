@@ -44,6 +44,14 @@ import { createScalarFieldGrid } from './scalarFieldGrid.js';
  *   applied shift is continuous WITHOUT blur. Extra passes measurably worsen the
  *   residual — they smear a cell's correction across real ground discontinuities
  *   (curbs, embankment edges, terrace steps), pushing already-accurate spots off.
+ * @param {object} [opts.groundMask=null]      optional semantic road-coverage mask
+ *   (groundMask.js: { sample(x,z)→w∈[0,1] }). Where w>0 AND the vertex is
+ *   near-horizontal, its height is blended toward the DEM directly (full-res, NO
+ *   ±groundDistanceM ceiling) — this is what flattens photogrammetry road wiggle
+ *   and pulls down floaters the delta field's band leaves behind. w feathers the
+ *   snap into the delta-field result at road edges so the mesh does not tear.
+ * @param {number} [opts.roadEpsM=0.02]        metres above the DEM a fully-masked
+ *   (w=1) vertex is seated, matching the road-surface offset / z-fight bias.
  * @returns {{ positions:Array<Float32Array|null>, vertsMoved:number,
  *   meshesMoved:number, cellsFilled:number, residualBefore:number,
  *   residualAfter:number }}
@@ -55,6 +63,8 @@ export const conformTilesToFloor = (meshes, data, {
   groundNormalThreshold = 0.85,
   maxShiftM = 15,
   smoothPasses = 0,
+  groundMask = null,
+  roadEpsM = 0.02,
   diagnostics = false,
 } = {}) => {
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
@@ -68,9 +78,18 @@ export const conformTilesToFloor = (meshes, data, {
   // --- Pass 1: collect ground-vertex residuals into the field ----------------
   // residualBefore/After are reported as MEAN ABSOLUTE residual (not signed) so
   // they're comparable: a signed mean cancels on real data and hides the spread.
+  // For the mask snap we need a per-vertex "near-horizontal" flag that IGNORES
+  // the band — a road floating beyond groundDistanceM is exactly the floater we
+  // want to snap, yet its tris never enter the delta field. Marked here, used in
+  // Pass 2. (Null/skipped entirely when no mask, keeping the fast path intact.)
+  const horizFlags = groundMask
+    ? meshes.map((m) => (m.positions ? new Uint8Array(m.positions.length / 3) : null))
+    : null;
+
   let groundSamples = 0;
   let residualAbsSum = 0;
-  for (const m of meshes) {
+  for (let mi = 0; mi < meshes.length; mi++) {
+    const m = meshes[mi];
     const p = m.positions, idx = m.index;
     if (!p || !idx) continue;
     for (let t = 0; t < idx.length; t += 3) {
@@ -82,13 +101,11 @@ export const conformTilesToFloor = (meshes, data, {
       const a0 = aboveTerrain(x0, y0, z0);
       const a1 = aboveTerrain(x1, y1, z1);
       const a2 = aboveTerrain(x2, y2, z2);
-      // Ground sits in a BAND around the terrain — |residual| < groundDistanceM,
-      // not just below the ceiling. Without the lower bound, subterranean
-      // horizontal geometry (underpasses, courtyards, canal/garage floors, photo-
-      // grammetry junk far under the DEM) reads as "ground" with a large NEGATIVE
-      // residual and drags the whole delta field down. (stripGroundTris only needs
-      // the upper bound; a delta field needs both.)
-      if (Math.abs((a0 + a1 + a2) / 3) >= groundDistanceM) continue;
+      const inBand = Math.abs((a0 + a1 + a2) / 3) < groundDistanceM;
+      // Fast path with no mask: band-rejected tris skip the normal entirely. With
+      // a mask we still need the normal — a floating road tri is out of band but
+      // IS a snap candidate.
+      if (!groundMask && !inBand) continue;
 
       // near-horizontal? (normal computed in a metrically uniform space)
       const ay = y0 * upm, by = y1 * upm, cy = y2 * upm;
@@ -98,7 +115,22 @@ export const conformTilesToFloor = (meshes, data, {
       const ny = e1z * e2x - e1x * e2z;
       const nz = e1x * e2y - e1y * e2x;
       const nlen = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      if (!(nlen > 1e-12 && Math.abs(ny) / nlen > groundNormalThreshold)) continue;
+      const isHoriz = nlen > 1e-12 && Math.abs(ny) / nlen > groundNormalThreshold;
+
+      // Snap gate: near-horizontal regardless of band (this is what reaches the
+      // floaters). Vertical facades / curb risers over a road pixel stay unflagged.
+      if (groundMask && isHoriz) {
+        const hf = horizFlags[mi];
+        if (hf) { hf[i0] = 1; hf[i1] = 1; hf[i2] = 1; }
+      }
+
+      // Delta-field gate: ground sits in a BAND around the terrain —
+      // |residual| < groundDistanceM, not just below the ceiling. Without the
+      // lower bound, subterranean horizontal geometry (underpasses, courtyards,
+      // canal/garage floors, photogrammetry junk far under the DEM) reads as
+      // "ground" with a large NEGATIVE residual and drags the whole field down.
+      // (stripGroundTris only needs the upper bound; a delta field needs both.)
+      if (!inBand || !isHoriz) continue;
 
       // It's ground: each vertex's residual is a sample of D at its XZ.
       grid.add(x0, z0, a0);
@@ -123,12 +155,18 @@ export const conformTilesToFloor = (meshes, data, {
     worsened: 0, improved: 0,                // ground verts whose |residual| grew / shrank
   } : null;
 
-  // --- Pass 2: shift every vertex down by D(x,z) -----------------------------
-  let vertsMoved = 0, meshesMoved = 0;
+  // --- Pass 2: delta-field shift, then mask snap -----------------------------
+  // Every vertex slides by D(x,z) — the smooth datum/ground correction. Where the
+  // mask says a near-horizontal vertex is road (w>0), blend the result toward the
+  // DEM directly: w=1 seats it on the floor (no ±band ceiling → floaters come
+  // down, wiggle flattens), w feathers to 0 across the road edge so adjacent
+  // off-road verts stay put and the mesh does not tear.
+  let vertsMoved = 0, meshesMoved = 0, vertsSnapped = 0, maxFloatFixedM = 0;
   let postResidualSum = 0, postResidualCount = 0;
-  const positions = meshes.map((m) => {
+  const positions = meshes.map((m, mi) => {
     const p = m.positions;
     if (!p) return null;
+    const hf = horizFlags ? horizFlags[mi] : null;
     const out = new Float32Array(p.length);
     out.set(p);
     let moved = false;
@@ -136,17 +174,37 @@ export const conformTilesToFloor = (meshes, data, {
       const x = p[i], z = p[i + 2];
       let d = field.sample(x, z);
       if (d > maxShiftM) d = maxShiftM; else if (d < -maxShiftM) d = -maxShiftM;
-      if (d !== 0) {
-        out[i + 1] = p[i + 1] - d;
+      const terr = sampleHeightAtScene(data, x, z) - minH;
+      let newY = p[i + 1] - d;
+
+      if (groundMask && hf && hf[i / 3]) {
+        const w = groundMask.sample(x, z);
+        if (w > 0) {
+          const ySnap = terr + roadEpsM;
+          newY = newY * (1 - w) + ySnap * w;
+          if (w > 0.5) {
+            vertsSnapped++;
+            // float the smooth field could NOT correct (beyond its band) but the
+            // snap did — the headline number for the floater fix.
+            const floatBefore = Math.abs(p[i + 1] - terr);
+            if (floatBefore >= groundDistanceM && floatBefore > maxFloatFixedM) {
+              maxFloatFixedM = floatBefore;
+            }
+          }
+        }
+      }
+
+      if (newY !== p[i + 1]) {
+        out[i + 1] = newY;
         moved = true;
         vertsMoved++;
       }
+
       // residual of conformed ground (for the verification log line) — measured
       // over the SAME band that defined ground, so deep-below verts don't inflate it.
-      const terr = sampleHeightAtScene(data, x, z) - minH;
       const before = p[i + 1] - terr;
       if (Math.abs(before) < groundDistanceM) {
-        const after = out[i + 1] - terr;
+        const after = newY - terr;
         postResidualSum += Math.abs(after);
         postResidualCount++;
         if (diag) {
@@ -167,6 +225,8 @@ export const conformTilesToFloor = (meshes, data, {
     positions,
     vertsMoved,
     meshesMoved,
+    vertsSnapped,
+    maxFloatFixedM,
     cellsFilled: field.filledCount,
     residualBefore: groundSamples ? residualAbsSum / groundSamples : 0,
     residualAfter: postResidualCount ? postResidualSum / postResidualCount : 0,

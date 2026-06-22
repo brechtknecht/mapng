@@ -10,7 +10,7 @@
     "deploy": "npm run build && wrangler deploy",
     "test:geotiff": "node --test tests/exportGeoTiff.test.mjs",
     "test:weld": "node --test tests/weldSeams.test.mjs tests/stripGroundTris.test.mjs",
-    "test:conform": "node --test tests/scalarFieldGrid.test.mjs tests/tileGroundConform.test.mjs",
+    "test:conform": "node --test tests/scalarFieldGrid.test.mjs tests/tileGroundConform.test.mjs tests/groundMask.test.mjs",
     "test:route": "node --test tests/routeConform.test.mjs",
     "testlab": "node tools/testlab/server.mjs",
     "testlab:capture": "node tools/testlab/captureRealBake.mjs"
