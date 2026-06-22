@@ -117,6 +117,19 @@ const populate = (which, payload) => {
 
 const fmtSigned = (v) => (v >= 0 ? '+' : '') + v.toFixed(2);
 
+// Road-mask rows: the snap's verifiable payoff. road RMS after should collapse
+// toward ~0 (flat on the DEM) and max float fixed shows floaters the band missed.
+const roadMaskRows = (rm) => {
+  if (!rm) return '';
+  if (!rm.enabled) return `<tr><td class="k">road mask</td><td class="v warn">off</td></tr>`;
+  if (rm.maskedVerts == null) return `<tr><td class="k">road mask</td><td class="v warn">on — no road verts</td></tr>`;
+  const flat = rm.roadRmsAfterM < 0.15;
+  return `
+    <tr><td class="k">road verts snapped</td><td class="v">${rm.vertsSnapped.toLocaleString()} / ${rm.maskedVerts.toLocaleString()}</td></tr>
+    <tr><td class="k">road RMS before → after</td><td class="v ${flat ? 'good' : 'warn'}">${rm.roadRmsBeforeM.toFixed(2)} → ${rm.roadRmsAfterM.toFixed(2)} m</td></tr>
+    <tr><td class="k">max road float fixed</td><td class="v">${rm.maxFloatFixedM.toFixed(1)} m</td></tr>`;
+};
+
 const renderStats = (payload) => {
   const s = payload.stats;
   const ok = s.groundResidualAfterM < 0.4;
@@ -127,7 +140,8 @@ const renderStats = (payload) => {
     <tr><td class="k">ground residual after</td><td class="v ${ok ? 'good' : 'warn'}">${s.groundResidualAfterM.toFixed(2)} m</td></tr>
     <tr><td class="k">vertical extent (kept)</td><td class="v ${kept ? 'good' : 'warn'}">${s.verticalExtentBeforeM.toFixed(0)} → ${s.verticalExtentAfterM.toFixed(0)} m</td></tr>
     <tr><td class="k">verts moved</td><td class="v">${s.vertsMoved.toLocaleString()}</td></tr>
-    <tr><td class="k">field cells filled</td><td class="v">${s.cellsFilled}</td></tr>`;
+    <tr><td class="k">field cells filled</td><td class="v">${s.cellsFilled}</td></tr>
+    ${roadMaskRows(payload.roadMask)}`;
 
   document.querySelector('#bld tbody').innerHTML = payload.buildings.map((b, i) => {
     const preserved = Math.abs(b.after.heightM - b.before.heightM) < 0.2;
@@ -139,9 +153,11 @@ const renderStats = (payload) => {
 
 const sourceEl = document.getElementById('source');
 const capture = () => sourceEl.value;
+const roadmaskOn = () => (document.getElementById('roadmask').checked ? '1' : '0');
 const query = () => {
-  if (capture()) return `capture=${encodeURIComponent(capture())}`;
-  return PARAMS.map((k) => `${k}=${document.getElementById(k).value}`).join('&');
+  const rm = `roadmask=${roadmaskOn()}`;
+  if (capture()) return `capture=${encodeURIComponent(capture())}&${rm}`;
+  return `${PARAMS.map((k) => `${k}=${document.getElementById(k).value}`).join('&')}&${rm}`;
 };
 
 let timer = null;
@@ -168,9 +184,12 @@ const schedule = () => { clearTimeout(timer); timer = setTimeout(refresh, 120); 
 const defaults = { base: 1.2, tiltX: 0.6, tiltZ: 0.3, wiggle: 0.4 };
 for (const k of PARAMS) { const el = document.getElementById(k); el.value = defaults[k]; el.addEventListener('input', schedule); }
 sourceEl.addEventListener('change', refresh);
+document.getElementById('roadmask').addEventListener('change', refresh);
 
-// Populate the real-bake capture list (if any captured via captureRealBake.mjs).
-fetch('/api/captures').then((r) => r.json()).then(({ captures }) => {
+// Populate the real-bake capture list (if any captured via captureRealBake.mjs
+// or the "New real capture" button below).
+const refreshCaptureList = (selectName) => fetch('/api/captures').then((r) => r.json()).then(({ captures }) => {
+  for (const o of [...sourceEl.options]) if (o.value) o.remove();
   for (const c of captures) {
     const o = document.createElement('option');
     o.value = c.name;
@@ -179,8 +198,44 @@ fetch('/api/captures').then((r) => r.json()).then(({ captures }) => {
   }
   document.getElementById('capnote').textContent = captures.length
     ? `${captures.length} real bake(s) available.`
-    : 'No real bakes yet — run: node tools/testlab/captureRealBake.mjs --lat .. --lng .. --name ..';
+    : 'No real bakes yet — use "New real capture" below.';
+  if (selectName && [...sourceEl.options].some((o) => o.value === selectName)) {
+    sourceEl.value = selectName;
+    refresh();
+  }
 }).catch(() => {});
+refreshCaptureList();
+
+// "New real capture" — runs the bake on the server and streams its log here.
+const capBtn = document.getElementById('capbtn');
+capBtn.addEventListener('click', async () => {
+  const v = (id) => document.getElementById(id).value.trim();
+  const lat = v('caplat'), lng = v('caplng'), size = v('capsize'),
+    quality = v('capquality'), name = v('capname');
+  const log = document.getElementById('caplog');
+  log.style.display = 'block';
+  if (!lat || !lng || !name) { log.textContent = 'lat, lng and name are required.'; return; }
+  capBtn.disabled = true; log.textContent = `baking ${name} (${lat},${lng}) — calls Google + Overpass …\n`;
+  try {
+    const q = new URLSearchParams({ lat, lng, size, quality, name }).toString();
+    const resp = await fetch(`/api/capture?${q}`);
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = log.textContent;
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      log.textContent = buf;
+      log.scrollTop = log.scrollHeight;
+    }
+    await refreshCaptureList(name); // appears in the list and auto-selects
+  } catch (e) {
+    log.textContent += `\n[error] ${e.message}`;
+  } finally {
+    capBtn.disabled = false;
+  }
+});
 
 resize();
 refresh();

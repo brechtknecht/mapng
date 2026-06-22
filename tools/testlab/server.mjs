@@ -13,8 +13,10 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { conformTilesToFloor } from '../../services/tileGroundConform.js';
+import { buildGroundMask } from '../../services/groundMask.js';
 import { sampleHeightAtScene, computeUnitsPerMeter } from '../../services/googleBakeCore.js';
 import { buildTestScene } from './scene.mjs';
 import { fieldHeatmapPng } from './render.mjs';
@@ -34,6 +36,9 @@ const sceneParamsFrom = (q) => ({
   tiltZ: num(q.get('tiltZ'), 0.3),
   wiggle: num(q.get('wiggle'), 0.4),
   gridN: Math.max(8, Math.min(96, num(q.get('gridN'), 56))),
+  // Road-mask snap toggle (default ON) — flip to 0 to A/B against delta-field-only.
+  roadmask: q.get('roadmask') !== '0',
+  featherM: num(q.get('featherM'), 3),
 });
 
 // Source the scene: a REAL bake capture when requested, else the synthetic lab
@@ -60,10 +65,49 @@ const verticalExtent = (soup) => {
 
 const verticalExtentOf = (positionsArrays) => verticalExtent(positionsArrays.map((positions) => ({ positions })));
 
+// RMS of the road surface's residual from the DEM (metres), over verts the mask
+// covers (w>0.5), before vs after the conform. THE headline number for the road
+// fix: if "after" collapses toward roadEpsM, the wiggle is objectively flattened.
+// Comparing roadmask=1 vs roadmask=0 isolates the snap's effect (the same vert set
+// is measured both ways, so any walls in the footprint cancel out).
+const roadRoughness = (scene, r, mask) => {
+  const minH = scene.data.minHeight;
+  let n = 0, sumB = 0, sumA = 0, maxB = 0;
+  for (let mi = 0; mi < scene.soup.length; mi++) {
+    const before = scene.soup[mi].positions;
+    const after = r.positions[mi] || before;
+    for (let i = 0; i < before.length; i += 3) {
+      const x = before[i], z = before[i + 2];
+      if (mask.sample(x, z) <= 0.5) continue;
+      const terr = sampleHeightAtScene(scene.data, x, z) - minH;
+      const rb = before[i + 1] - terr;
+      const ra = after[i + 1] - terr;
+      sumB += rb * rb; sumA += ra * ra; n++;
+      if (Math.abs(rb) > maxB) maxB = Math.abs(rb);
+    }
+  }
+  if (!n) return null;
+  return {
+    maskedVerts: n,
+    rmsBeforeM: Math.sqrt(sumB / n),
+    rmsAfterM: Math.sqrt(sumA / n),
+    maxResidualBeforeM: maxB,
+  };
+};
+
 // Run the REAL conform over a generated/loaded scene and derive verifiable metrics.
 const runScene = (params) => {
   const scene = prepareScene(params);
-  const r = conformTilesToFloor(scene.soup, scene.data);
+  const osm = scene.data.osmFeatures;
+  // Build the mask whenever roads exist so road roughness is measured over the
+  // SAME vert set regardless of the toggle — a true A/B. Only PASS it to the
+  // conform (apply the snap) when the toggle is on.
+  const measureMask = Array.isArray(osm) && osm.length
+    ? buildGroundMask(osm, scene.data, { featherM: params.featherM })
+    : null;
+  const groundMask = params.roadmask ? measureMask : null;
+  const r = conformTilesToFloor(scene.soup, scene.data, { groundMask });
+  const road = measureMask ? roadRoughness(scene, r, measureMask) : null;
   const minH = scene.data.minHeight;
   const vExtentBefore = verticalExtent(scene.soup);
   const vExtentAfter = verticalExtentOf(scene.soup.map((m, i) => r.positions[i] || m.positions));
@@ -88,8 +132,21 @@ const runScene = (params) => {
     };
   });
 
-  return { scene, r, buildings, vExtentBefore, vExtentAfter };
+  return { scene, r, buildings, vExtentBefore, vExtentAfter, groundMask, road };
 };
+
+// Road-mask stats block shared by the JSON endpoints.
+const roadMaskStats = (r, groundMask, road) => ({
+  enabled: !!groundMask,
+  vertsSnapped: r.vertsSnapped,
+  maxFloatFixedM: round(r.maxFloatFixedM),
+  ...(road ? {
+    maskedVerts: road.maskedVerts,
+    roadRmsBeforeM: round(road.rmsBeforeM),
+    roadRmsAfterM: round(road.rmsAfterM),
+    maxRoadFloatBeforeM: round(road.maxResidualBeforeM),
+  } : {}),
+});
 
 const sendJson = (res, obj, code = 200) => {
   const body = JSON.stringify(obj, null, 2);
@@ -124,9 +181,38 @@ const server = http.createServer((req, res) => {
 
     if (p === '/api/captures') return sendJson(res, { captures: listCaptures() });
 
+    // Run a REAL bake capture from the browser: spawns captureRealBake.mjs (which
+    // calls Google/Cesium + Overpass and reads the API key from .env.local) and
+    // streams its log to the response. The new capture appears in /api/captures
+    // when it finishes. Args go through spawn's array form (no shell) and name is
+    // sanitised, so query values can't inject a command.
+    if (p === '/api/capture') {
+      const q = url.searchParams;
+      const lat = num(q.get('lat'), NaN);
+      const lng = num(q.get('lng'), NaN);
+      const size = num(q.get('size'), 320);
+      const quality = String(q.get('quality') || 'roads').replace(/[^a-z]/gi, '') || 'roads';
+      const name = String(q.get('name') || '').replace(/[^\w.-]/g, '').slice(0, 64);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) return sendJson(res, { error: 'lat and lng required' }, 400);
+      if (!name) return sendJson(res, { error: 'name required' }, 400);
+
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' });
+      const child = spawn(process.execPath, [
+        path.join(HERE, 'captureRealBake.mjs'),
+        '--lat', String(lat), '--lng', String(lng),
+        '--size', String(size), '--quality', quality, '--name', name,
+      ], { cwd: ROOT });
+      child.stdout.on('data', (d) => res.write(d));
+      child.stderr.on('data', (d) => res.write(d)); // capture logs go to stderr
+      child.on('error', (e) => { res.write(`\n[ERROR] ${e.message}\n`); res.end(); });
+      child.on('exit', (code) => { res.write(`\n[DONE] exit=${code} name=${name}\n`); res.end(); });
+      req.on('close', () => { if (!child.killed) child.kill(); }); // browser aborted → stop the bake
+      return;
+    }
+
     if (p === '/api/conform') {
       const params = sceneParamsFrom(url.searchParams);
-      const { r, buildings, scene, vExtentBefore, vExtentAfter } = runScene(params);
+      const { r, buildings, scene, vExtentBefore, vExtentAfter, groundMask, road } = runScene(params);
       return sendJson(res, {
         params,
         source: scene.source,
@@ -140,6 +226,7 @@ const server = http.createServer((req, res) => {
           verticalExtentAfterM: round(vExtentAfter),
           fieldN: r.fieldN,
         },
+        roadMask: roadMaskStats(r, groundMask, road),
         buildings: buildings.map((b) => ({
           at: [b.cx, b.cz],
           baseAboveFloor: { beforeM: round(b.before.baseAboveFloorM), afterM: round(b.after.baseAboveFloorM) },
@@ -158,7 +245,7 @@ const server = http.createServer((req, res) => {
 
     if (p === '/api/scene.json') {
       const params = sceneParamsFrom(url.searchParams);
-      const { scene, r, buildings, vExtentBefore, vExtentAfter } = runScene(params);
+      const { scene, r, buildings, vExtentBefore, vExtentAfter, groundMask, road } = runScene(params);
       const minH = scene.data.minHeight;
       // Per-vertex residual (metres above/below the floor) via the REAL sampler,
       // so the viewer can colour tiles by how far they sit off the floor.
@@ -196,6 +283,7 @@ const server = http.createServer((req, res) => {
           verticalExtentAfterM: round(vExtentAfter),
           vertsMoved: r.vertsMoved, cellsFilled: r.cellsFilled,
         },
+        roadMask: roadMaskStats(r, groundMask, road),
         buildings,
       });
     }

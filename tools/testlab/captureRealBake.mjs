@@ -18,6 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchTerrainHeadless } from './terrainHeadless.mjs';
 import { readMbkContainer } from './binContainer.mjs';
+import { fetchOSMData } from '../../services/osm.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');
@@ -73,6 +74,18 @@ const main = async () => {
   const terrain = await fetchTerrainHeadless({ lat, lng, sizeM, n });
   console.error(`[capture] terrain: ${terrain.tilesFetched} tiles, elev ${terrain.minHeight.toFixed(1)}–${terrain.maxHeight.toFixed(1)}m`);
 
+  // OSM roads — the conform's road mask needs them. Best-effort: a failed Overpass
+  // fetch just yields an empty mask (the lab then shows delta-field-only behaviour).
+  console.error('[capture] fetching OSM (Overpass) for the road mask …');
+  let osmFeatures = [];
+  try {
+    osmFeatures = await fetchOSMData(terrain.bounds);
+    const roads = osmFeatures.filter((f) => f.type === 'road').length;
+    console.error(`[capture] OSM: ${osmFeatures.length} features (${roads} roads)`);
+  } catch (e) {
+    console.error('[capture] OSM fetch failed — mask will be empty:', e?.message || e);
+  }
+
   const jobPath = path.join(TMP_DIR, `${name}.job.json`);
   const outPath = path.join(TMP_DIR, `${name}.bin`);
   fs.writeFileSync(jobPath, JSON.stringify({
@@ -101,6 +114,7 @@ const main = async () => {
       width: terrain.width, height: terrain.height,
       minHeight: terrain.minHeight, maxHeight: terrain.maxHeight,
       bounds: terrain.bounds, heightMapB64: b64(terrain.heightMap),
+      osmFeatures,
     },
     meshes: soup,
   }));

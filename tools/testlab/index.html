@@ -27,6 +27,10 @@
   img#field { width: 100%; border: 1px solid #2a2f37; border-radius: 4px; image-rendering: pixelated; }
   .legend { display:flex; justify-content:space-between; color:#98a2b3; font-size:11px; }
   code { background:#1f242c; padding:1px 4px; border-radius:3px; }
+  .caprow { display:flex; gap:6px; margin:6px 0; }
+  .caprow input { width:100%; background:#1f242c; color:#e6e9ee; border:1px solid #2a2f37; border-radius:4px; padding:4px 6px; }
+  #capbtn { background:#2563eb; color:#fff; border:0; border-radius:4px; padding:7px; cursor:pointer; }
+  #capbtn:disabled { background:#374151; cursor:default; }
 </style>
 <script type="importmap">
 { "imports": { "three": "/vendor/three.module.js", "three/addons/controls/OrbitControls.js": "/vendor/OrbitControls.js" } }
@@ -51,11 +55,22 @@
     <div class="ctl"><select id="source" style="width:100%"><option value="">synthetic (sliders below)</option></select></div>
     <p id="capnote" style="color:#98a2b3;font-size:11px;margin:2px 0 0"></p>
 
+    <h2>New real capture</h2>
+    <div class="caprow"><input id="caplat" placeholder="lat" value="52.5163"><input id="caplng" placeholder="lng" value="13.3777"></div>
+    <div class="caprow"><input id="capsize" placeholder="size m" value="320"><input id="capname" placeholder="name" value="test1"></div>
+    <div class="ctl"><label><span>quality</span><select id="capquality"><option>roads</option><option>buildings</option><option>full</option></select></label></div>
+    <button id="capbtn" style="width:100%">Capture (bake + OSM)</button>
+    <pre id="caplog" style="max-height:120px;overflow:auto;background:#1f242c;border-radius:4px;padding:6px;font-size:10px;margin:6px 0 0;white-space:pre-wrap;display:none"></pre>
+
     <h2>Drift parameters (metres) <span id="synthonly" style="font-weight:400;text-transform:none;color:#667085"></span></h2>
     <div class="ctl"><label>base lift <span id="lbase"></span></label><input id="base" type="range" min="0" max="2.4" step="0.05"></div>
     <div class="ctl"><label>tilt X <span id="ltiltX"></span></label><input id="tiltX" type="range" min="-1.5" max="1.5" step="0.05"></div>
     <div class="ctl"><label>tilt Z <span id="ltiltZ"></span></label><input id="tiltZ" type="range" min="-1.5" max="1.5" step="0.05"></div>
     <div class="ctl"><label>wiggle <span id="lwiggle"></span></label><input id="wiggle" type="range" min="0" max="1.2" step="0.05"></div>
+
+    <h2>Road mask snap</h2>
+    <div class="ctl"><label><span>snap roads onto the DEM</span><input id="roadmask" type="checkbox" checked></label></div>
+    <p style="color:#98a2b3;font-size:11px;margin:2px 0 0">Off = delta-field only. Watch <code>road RMS after</code> drop when on.</p>
 
     <h2>Conform stats</h2>
     <table id="stats"><tbody></tbody></table>

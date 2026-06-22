@@ -37,6 +37,7 @@ export const loadCapture = (name) => {
   const data = {
     width: t.width, height: t.height, minHeight: t.minHeight, maxHeight: t.maxHeight,
     bounds: t.bounds, heightMap: decodeTyped(t.heightMapB64, Float32Array),
+    osmFeatures: t.osmFeatures || [],
   };
   const soup = j.meshes.map((m) => ({
     name: m.name,
