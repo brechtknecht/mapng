@@ -33,7 +33,8 @@ package imports Vue.
 | 3 | `@mapng/workers` | **Deviated.** `resamplerClient` is coupled to `terrainResampler`, so a standalone workers package would create a workers→terrain back-edge. Instead **colocated each worker with its domain**: laz worker/client → `fetching`; resampler stack stayed with the terrain modules (now in `bake`); `taskQueues` → `batch`. |
 | 4–6 | `terrain` / `tiles` / `osm` / `export` (4 packages) + god-file splits | **Deviated to one `@mapng/bake` package.** The terrain/tiles/osm/export modules form a tightly coupled, partly cyclic subsystem (`terrain→osmTexture`, `scalarFieldGrid→SCENE_SIZE`, `junctionMesh↔ColladaExporter`/`exportBeamNGLevel`). Splitting into 4 acyclic packages needs behaviour-affecting function moves that can't be verified byte-stable without a runtime bake. Moved all 28 as one package; intra-imports stay relative; every external importer uses the 1:1 subpath `@mapng/bake/<module>`. |
 | 7 | `@mapng/route` + `@mapng/batch` | Done. Both moved cleanly on top of `bake`; no route↔batch edges. |
-| 9 (partial) | Enforce | Boundary checker + `test:all` + `boundaries` npm scripts. Extensionless relative imports normalized to `.js` (valid Node ESM, not just Vite). |
+| 8 (partial) | Lift orchestrators → `@mapng/pipelines` | **Package created.** Lifted the ref-free orchestration glue out of `App.vue` (`downloadExportResult` DOM helper, `getTilesApiKey` credential resolver) and made `@mapng/pipelines` the canonical surface App.vue drives for the route pipeline (`chunkRoute`, `bakeAndExportRoute`/`runRouteBake`, `exportRouteAsBeamNGLevel`/`runRouteLevelExport`). The route pipeline is fully package-bound (its orchestrator already lived in `@mapng/route`). The single-tile `handleGenerate` body stays in App.vue — see deferred #1. |
+| 9 (partial) | Enforce | Boundary checker (now incl. `pipelines`) + `test:all` + `boundaries` npm scripts. Extensionless relative imports normalized to `.js` (valid Node ESM, not just Vite). |
 
 ## Deferred — and why
 
@@ -41,11 +42,18 @@ These require runtime verification I could not perform safely (no in-game/browse
 bake check available; the user explicitly prefers no screenshots), so doing them
 blind would risk a working pipeline. They are **not** done:
 
-1. **Phase 8 — lift `App.vue` orchestrators into `@mapng/pipelines`.** The
-   single-tile/batch/route control flow still lives in `App.vue` handlers
-   (`handleGenerate`, `handleBakeRoute`, `handleExportRouteBeamNG`, `handleStartBatch`).
-   Extracting them changes runtime wiring (refs, stores, reactivity) in ways the
-   build + headless tests cannot confirm byte-stable. Needs a real bake run.
+1. **Phase 8 (remainder) — the single-tile `handleGenerate` body.** The
+   `@mapng/pipelines` package exists and the route pipeline is fully routed
+   through it, but the single-tile/batch control flow (`handleGenerate`,
+   `handleStartBatch`) is still inline in `App.vue` because it is pervasively
+   coupled to Vue refs (`terrainData`, `lastGenerationKey`, `isLoading`,
+   `loadingStatus`, `previewMode`), i18n, `alert`, and Vue-unmount timing — even
+   "pure-looking" helpers like `buildGenerationKey` read refs. Lifting it into a
+   ref-free `runSingleTileBake(opts, onProgress)` is mechanical but changes
+   runtime wiring the build + headless tests cannot confirm byte-stable; it needs
+   a real bake run to verify. The data-production calls it makes
+   (`fetchTerrainData`, `loadTerrainFromLaz/Tif`, `addOSMToTerrain`) are already
+   package-bound in `@mapng/bake`.
 2. **Internal split of `@mapng/bake` into terrain/tiles/osm/export.** Blocked on
    two decouplings that must stay byte-stable against the bake oracle:
    move `SCENE_SIZE` (and similar shared constants) into `@mapng/geo`, and

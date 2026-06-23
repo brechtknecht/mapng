@@ -1,0 +1,15 @@
+{
+  "name": "@mapng/pipelines",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./*": "./src/*.js"
+  },
+  "dependencies": {
+    "@mapng/bake": "0.0.0",
+    "@mapng/route": "0.0.0"
+  }
+}

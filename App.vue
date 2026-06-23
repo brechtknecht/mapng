@@ -257,9 +257,13 @@ import { fetchTerrainData, addOSMToTerrain, loadTerrainFromTif, parseTifFile, lo
 import { applyAscCoordinateSystem } from '@mapng/fetching';
 import { computeUploadedCropBounds } from '@mapng/bake/uploadBounds';
 import { fetchRoute } from '@mapng/fetching';
-import { chunkRoute } from '@mapng/route/routeCorridor';
-import { bakeAndExportRoute } from '@mapng/route/routeBake';
-import { exportRouteAsBeamNGLevel } from '@mapng/route/exportRouteLevel';
+import {
+  chunkRoute,
+  bakeAndExportRoute,
+  exportRouteAsBeamNGLevel,
+  downloadExportResult,
+  getTilesApiKey,
+} from '@mapng/pipelines';
 import {
   computeGridTiles,
   computeGridTilesWithOffsets,
@@ -527,7 +531,7 @@ let routeBakeAbort = null;
 
 const handleBakeRoute = async () => {
   if (!routeChunks.value.length || routeBaking.value) return;
-  const tilesApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  const tilesApiKey = getTilesApiKey();
   if (!tilesApiKey) {
     routeError.value = 'Set VITE_GOOGLE_MAPS_API_KEY (tiles credential) to bake the corridor.';
     return;
@@ -561,29 +565,12 @@ const handleBakeRoute = async () => {
   }
 };
 
-// Download a zip-export result. Two shapes: the dev zip-sidecar returns a
-// same-origin GET `url` that streams straight to disk (no multi-GB heap Blob);
-// the prod fallback returns a `blob` we object-URL.
-const downloadExportResult = (result, fallbackName) => {
-  const link = document.createElement('a');
-  let objectUrl = null;
-  if (result.url) {
-    link.href = result.url;
-  } else {
-    objectUrl = URL.createObjectURL(result.blob);
-    link.href = objectUrl;
-  }
-  link.download = result.filename || fallbackName;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  if (objectUrl) URL.revokeObjectURL(objectUrl);
-};
+// downloadExportResult + getTilesApiKey now live in @mapng/pipelines.
 
 // Assemble the route corridor into ONE drivable BeamNG level (vs the raw GLB zip).
 const handleExportRouteBeamNG = async () => {
   if (!routeChunks.value.length || routeBaking.value) return;
-  const tilesApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+  const tilesApiKey = getTilesApiKey();
   if (!tilesApiKey) {
     routeError.value = 'Set VITE_GOOGLE_MAPS_API_KEY (tiles credential) to export the corridor.';
     return;
