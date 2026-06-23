@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCombinedRouteTerrain, sampleHeightAt } from '../services/routeTerrainComposite.js';
+import { buildCombinedRouteTerrain, sampleHeightAt } from '@mapng/route/routeTerrainComposite';
 
 // A small chunk terrain: constant elevation `h` over a square box centred at
 // (lat,lng) of side ~`sizeM` metres.

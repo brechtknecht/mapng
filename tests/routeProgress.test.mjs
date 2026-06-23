@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createRouteProgress } from '../services/routeProgress.js';
+import { createRouteProgress } from '@mapng/route/routeProgress';
 
 test('starts all-pending with 0% and no active chunks', () => {
   const p = createRouteProgress(3);

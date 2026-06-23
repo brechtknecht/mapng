@@ -269,7 +269,7 @@ import BaseCard from '../base/BaseCard.vue';
 import BaseButton from '../base/BaseButton.vue';
 import PointRow from '../map/RoutePointRow.vue';
 import ElevationSourceSelector from '../map/ElevationSourceSelector.vue';
-import { CORRIDOR_TIERS, CHUNK_SIZE_PRESETS, resolveChunkSizeM, getCorridorTier } from '../../services/routeCorridor';
+import { CORRIDOR_TIERS, CHUNK_SIZE_PRESETS, resolveChunkSizeM, getCorridorTier } from '@mapng/route/routeCorridor';
 
 const { t } = useI18n({ useScope: 'global' });
 

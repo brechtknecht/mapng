@@ -8,7 +8,7 @@ import {
   getCorridorTier,
   resolveChunkSizeM,
   routeOverlapM,
-} from '../services/routeCorridor.js';
+} from '@mapng/route/routeCorridor';
 
 // Build a straight west→east polyline of given length (m) at a latitude.
 function straightRoute(lengthM, lat = 48.137, lng0 = 11.575, steps = 50) {

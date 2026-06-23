@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { computeRouteFrame } from '../services/routeStitch.js';
-import { haversineMeters } from '../services/routeCorridor.js';
+import { computeRouteFrame } from '@mapng/route/routeStitch';
+import { haversineMeters } from '@mapng/route/routeCorridor';
 
 const DEG = Math.PI / 180;
 const M_PER_DEG_LAT = 111320;

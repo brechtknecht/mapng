@@ -12,7 +12,7 @@
 // controllable.
 
 import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
-import { buildCombinedRouteTerrain, sampleHeightAt, sampleCombinedHeightMap } from '../../services/routeTerrainComposite.js';
+import { buildCombinedRouteTerrain, sampleHeightAt, sampleCombinedHeightMap } from '@mapng/route/routeTerrainComposite';
 import { SCENE_SIZE } from '@mapng/bake/googleBakeCore';
 
 const HALF = SCENE_SIZE / 2;

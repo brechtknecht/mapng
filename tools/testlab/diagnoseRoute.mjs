@@ -6,7 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
-import { buildCombinedRouteTerrain, sampleHeightAt, sampleCombinedHeightMap } from '../../services/routeTerrainComposite.js';
+import { buildCombinedRouteTerrain, sampleHeightAt, sampleCombinedHeightMap } from '@mapng/route/routeTerrainComposite';
 import { SCENE_SIZE } from '@mapng/bake/googleBakeCore';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));

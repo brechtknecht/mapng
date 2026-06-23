@@ -257,9 +257,9 @@ import { fetchTerrainData, addOSMToTerrain, loadTerrainFromTif, parseTifFile, lo
 import { applyAscCoordinateSystem } from '@mapng/fetching';
 import { computeUploadedCropBounds } from '@mapng/bake/uploadBounds';
 import { fetchRoute } from '@mapng/fetching';
-import { chunkRoute } from './services/routeCorridor';
-import { bakeAndExportRoute } from './services/routeBake';
-import { exportRouteAsBeamNGLevel } from './services/exportRouteLevel';
+import { chunkRoute } from '@mapng/route/routeCorridor';
+import { bakeAndExportRoute } from '@mapng/route/routeBake';
+import { exportRouteAsBeamNGLevel } from '@mapng/route/exportRouteLevel';
 import {
   computeGridTiles,
   computeGridTilesWithOffsets,
