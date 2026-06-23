@@ -5,7 +5,7 @@
 //
 // Layering:  geo < fetching < bake < { route, batch }
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 
 const ALLOWED = {
     geo: new Set([]),
@@ -51,8 +51,37 @@ for (const pkg of Object.keys(ALLOWED)) {
     }
 }
 
+// --- Intra-package layer rule (docs/refactor/06) --------------------------
+// Files may declare `@layer core|io|flow`. A `core` file (pure: no DOM, no
+// network, no renderer) must not import a sibling tagged `io` or `flow`. Files
+// without a tag are legacy/unchecked, so this stays green until tags are added.
+const LAYER_RE = /@layer\s+(core|io|flow)\b/;
+const layerOf = new Map(); // absFile -> 'core'|'io'|'flow'
+for (const pkg of Object.keys(ALLOWED)) {
+    const srcDir = join(ROOT, pkg, 'src');
+    let files;
+    try { files = walk(srcDir); } catch { continue; }
+    for (const file of files) {
+        const m = readFileSync(file, 'utf8').match(LAYER_RE);
+        if (m) layerOf.set(file, m[1]);
+    }
+}
+const REL_IMPORT_RE = /from\s+['"](\.[^'"]+)['"]/g;
+for (const [file, layer] of layerOf) {
+    if (layer !== 'core') continue;
+    const text = readFileSync(file, 'utf8');
+    for (const m of text.matchAll(REL_IMPORT_RE)) {
+        const target = resolve(dirname(file), m[1]);
+        const dep = layerOf.get(target);
+        if (dep === 'io' || dep === 'flow') {
+            console.error(`✗ core file imports @layer ${dep}: ${file.replace(ROOT, 'packages')} → ${m[1]}`);
+            violations++;
+        }
+    }
+}
+
 if (violations) {
     console.error(`\n${violations} boundary violation(s).`);
     process.exit(1);
 }
-console.log('✓ package boundaries OK (geo < fetching < bake < {route, batch} < pipelines)');
+console.log('✓ package boundaries OK (geo < fetching < bake < {route, batch} < pipelines; core ↛ io/flow)');

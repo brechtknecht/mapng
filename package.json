@@ -17,6 +17,8 @@
     "test:route": "node --test tests/routeConform.test.mjs",
     "test:all": "node --test tests/exportGeoTiff.test.mjs tests/weldSeams.test.mjs tests/stripGroundTris.test.mjs tests/scalarFieldGrid.test.mjs tests/tileGroundConform.test.mjs tests/groundMask.test.mjs tests/routeConform.test.mjs tests/routeStitch.test.mjs tests/routeCorridor.test.mjs tests/routeProgress.test.mjs tests/routeTerrainComposite.test.mjs tests/buildCorridorStations.test.mjs tests/junctionGeometry.test.mjs tests/ascLoader.test.mjs tests/gmlLoader.test.mjs",
     "boundaries": "node tools/check-boundaries.mjs",
+    "lint:size": "node tools/check-filesize.mjs",
+    "check": "node tools/check-boundaries.mjs && node tools/check-filesize.mjs && npm run test:all",
     "testlab": "node tools/testlab/server.mjs",
     "testlab:capture": "node tools/testlab/captureRealBake.mjs"
   },

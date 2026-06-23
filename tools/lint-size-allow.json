@@ -1,0 +1,19 @@
+{
+  "_doc": "Ratchet allowlist for tools/check-filesize.mjs (cap 500 LOC). Each entry is a god-file pending decomposition per docs/refactor/06-internal-decomposition.md. DELETE an entry when its file drops <=500 LOC. Do not ADD entries — new code must be born small.",
+  "packages/bake/src/exportBeamNGLevel.js": "god-file 5558 LOC — decompose into beamng/* (06 step 9)",
+  "packages/bake/src/export3d.js": "god-file 2163 LOC — decompose into scene3d/* (06 step 8)",
+  "packages/bake/src/terrain.js": "god-file 1986 LOC — decompose into terrain/* (06 step 7)",
+  "packages/bake/src/osmTexture.js": "god-file 1886 LOC — decompose into osm/* (06 step 6)",
+  "packages/batch/src/batchJob.js": "god-file 1561 LOC — decompose into batch grid/state/run (06 step 4)",
+  "packages/bake/src/googleBakeCore.js": "god-file 1218 LOC — decompose into scene/* + tiles/* (06 steps 1-2)",
+  "packages/bake/src/beamngFlavorCatalog.js": "1008 LOC data table — move to materials/ data module (06 step 10)",
+  "packages/bake/src/osmTerrainMaterials.js": "960 LOC data — move to materials/ (06 step 10)",
+  "packages/bake/src/google3dTiles.js": "862 LOC — decompose into tiles/* orchestration (06 step 3)",
+  "packages/bake/src/resamplerWorker.js": "828 LOC — split kernels vs worker entry (06 step 7)",
+  "packages/bake/src/ColladaExporter.js": "697 LOC — VENDORED three.js example; exempt until replaced",
+  "packages/bake/src/surroundingTiles.js": "668 LOC — fold into terrain/* (06 step 7)",
+  "packages/fetching/src/osm.js": "658 LOC — split osm fetch vs parse (06 step 5)",
+  "packages/bake/src/junctionGeometry.js": "629 LOC — split if still >500 after beamng/* (06 step 10)",
+  "packages/fetching/src/kron86.js": "582 LOC — split kron86 fetch vs parse (06 step 5)",
+  "packages/bake/src/terrainResampler.js": "535 LOC — fold into terrain/* (06 step 7)"
+}
