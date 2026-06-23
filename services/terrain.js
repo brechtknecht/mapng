@@ -3,7 +3,7 @@ import { parseTifFile } from '@mapng/fetching';
 export { parseTifFile };
 import { parseLazFile } from '@mapng/fetching';
 export { parseLazFile };
-import { rasterizeLazOffThread } from "./lazClient";
+import { rasterizeLazOffThread } from '@mapng/fetching';
 import { generateOSMTexture, generateHybridTexture } from "./osmTexture";
 import * as GeoTIFF from "geotiff";
 import {

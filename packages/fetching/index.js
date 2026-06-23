@@ -8,6 +8,7 @@ export * from './src/tilesAuth.js';
 export * from './src/elevationCache.js';
 export * from './src/ascLoader.js';
 export * from './src/lazLoader.js';
+export * from './src/lazClient.js'; // lazWorker.js is a worker entry (self.onmessage) — not re-exported
 export * from './src/tifLoader.js';
 export * from './src/gmlLoader.js';
 export * from './src/kron86.js';
