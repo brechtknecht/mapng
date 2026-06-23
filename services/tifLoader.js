@@ -9,7 +9,7 @@ import {
   UNIT_UNKNOWN,
   UNIT_US_SURVEY_FEET,
   USER_DEFINED_CRS,
-} from './uploadGeoMetadata.js';
+} from '@mapng/geo';
 
 export { parseGmlText, parseAscText };
 

@@ -5,7 +5,7 @@ import {
   summarizeCoverageBounds,
   UNIT_UNKNOWN,
   USER_DEFINED_CRS,
-} from './uploadGeoMetadata.js';
+} from '@mapng/geo';
 
 const detectVerticalUnitFromWKT = (wkt) => {
   if (!wkt || typeof wkt !== 'string') return { unit: UNIT_UNKNOWN, source: null };

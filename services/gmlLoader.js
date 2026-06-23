@@ -6,7 +6,7 @@ import {
   UNIT_UNKNOWN,
   summarizeCoverageBounds,
   VALID_UPLOAD_RESOLUTIONS,
-} from './uploadGeoMetadata.js';
+} from '@mapng/geo';
 
 const GML_NO_DATA = -99999;
 

@@ -3,7 +3,7 @@ import {
   detectUnitFromText,
   summarizeCoverageBounds,
   UNIT_UNKNOWN,
-} from './uploadGeoMetadata.js';
+} from '@mapng/geo';
 
 const MAX_HEADER_LINES = 64;
 const DEFAULT_NO_DATA_VALUE = -9999;

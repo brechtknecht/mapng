@@ -14,7 +14,7 @@ import proj4 from 'proj4';
 // Import the worker-specific build (ENVIRONMENT_IS_WORKER=true).
 // WASM is resolved via locateFile → /laz-perf.wasm in public/.
 import { createLazPerf } from 'laz-perf/lib/worker';
-import { getBuiltInProj4 } from './uploadGeoMetadata.js';
+import { getBuiltInProj4 } from '@mapng/geo';
 
 const NO_DATA = -99999;
 

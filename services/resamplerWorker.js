@@ -10,7 +10,7 @@
  */
 import proj4 from 'proj4';
 import { bilinear } from '@mapng/geo';
-import { getBuiltInProj4 } from './uploadGeoMetadata.js';
+import { getBuiltInProj4 } from '@mapng/geo';
 
 const DEBUG_RESAMPLER = false;
 const debugLog = (...args) => {

@@ -2,3 +2,4 @@
 // no DOM, no fetch. Only depends on proj4.
 export * from './src/geoUtils.js';
 export * from './src/math.js';
+export * from './src/uploadGeoMetadata.js';
