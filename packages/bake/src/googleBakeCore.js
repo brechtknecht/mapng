@@ -10,76 +10,12 @@ import { createMetricProjector } from '@mapng/geo';
 // evaluates a WebGLRenderer at module scope and crashes Node — see
 // scripts/headlessTilesEnv.mjs).
 
-// Mirror export3d.js — kept local to avoid a circular import.
-export const SCENE_SIZE = 100;
-
-export const sampleHeightAtScene = (data, x, z) => {
-  const half = SCENE_SIZE / 2;
-  const u = Math.max(0, Math.min(1, (x + half) / SCENE_SIZE));
-  const v = Math.max(0, Math.min(1, (z + half) / SCENE_SIZE));
-  const localX = u * (data.width - 1);
-  const localZ = v * (data.height - 1);
-  const x0 = Math.floor(localX);
-  const x1 = Math.min(x0 + 1, data.width - 1);
-  const y0 = Math.floor(localZ);
-  const y1 = Math.min(y0 + 1, data.height - 1);
-  const wx = localX - x0;
-  const wy = localZ - y0;
-  const hm = data.heightMap;
-  const w = data.width;
-  const minH = data.minHeight;
-  const sample = (i) => (hm[i] < -10000 ? minH : hm[i]);
-  const h00 = sample(y0 * w + x0);
-  const h10 = sample(y0 * w + x1);
-  const h01 = sample(y1 * w + x0);
-  const h11 = sample(y1 * w + x1);
-  return (
-    h00 * (1 - wx) * (1 - wy) +
-    h10 * wx * (1 - wy) +
-    h01 * (1 - wx) * wy +
-    h11 * wx * wy
-  );
-};
-
-export const computeUnitsPerMeter = (data) => {
-  const latRad = (((data.bounds.north + data.bounds.south) / 2) * Math.PI) / 180;
-  const metersPerDegree = 111320 * Math.cos(latRad);
-  const realWidthMeters = (data.bounds.east - data.bounds.west) * metersPerDegree;
-  return SCENE_SIZE / realWidthMeters;
-};
-
-/**
- * AOI-centred reference frame shared by every bake step: geographic centre,
- * metric extent, the ECEF centre point and a local ENU basis around it.
- */
-export const computeAoiFrame = (data, ellipsoid) => {
-  const centerLat = (data.bounds.north + data.bounds.south) / 2;
-  const centerLng = (data.bounds.east + data.bounds.west) / 2;
-  const latRad = (centerLat * Math.PI) / 180;
-  const lonRad = (centerLng * Math.PI) / 180;
-
-  // AOI extent (meters) — used to size the virtual camera so the LOD selector
-  // picks tiles that cover the AOI from above.
-  const metersPerDegree = 111320 * Math.cos(latRad);
-  const widthM = (data.bounds.east - data.bounds.west) * metersPerDegree;
-  const heightM = (data.bounds.north - data.bounds.south) * 111320;
-  const extentM = Math.max(widthM, heightM);
-
-  const centerEcef = new THREE.Vector3();
-  ellipsoid.getCartographicToPosition(latRad, lonRad, 0, centerEcef);
-  const upDir = centerEcef.clone().normalize();
-  // Local ENU basis at the AOI centre (ECEF +Z points at the north pole).
-  const eastDir = new THREE.Vector3(0, 0, 1).cross(upDir).normalize();
-  const northDir = upDir.clone().cross(eastDir).normalize();
-  const horiz = (e, n) =>
-    new THREE.Vector3().addScaledVector(eastDir, e).addScaledVector(northDir, n);
-
-  return {
-    centerLat, centerLng, latRad, lonRad,
-    metersPerDegree, widthM, heightM, extentM,
-    centerEcef, upDir, eastDir, northDir, horiz,
-  };
-};
+// Foundational scene math now lives in scene/ (docs/refactor/06 step 1);
+// imported for internal use and re-exported so existing consumers — incl. the
+// node worker and `@mapng/bake/googleBakeCore` subpath importers — are unchanged.
+import { SCENE_SIZE, computeUnitsPerMeter, computeAoiFrame } from './scene/sceneFrame.js';
+import { sampleHeightAtScene } from './scene/sceneSample.js';
+export { SCENE_SIZE, computeUnitsPerMeter, computeAoiFrame, sampleHeightAtScene };
 
 // Road classes worth a street-level camera, most important first — the
 // station cap is spent on major driving corridors before side streets.
