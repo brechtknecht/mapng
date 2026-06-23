@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGroundMask } from '../services/groundMask.js';
+import { buildGroundMask } from '@mapng/bake/groundMask';
 
 // 200 m AOI ⇒ unitsPerMeter = SCENE_SIZE(100) / 200 = 0.5 scene units per metre.
 // heightMap is unused by the mask (it only rasterises OSM polylines).

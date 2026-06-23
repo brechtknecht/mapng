@@ -8,7 +8,7 @@ import {
   getPreferredStripGround,
   refineGoogleTilesBake,
   disposeBakeGroup,
-} from '../services/google3dTiles.js';
+} from '@mapng/bake/google3dTiles';
 
 /**
  * State for the Google Photorealistic 3D Tiles preview in Preview3D.

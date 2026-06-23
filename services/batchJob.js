@@ -7,8 +7,8 @@
 
 import JSZip from 'jszip';
 import { encode } from 'fast-png';
-import { fetchTerrainData } from './terrain.js';
-import { exportToGLB, exportToDAE } from './export3d.js';
+import { fetchTerrainData } from '@mapng/bake/terrain';
+import { exportToGLB, exportToDAE } from '@mapng/bake/export3d';
 import {
   generateHeightmapBlob,
   generateSatelliteBlob,

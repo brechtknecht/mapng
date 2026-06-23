@@ -18,11 +18,11 @@
 // its chunk-centre offset from the combined-terrain centre (metres), lifted by
 // (chunkMinHeight − combinedMinHeight) so its ground meets the terrain datum.
 
-import { fetchTerrainData } from './terrain';
-import { exportToGLB } from './export3d';
-import { exportBeamNGLevel } from './exportBeamNGLevel';
-import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION, TILE_RENDER_BIAS_M } from './google3dTiles';
-import { computeUnitsPerMeter } from './googleBakeCore';
+import { fetchTerrainData } from '@mapng/bake/terrain';
+import { exportToGLB } from '@mapng/bake/export3d';
+import { exportBeamNGLevel } from '@mapng/bake/exportBeamNGLevel';
+import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION, TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
+import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
 import { buildCombinedRouteTerrain, sampleCombinedHeightMap } from './routeTerrainComposite';

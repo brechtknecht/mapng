@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { weldSeams } from '../services/googleBakeCore.js';
+import { weldSeams } from '@mapng/bake/googleBakeCore';
 
 // positions are [sceneX, metersY, sceneZ]; with unitsPerMeter = 1 the scene
 // X/Z axes ARE metres, so the numbers read directly.

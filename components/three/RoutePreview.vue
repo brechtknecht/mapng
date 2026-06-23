@@ -121,7 +121,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Loader2, Plane } from 'lucide-vue-next';
 import CSMLight from './CSMLight.vue';
 import FlyControls3D from './FlyControls3D.vue';
-import { TILE_RENDER_BIAS_M } from '../../services/google3dTiles.js';
+import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 
 const { t } = useI18n({ useScope: 'global' });
 

@@ -137,7 +137,7 @@ import {
   POSITION_LABELS,
   fetchSurroundingTiles,
   downloadSurroundingTilesZip,
-} from '../../services/surroundingTiles';
+} from '@mapng/bake/surroundingTiles';
 
 const { t } = useI18n({ useScope: 'global' });
 

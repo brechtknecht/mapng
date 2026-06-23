@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import * as THREE from 'three';
-import { buildCorridorStations } from '../services/googleBakeCore.js';
+import { buildCorridorStations } from '@mapng/bake/googleBakeCore';
 
 // Minimal frame stub: a flat ENU basis centred at (0,0). horiz(e,n) just maps
 // to a vector so we can count/inspect stations without a real ellipsoid.

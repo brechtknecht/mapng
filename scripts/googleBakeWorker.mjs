@@ -70,9 +70,9 @@ import {
   weldSeams,
   stripGroundTris,
   SCENE_SIZE,
-} from '../services/googleBakeCore.js';
-import { conformTilesToFloor } from '../services/tileGroundConform.js';
-import { buildGroundMask } from '../services/groundMask.js';
+} from '@mapng/bake/googleBakeCore';
+import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
+import { buildGroundMask } from '@mapng/bake/groundMask';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 

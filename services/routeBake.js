@@ -14,14 +14,14 @@
 // sidecar worker, and per-bounds caching makes re-runs of unchanged chunks free.
 
 import JSZip from 'jszip';
-import { fetchTerrainData } from './terrain';
-import { exportToGLB } from './export3d';
-import { computeUnitsPerMeter } from './googleBakeCore';
-import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from './google3dTiles';
+import { fetchTerrainData } from '@mapng/bake/terrain';
+import { exportToGLB } from '@mapng/bake/export3d';
+import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
+import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from '@mapng/bake/google3dTiles';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
 import { computeRouteFrame } from './routeStitch';
 import { createRouteProgress } from './routeProgress';
-import { zipSidecarAvailable, compressZipViaSidecar } from './zipExportSidecar';
+import { zipSidecarAvailable, compressZipViaSidecar } from '@mapng/bake/zipExportSidecar';
 
 const pad2 = (n) => String(n).padStart(2, '0');
 

@@ -11,9 +11,9 @@
 // failure modes (geoid drift, per-chunk DEM disagreement at seams) are
 // controllable.
 
-import { conformTilesToFloor } from '../../services/tileGroundConform.js';
+import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
 import { buildCombinedRouteTerrain, sampleHeightAt, sampleCombinedHeightMap } from '../../services/routeTerrainComposite.js';
-import { SCENE_SIZE } from '../../services/googleBakeCore.js';
+import { SCENE_SIZE } from '@mapng/bake/googleBakeCore';
 
 const HALF = SCENE_SIZE / 2;
 const M_PER_DEG_LAT = 111320;

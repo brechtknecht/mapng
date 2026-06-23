@@ -18,7 +18,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { fetchTerrainHeadless } from './terrainHeadless.mjs';
 import { readMbkContainer } from './binContainer.mjs';
-import { fetchOSMData } from '../../services/osm.js';
+import { fetchOSMData } from '@mapng/fetching';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, '../..');

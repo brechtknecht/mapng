@@ -511,14 +511,14 @@ import {
 } from 'lucide-vue-next';
 import { buildRunConfiguration as buildRunConfigurationBase } from '../../services/runConfiguration';
 import { generateHeightmapBlob, generateTerBlob } from '../../services/batchExports';
-import { exportToGLB, exportToDAE } from '../../services/export3d';
-import { exportGeoTiff } from '../../services/exportGeoTiff';
+import { exportToGLB, exportToDAE } from '@mapng/bake/export3d';
+import { exportGeoTiff } from '@mapng/bake/exportGeoTiff';
 import { buildCommonTraceMetadata, downloadJsonFile } from '../../services/traceability';
 import { createWGS84ToLocal } from '@mapng/geo';
-import { exportBeamNGLevel } from '../../services/exportBeamNGLevel';
-import { disposeSidecarZip } from '../../services/zipExportSidecar';
-import { prepareCroppedTerrainData } from '../../services/cropTerrain';
-import { getBeamNGFlavorOptions } from '../../services/beamngFlavorCatalog.js';
+import { exportBeamNGLevel } from '@mapng/bake/exportBeamNGLevel';
+import { disposeSidecarZip } from '@mapng/bake/zipExportSidecar';
+import { prepareCroppedTerrainData } from '@mapng/bake/cropTerrain';
+import { getBeamNGFlavorOptions } from '@mapng/bake/beamngFlavorCatalog';
 import { reverseLocationName } from '@mapng/fetching';
 
 const { t } = useI18n({ useScope: 'global' });

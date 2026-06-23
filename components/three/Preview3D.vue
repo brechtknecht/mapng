@@ -566,7 +566,7 @@ import FlyControls3D from "./FlyControls3D.vue";
 import CSMLight from "./CSMLight.vue";
 import SurroundingTerrain3D from "./SurroundingTerrain3D.vue";
 import { useGoogleTilesStore } from "../../stores/googleTilesStore.js";
-import { computeUnitsPerMeter } from "../../services/google3dTiles.js";
+import { computeUnitsPerMeter } from '@mapng/bake/google3dTiles';
 
 const props = defineProps(["terrainData"]);
 

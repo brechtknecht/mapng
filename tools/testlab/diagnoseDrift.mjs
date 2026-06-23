@@ -3,8 +3,8 @@
 // (inpaint-guessed D) or (b) steep local terrain (DEM-vs-photogrammetry mismatch
 // beyond the detection band). Run: node tools/testlab/diagnoseDrift.mjs <name>
 
-import { conformTilesToFloor } from '../../services/tileGroundConform.js';
-import { sampleHeightAtScene, SCENE_SIZE } from '../../services/googleBakeCore.js';
+import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
+import { sampleHeightAtScene, SCENE_SIZE } from '@mapng/bake/googleBakeCore';
 import { loadCapture } from './captureStore.mjs';
 
 const name = process.argv[2] || 'muc_isar';

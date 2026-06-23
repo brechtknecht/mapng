@@ -24,7 +24,7 @@
 import { computed } from 'vue';
 import { useI18n } from 'vue-i18n';
 
-import { VALID_SQUARE_EXPORT_RESOLUTIONS } from '../../services/uploadBounds';
+import { VALID_SQUARE_EXPORT_RESOLUTIONS } from '@mapng/bake/uploadBounds';
 
 const { t } = useI18n({ useScope: 'global' });
 

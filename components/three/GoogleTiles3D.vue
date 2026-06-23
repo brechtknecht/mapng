@@ -2,7 +2,7 @@
 import { computed } from 'vue';
 import { storeToRefs } from 'pinia';
 import { useGoogleTilesStore } from '../../stores/googleTilesStore.js';
-import { computeUnitsPerMeter, sampleHeightAtScene, TILE_RENDER_BIAS_M } from '../../services/google3dTiles.js';
+import { computeUnitsPerMeter, sampleHeightAtScene, TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 
 const props = defineProps({
   terrainData: { required: true },

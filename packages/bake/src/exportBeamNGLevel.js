@@ -13,7 +13,7 @@ import {
   TILE_RENDER_BIAS_M,
 } from './google3dTiles.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
-import beamngGlbToDaeScript from '../scripts/beamng_glb_to_dae.py?raw';
+import beamngGlbToDaeScript from '../../../scripts/beamng_glb_to_dae.py?raw';
 import { prepareCroppedTerrainData } from './cropTerrain.js';
 import { applyBuildingFoundations } from './buildingFoundations.js';
 import { ColladaExporter } from './ColladaExporter.js';

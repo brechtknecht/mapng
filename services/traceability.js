@@ -1,4 +1,4 @@
-import { getGPXZRateLimitInfo } from './terrain.js';
+import { getGPXZRateLimitInfo } from '@mapng/bake/terrain';
 
 export const getBuildTrace = () => {
   return {

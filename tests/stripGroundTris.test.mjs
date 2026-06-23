@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stripGroundTris } from '../services/googleBakeCore.js';
+import { stripGroundTris } from '@mapng/bake/googleBakeCore';
 
 // Flat terrain at height 0, so a vertex's metres-Y == its height above terrain.
 const DATA = {

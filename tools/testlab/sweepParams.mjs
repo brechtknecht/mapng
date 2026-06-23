@@ -2,7 +2,7 @@
 // residual AND the fraction of ground verts that get worse (Felix's "drift grows
 // in some places"). Run: node tools/testlab/sweepParams.mjs <name>
 
-import { conformTilesToFloor } from '../../services/tileGroundConform.js';
+import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
 import { loadCapture } from './captureStore.mjs';
 
 const name = process.argv[2] || 'muc_isar';

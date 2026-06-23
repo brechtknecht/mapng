@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { exportGeoTiff } from '../services/exportGeoTiff.js';
+import { exportGeoTiff } from '@mapng/bake/exportGeoTiff';
 
 const center = { lat: 40.1234, lng: -105.1234 };
 

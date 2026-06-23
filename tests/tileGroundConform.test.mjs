@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { conformTilesToFloor } from '../services/tileGroundConform.js';
+import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
 
 // Flat terrain at height 0 → a vertex's metres-Y IS its residual above the floor.
 // bounds chosen so the AOI is ~100 m wide ⇒ unitsPerMeter ≈ 1 (1 scene unit ≈ 1 m).

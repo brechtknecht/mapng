@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createScalarFieldGrid } from '../services/scalarFieldGrid.js';
+import { createScalarFieldGrid } from '@mapng/bake/scalarFieldGrid';
 
 // SCENE_SIZE is 100; unitsPerMeter=1 → 1 scene unit == 1 metre, cells == cellM.
 const UPM = 1;

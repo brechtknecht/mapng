@@ -12,7 +12,7 @@
 // Coordinates match the bake: SCENE_SIZE=100, X/Z in scene units [-50,50],
 // Y in metres above the .ter datum. Pure / DOM-free.
 
-import { SCENE_SIZE, computeUnitsPerMeter } from '../../services/googleBakeCore.js';
+import { SCENE_SIZE, computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 
 const HALF = SCENE_SIZE / 2;
 
