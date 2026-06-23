@@ -1,7 +1,7 @@
-import { fetchOSMData, fetchOSMDataWithInfo, getLastOSMRequestInfo, getOSMQueryParameters } from "./osm";
-import { parseTifFile } from "./tifLoader";
+import { fetchOSMData, fetchOSMDataWithInfo, getLastOSMRequestInfo, getOSMQueryParameters } from '@mapng/fetching';
+import { parseTifFile } from '@mapng/fetching';
 export { parseTifFile };
-import { parseLazFile } from "./lazLoader";
+import { parseLazFile } from '@mapng/fetching';
 export { parseLazFile };
 import { rasterizeLazOffThread } from "./lazClient";
 import { generateOSMTexture, generateHybridTexture } from "./osmTexture";
@@ -12,7 +12,7 @@ import {
 } from "./resamplerClient";
 import { getOutputBounds } from "./terrainResampler";
 import { createLocalToWGS84 } from '@mapng/geo';
-import { fetchKron86GridForBounds, isWithinKron86Coverage } from "./kron86.js";
+import { fetchKron86GridForBounds, isWithinKron86Coverage } from '@mapng/fetching';
 import {
   getElevationCache,
   putElevationCache,
@@ -20,7 +20,7 @@ import {
   usgsCacheKey,
   terrainTileCacheKey,
   satelliteTileCacheKey,
-} from "./elevationCache.js";
+} from '@mapng/fetching';
 
 // Constants
 const TILE_SIZE = 256;

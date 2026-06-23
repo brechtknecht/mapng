@@ -1,4 +1,4 @@
-import { deserializeGroup, persistBakeRecords } from './googleTilesPersistentCache.js';
+import { deserializeGroup, persistBakeRecords } from '@mapng/fetching';
 
 // Browser client for the Google 3D Tiles bake sidecar (the vite dev-server
 // job API in scripts/viteGoogleBakePlugin.mjs + scripts/googleBakeWorker.mjs).

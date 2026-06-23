@@ -28,7 +28,7 @@ import {
   ensureJobAndTileStates,
   summarizeStageTimings,
 } from './batchRuntime.js';
-import { classifyError, runWithRetry } from './retryPolicy.js';
+import { classifyError, runWithRetry } from '@mapng/fetching';
 import { createTaskQueue, createRateLimiter } from './taskQueues.js';
 import { installBatchFetchCache, clearBatchCache } from './batchCache.js';
 

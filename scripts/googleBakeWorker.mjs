@@ -56,7 +56,7 @@ import {
   installCaptureLoader,
   getCapturedImage,
 } from './headlessTilesEnv.mjs';
-import { registerTilesAuth, preflightTilesAuth } from '../services/tilesAuth.js';
+import { registerTilesAuth, preflightTilesAuth } from '@mapng/fetching/tilesAuth';
 import {
   computeAoiFrame,
   buildSweepStations,

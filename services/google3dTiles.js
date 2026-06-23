@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { TilesRenderer, GoogleCloudAuthPlugin, WGS84_ELLIPSOID } from '3d-tiles-renderer';
-import { registerTilesAuth, preflightTilesAuth } from './tilesAuth.js';
+import { registerTilesAuth, preflightTilesAuth } from '@mapng/fetching';
 import {
   computeAoiFrame,
   buildSweepStations,
@@ -16,7 +16,7 @@ import {
 } from './googleBakeCore.js';
 import { conformTilesToFloor } from './tileGroundConform.js';
 import { buildGroundMask } from './groundMask.js';
-import { loadPersistedBake, persistBake, deletePersistedBake } from './googleTilesPersistentCache.js';
+import { loadPersistedBake, persistBake, deletePersistedBake } from '@mapng/fetching';
 import {
   sidecarAvailable,
   bakeViaSidecar,

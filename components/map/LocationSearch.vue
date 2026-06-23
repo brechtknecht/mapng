@@ -85,7 +85,7 @@
 import { ref, onMounted, onUnmounted } from 'vue';
 import { useI18n } from 'vue-i18n';
 import { Search, Loader2, X, MapPinOff } from 'lucide-vue-next';
-import { searchLocation, getShortName, getLocationTypeIcon } from '../../services/nominatim';
+import { searchLocation, getShortName, getLocationTypeIcon } from '@mapng/fetching';
 
 const { t } = useI18n({ useScope: 'global' });
 

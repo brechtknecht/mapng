@@ -519,7 +519,7 @@ import { exportBeamNGLevel } from '../../services/exportBeamNGLevel';
 import { disposeSidecarZip } from '../../services/zipExportSidecar';
 import { prepareCroppedTerrainData } from '../../services/cropTerrain';
 import { getBeamNGFlavorOptions } from '../../services/beamngFlavorCatalog.js';
-import { reverseLocationName } from '../../services/nominatim';
+import { reverseLocationName } from '@mapng/fetching';
 
 const { t } = useI18n({ useScope: 'global' });
 

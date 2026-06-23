@@ -9,7 +9,7 @@
 // VITE_ROUTES_PROXY_URL to a same-origin proxy that forwards to the endpoint.
 
 const ROUTES_ENDPOINT =
-  import.meta.env.VITE_ROUTES_PROXY_URL ||
+  import.meta.env?.VITE_ROUTES_PROXY_URL ||
   'https://routes.googleapis.com/directions/v2:computeRoutes';
 
 // Resolve the credential for the Routes API.
@@ -20,9 +20,9 @@ const ROUTES_ENDPOINT =
 // EEA block on 3D Tiles; that token cannot authenticate Routes, so we ignore it.
 function resolveRoutesKey(explicit) {
   if (explicit) return explicit;
-  const routesKey = import.meta.env.VITE_GOOGLE_ROUTES_API_KEY;
+  const routesKey = import.meta.env?.VITE_GOOGLE_ROUTES_API_KEY;
   if (routesKey) return routesKey;
-  const mapsKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+  const mapsKey = import.meta.env?.VITE_GOOGLE_MAPS_API_KEY;
   if (mapsKey && mapsKey.startsWith('AIza')) return mapsKey;
   return null;
 }
@@ -81,7 +81,7 @@ export async function fetchRoute({ start, end, apiKey, signal, travelMode = 'DRI
   if (!start || !end) throw new Error('fetchRoute: start and end are required');
   const key = resolveRoutesKey(apiKey);
   if (!key) {
-    const maps = import.meta.env.VITE_GOOGLE_MAPS_API_KEY;
+    const maps = import.meta.env?.VITE_GOOGLE_MAPS_API_KEY;
     const ionHint =
       maps && !maps.startsWith('AIza')
         ? ' Your VITE_GOOGLE_MAPS_API_KEY looks like a Cesium ion token, which the Routes API cannot use.'

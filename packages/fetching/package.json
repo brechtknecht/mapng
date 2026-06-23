@@ -1,0 +1,19 @@
+{
+  "name": "@mapng/fetching",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./*": "./src/*.js"
+  },
+  "dependencies": {
+    "@mapng/geo": "0.0.0",
+    "fast-xml-parser": "^5.7.2",
+    "geotiff": "^2.1.4-beta.1",
+    "jszip": "^3.10.1",
+    "proj4": "^2.20.2",
+    "three": "^0.162.0"
+  }
+}

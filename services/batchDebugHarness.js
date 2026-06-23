@@ -4,7 +4,7 @@ import {
   summarizeStageTimings,
   TILE_STATES,
 } from './batchRuntime.js';
-import { classifyError, computeBackoffMs } from './retryPolicy.js';
+import { classifyError, computeBackoffMs } from '@mapng/fetching';
 
 export function runBatchDebugHarness() {
   const cfg = {

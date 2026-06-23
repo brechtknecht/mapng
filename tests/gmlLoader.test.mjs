@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import JSZip from 'jszip';
 
-import { parseGmlText } from '../services/tifLoader.js';
-import { parseTifFile } from '../services/tifLoader.js';
+import { parseGmlText } from '@mapng/fetching/gmlLoader';
+import { parseTifFile } from '@mapng/fetching/tifLoader';
 
 test('parseGmlText parses a rectified grid coverage into raster metadata', async () => {
   const gml = `<?xml version="1.0" encoding="UTF-8"?>
