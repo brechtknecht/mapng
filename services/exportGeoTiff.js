@@ -1,5 +1,5 @@
 import { writeArrayBuffer } from 'geotiff';
-import { getGeoTiffCoordsWGS84 } from './geoUtils.js';
+import { getGeoTiffCoordsWGS84 } from '@mapng/geo';
 
 const buildWgs84GeoTiffExport = async (terrainData, center, timestamp) => {
     const { width, height, heightMap } = terrainData;

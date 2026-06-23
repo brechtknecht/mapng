@@ -3,7 +3,7 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
 import JSZip from "jszip";
 import { textures } from "./textureGenerator.js";
-import { createMetricProjector } from "./geoUtils.js";
+import { createMetricProjector, clamp } from '@mapng/geo';
 import { fetchSurroundingTiles, POSITIONS } from "./surroundingTiles.js";
 import { ColladaExporter } from './ColladaExporter.js';
 import { getOrBakeGoogle3DTiles, computeUnitsPerMeter, getGoogleTilesZOffset } from './google3dTiles.js';
@@ -1826,7 +1826,6 @@ const EXPORT_SURROUND_PROFILE = {
 };
 const SURROUND_TILE_MAX_NODATA_RATIO = 0.25;
 
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 
 const smoothstep = (edge0, edge1, x) => {
   const t = clamp((x - edge0) / Math.max(edge1 - edge0, 1e-6), 0, 1);

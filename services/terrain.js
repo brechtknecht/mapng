@@ -11,7 +11,7 @@ import {
   resampleImageOffThread,
 } from "./resamplerClient";
 import { getOutputBounds } from "./terrainResampler";
-import { createLocalToWGS84 } from "./geoUtils";
+import { createLocalToWGS84 } from '@mapng/geo';
 import { fetchKron86GridForBounds, isWithinKron86Coverage } from "./kron86.js";
 import {
   getElevationCache,

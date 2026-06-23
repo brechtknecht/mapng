@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { createMetricProjector } from './geoUtils.js';
+import { createMetricProjector } from '@mapng/geo';
 
 // Shared, DOM-free core of the Google 3D Tiles bake — everything here runs
 // both in the browser (services/google3dTiles.js) and headless in Node

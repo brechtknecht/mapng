@@ -73,7 +73,7 @@ import {
 } from '../services/googleBakeCore.js';
 import { conformTilesToFloor } from '../services/tileGroundConform.js';
 import { buildGroundMask } from '../services/groundMask.js';
-import { createMetricProjector } from '../services/geoUtils.js';
+import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
 // stdout is the NDJSON protocol channel — push ALL logging to stderr,

@@ -514,7 +514,7 @@ import { generateHeightmapBlob, generateTerBlob } from '../../services/batchExpo
 import { exportToGLB, exportToDAE } from '../../services/export3d';
 import { exportGeoTiff } from '../../services/exportGeoTiff';
 import { buildCommonTraceMetadata, downloadJsonFile } from '../../services/traceability';
-import { createWGS84ToLocal } from '../../services/geoUtils';
+import { createWGS84ToLocal } from '@mapng/geo';
 import { exportBeamNGLevel } from '../../services/exportBeamNGLevel';
 import { disposeSidecarZip } from '../../services/zipExportSidecar';
 import { prepareCroppedTerrainData } from '../../services/cropTerrain';

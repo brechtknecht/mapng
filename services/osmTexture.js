@@ -1,4 +1,4 @@
-import { createWGS84ToLocal } from "./geoUtils.js";
+import { createWGS84ToLocal } from '@mapng/geo';
 import { buildRoadNetwork, getEffectiveRoadLayer, mergeLinearRoadSegments } from "./roadNetwork.js";
 
 // Colors aligned to OSM Carto style definitions

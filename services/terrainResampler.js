@@ -1,6 +1,6 @@
 import proj4 from 'proj4';
 import * as GeoTIFF from 'geotiff';
-import { createLocalToWGS84 } from './geoUtils';
+import { createLocalToWGS84, bilinear } from '@mapng/geo';
 
 const normalizeLng = (lng) => ((((lng + 180) % 360) + 360) % 360) - 180;
 
@@ -366,32 +366,7 @@ export const resampleToMeterGrid = async (
         }
     }
 
-    // Helper for bilinear interpolation
-    const bilinear = (raster, w, x, y, noDataVal) => {
-        const x0 = Math.floor(x);
-        const y0 = Math.floor(y);
-        const dx = x - x0;
-        const dy = y - y0;
-        
-        const i00 = y0 * w + x0;
-        const i10 = i00 + 1;
-        const i01 = (y0 + 1) * w + x0;
-        const i11 = i01 + 1;
-        
-        // Boundary check
-        if (i00 < 0 || i11 >= raster.length) return noDataVal;
-
-        const h00 = raster[i00];
-        const h10 = raster[i10];
-        const h01 = raster[i01];
-        const h11 = raster[i11];
-
-        if (!Number.isFinite(h00) || !Number.isFinite(h10) || !Number.isFinite(h01) || !Number.isFinite(h11)) return noDataVal;
-        if (h00 === noDataVal || h10 === noDataVal || h01 === noDataVal || h11 === noDataVal) return noDataVal;
-
-        const interp = (1 - dy) * ((1 - dx) * h00 + dx * h10) + dy * ((1 - dx) * h01 + dx * h11);
-        return Number.isFinite(interp) ? interp : noDataVal;
-    };
+    // Bilinear interpolation now lives in @mapng/geo (verbatim).
 
     // Iterate over the target grid (1m per pixel)
     for (let y = 0; y < height; y++) {

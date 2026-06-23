@@ -13,7 +13,7 @@
 // scalarFieldGrid.js already satisfies.
 
 import { SCENE_SIZE, computeUnitsPerMeter } from './googleBakeCore.js';
-import { createMetricProjector } from './geoUtils.js';
+import { createMetricProjector } from '@mapng/geo';
 
 const HALF = SCENE_SIZE / 2;
 

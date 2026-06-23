@@ -5,7 +5,7 @@ import { exportTer } from './exportTer.js';
  */
 
 import { encode } from 'fast-png';
-import { createWGS84ToLocal } from './geoUtils.js';
+import { createWGS84ToLocal } from '@mapng/geo';
 import { exportGeoTiff } from './exportGeoTiff.js';
 
 const isJsonMimeType = (mime = '') => {
