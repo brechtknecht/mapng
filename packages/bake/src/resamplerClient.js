@@ -3,7 +3,7 @@
  * Falls back to main-thread resampling if workers are unavailable.
  */
 import proj4 from 'proj4';
-import { resampleToMeterGrid, resampleImageToMeterGrid } from './terrainResampler';
+import { resampleToMeterGrid, resampleImageToMeterGrid } from './terrainResampler.js';
 
 let worker = null;
 let messageId = 0;

@@ -4,13 +4,13 @@ export { parseTifFile };
 import { parseLazFile } from '@mapng/fetching';
 export { parseLazFile };
 import { rasterizeLazOffThread } from '@mapng/fetching';
-import { generateOSMTexture, generateHybridTexture } from "./osmTexture";
+import { generateOSMTexture, generateHybridTexture } from "./osmTexture.js";
 import * as GeoTIFF from "geotiff";
 import {
   resampleHeightAndImageOffThread,
   resampleImageOffThread,
-} from "./resamplerClient";
-import { getOutputBounds } from "./terrainResampler";
+} from "./resamplerClient.js";
+import { getOutputBounds } from "./terrainResampler.js";
 import { createLocalToWGS84 } from '@mapng/geo';
 import { fetchKron86GridForBounds, isWithinKron86Coverage } from '@mapng/fetching';
 import {

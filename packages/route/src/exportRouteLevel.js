@@ -23,10 +23,10 @@ import { exportToGLB } from '@mapng/bake/export3d';
 import { exportBeamNGLevel } from '@mapng/bake/exportBeamNGLevel';
 import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION, TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
-import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
-import { computeRouteFrame } from './routeStitch';
-import { buildCombinedRouteTerrain, sampleCombinedHeightMap } from './routeTerrainComposite';
-import { createRouteProgress } from './routeProgress';
+import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
+import { computeRouteFrame } from './routeStitch.js';
+import { buildCombinedRouteTerrain, sampleCombinedHeightMap } from './routeTerrainComposite.js';
+import { createRouteProgress } from './routeProgress.js';
 
 const DEG = Math.PI / 180;
 const M_PER_DEG_LAT = 111320;

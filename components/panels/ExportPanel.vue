@@ -509,11 +509,11 @@ import { useI18n } from 'vue-i18n';
 import {
   Download, ChevronDown, Loader2, Mountain, Box, Trees, Layers, Route, FileCode, FileJson, PackageOpen
 } from 'lucide-vue-next';
-import { buildRunConfiguration as buildRunConfigurationBase } from '../../services/runConfiguration';
-import { generateHeightmapBlob, generateTerBlob } from '../../services/batchExports';
+import { buildRunConfiguration as buildRunConfigurationBase } from '@mapng/batch/runConfiguration';
+import { generateHeightmapBlob, generateTerBlob } from '@mapng/batch/batchExports';
 import { exportToGLB, exportToDAE } from '@mapng/bake/export3d';
 import { exportGeoTiff } from '@mapng/bake/exportGeoTiff';
-import { buildCommonTraceMetadata, downloadJsonFile } from '../../services/traceability';
+import { buildCommonTraceMetadata, downloadJsonFile } from '@mapng/batch/traceability';
 import { createWGS84ToLocal } from '@mapng/geo';
 import { exportBeamNGLevel } from '@mapng/bake/exportBeamNGLevel';
 import { disposeSidecarZip } from '@mapng/bake/zipExportSidecar';

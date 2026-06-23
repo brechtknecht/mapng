@@ -9,7 +9,7 @@
  * positions in one pass, then extracts per-position data from shared canvases.
  */
 
-import { project, TERRAIN_ZOOM, fetchTerrainData } from './terrain';
+import { project, TERRAIN_ZOOM, fetchTerrainData } from './terrain.js';
 import { encode } from 'fast-png';
 import JSZip from 'jszip';
 

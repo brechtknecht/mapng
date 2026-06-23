@@ -18,9 +18,9 @@ import { fetchTerrainData } from '@mapng/bake/terrain';
 import { exportToGLB } from '@mapng/bake/export3d';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from '@mapng/bake/google3dTiles';
-import { getCorridorTier, resolveChunkSizeM } from './routeCorridor';
-import { computeRouteFrame } from './routeStitch';
-import { createRouteProgress } from './routeProgress';
+import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
+import { computeRouteFrame } from './routeStitch.js';
+import { createRouteProgress } from './routeProgress.js';
 import { zipSidecarAvailable, compressZipViaSidecar } from '@mapng/bake/zipExportSidecar';
 
 const pad2 = (n) => String(n).padStart(2, '0');

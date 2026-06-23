@@ -271,7 +271,7 @@ import {
   clearBatchState,
   clearBatchClientCache,
   resetFailedTiles,
-} from './services/batchJob';
+} from '@mapng/batch/batchJob';
 
 if (import.meta.env.DEV) {
   import('./services/batchDebugHarness.js');

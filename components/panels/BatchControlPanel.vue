@@ -252,7 +252,7 @@ import BatchExportOptions from '../batch/BatchExportOptions.vue';
 import BatchRunConfigControls from '../batch/BatchRunConfigControls.vue';
 import BaseButton from '../base/BaseButton.vue';
 import { probeGPXZLimits } from '@mapng/bake/terrain';
-import { cloneRateLimitInfo, downloadJsonFile } from '../../services/traceability';
+import { cloneRateLimitInfo, downloadJsonFile } from '@mapng/batch/traceability';
 
 const { t } = useI18n({ useScope: 'global' });
 

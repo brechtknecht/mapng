@@ -1,6 +1,6 @@
 import { defineStore } from 'pinia';
 import { ref, computed } from 'vue';
-import { loadBatchState } from '../services/batchJob';
+import { loadBatchState } from '@mapng/batch/batchJob';
 
 export const useMainStore = defineStore('main', () => {
   // --- Global State ---
