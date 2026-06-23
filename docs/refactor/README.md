@@ -16,6 +16,7 @@ byte-stable across every step. Each phase is shippable on its own.
 | [02-target-architecture.md](02-target-architecture.md) | The target package layout, package boundaries, dependency rules, and the two pipelines re-drawn on top of it. |
 | [03-migration-plan.md](03-migration-plan.md) | Phased, ordered, shippable steps. Each phase lists files moved, risk, and the verification gate. |
 | [04-conventions.md](04-conventions.md) | Engineering standards the refactor enforces: package template, import rules, naming, file-size budgets, test strategy, the god-file split playbook. |
+| [05-execution-log.md](05-execution-log.md) | What was actually executed vs planned, the deviations forced by the real dependency graph, and what is deliberately deferred (and why). **Read this for current state.** |
 
 ## Guiding principles
 
