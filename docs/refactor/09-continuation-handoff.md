@@ -34,8 +34,15 @@ needed to pick up cold is below.
        compute core. Partitioned by import-closure (move = export-private, not in
        bake's public-compute down-closure); zero bake→export cycle edges. Layer is
        now `geo < fetching < terrain < bake < export < {route,batch} < pipelines`.
-       ← *you are here; only **batch-in-worker** (08 §3) remains — a RUNTIME change,
-       not a mechanical move.*
+     - **batch-in-worker (08 §3) STARTED** — a batch encode Web Worker
+       (`batchEncodeWorker.js` + `batchEncodeClient.js`, main-thread fallback)
+       now runs the **heightmap PNG, .ter, GeoTIFF** encodes off-thread
+       (`ff3f956`, `5321e9a`), byte-identical by construction, bundle
+       renderer-free. Heavy work was already off-thread (resampling→worker;
+       google-tiles bake + zip→node sidecar). ← *you are here. Remaining: roadmask
+       (OffscreenCanvas, parity risk — deferred), zip assembly (low priority);
+       canvas textures + GLB/DAE + download can't move. Needs an in-app grid
+       verify of the offloaded encodes.*
 - **Remaining offenders (0 real + 1 vendored)** in `tools/lint-size-allow.json`:
   | file | LOC | target | oracle? |
   |---|---|---|---|
