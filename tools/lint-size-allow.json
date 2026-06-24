@@ -5,7 +5,6 @@
   "packages/bake/src/terrain.js": "god-file 1986 LOC — decompose into terrain/* (06 step 7)",
   "packages/bake/src/osmTexture.js": "god-file 1886 LOC — decompose into osm/* (06 step 6)",
   "packages/batch/src/batchJob.js": "god-file 1561 LOC — decompose into batch grid/state/run (06 step 4)",
-  "packages/bake/src/googleBakeCore.js": "god-file 1218 LOC — decompose into scene/* + tiles/* (06 steps 1-2)",
   "packages/bake/src/beamngFlavorCatalog.js": "1008 LOC data table — move to materials/ data module (06 step 10)",
   "packages/bake/src/osmTerrainMaterials.js": "960 LOC data — move to materials/ (06 step 10)",
   "packages/bake/src/google3dTiles.js": "862 LOC — decompose into tiles/* orchestration (06 step 3)",
