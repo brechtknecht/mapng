@@ -46,6 +46,25 @@ geo < fetching < terrain < bake < export < { route, batch } < pipelines
 - **Consumers to repoint:** route (`@mapng/bake/export3d`,
   `@mapng/bake/exportBeamNGLevel`), batch (`@mapng/bake/export3d`,
   `@mapng/bake/exportTer`, `@mapng/bake/exportGeoTiff`), the Vue app.
+- **Package seam surfaced by the 9a/9b decomposition (NEW):** inside `beamng/*`
+  there is now a clean, acyclic **compute → serialize** split, and it's the
+  natural internal boundary if BeamNG export is carved into its own
+  `@mapng/beamng` format package during the lift (instead of folding everything
+  into `@mapng/export`):
+  - **compute** (geometry/number generators → plain JS objects/blobs):
+    `worldMath`, `format`, `roadStyle`, `decalRoads`, `roadArchitectProfiles`,
+    `roadArchitectSession`, `meshRoads`, `report`, `levelZip`, `barriers` (`core`);
+    `water`, `forest` (`io` only because they read the io flavor-catalog's lazy
+    fetch). The renderer/canvas io: `textures`, `meshAssets`, `googleTilesAssets`.
+  - **serialize** (computed artifacts → BeamNG level file tree): `levelArchive`
+    → `levelFiles` + `missionGroup` + `levelLua` — **pure `core`**, takes
+    everything via an explicit ctx, imports no renderer/canvas/fetch/`?raw`. This
+    is the headless-testable core (oracle: `tests/beamngArchiveHeadless.test.mjs`).
+  - The dependency arrow is **serialize ← orchestrator → compute** (the flow
+    `exportBeamNGLevel` entry depends on both; serialize does NOT depend on
+    compute). If split into packages, `@mapng/beamng-format` (serialize, pure)
+    could even sit below the compute/io. Don't create the package now —
+    decompose-first; this just records where the seam is for the lift.
 
 ### 3. `@mapng/batch` → **run in a worker** (runtime re-architecture, NOT a rename)
 - Clarified: `batch` is the grid-export orchestrator (export an N×M grid of
@@ -68,9 +87,18 @@ geo < fetching < terrain < bake < export < { route, batch } < pipelines
    - `export3d.js` (2163) → `scene3d/*` (osmMeshes, tilePlacement3d,
      colladaExport, glbExport). Canvas/THREE — use the headless render oracle
      (`tools/testlab/canvasShim.mjs`).
-   - `exportBeamNGLevel.js` (5558) → `beamng/*` (terWriter, levelMaterials,
-     forestItems, osmObjectBoxes, decalRoads/meshRoads, levelManifest, levelZip,
-     googleTilePlacement). Canvas/zip — oracle + (ideally) a real-bake ZIP hash.
+   - `exportBeamNGLevel.js` (5558) → `beamng/*`. **9a DONE** (`4e76859`):
+     ~95 helpers → 15 modules (worldMath/format/roadStyle/decalRoads/
+     roadArchitect{Profiles,Session}/meshRoads/report/levelZip/barriers +
+     textures/meshAssets/googleTilesAssets/water/forest). **9b DONE** (`b497038`):
+     archive serialization → `levelArchive`/`levelFiles`/`missionGroup`/`levelLua`
+     (pure core, ctx-threaded) + headless oracle. Entry now 748 LOC. **9c TODO:**
+     extract the ~480-line compute phase → `beamng/levelArtifacts.js` (flow, via a
+     small progress-tracker passed in), thin the orchestrator <500, barrel
+     `src/exportBeamNGLevel.js`, drop the allowlist entry. 9c's compute path can't
+     run headless (google3dTiles WebGLRenderer + canvas + fetch) — verify the
+     artifacts→orchestrator field contract statically (as 9b did) and confirm with
+     ONE real in-app bake.
    - `batchJob.js` (1561) → grid / state / run modules.
 2. **Lift folders into `@mapng/terrain` and `@mapng/export`** (mechanical move +
    repoint imports + update `tools/check-boundaries.mjs` ALLOWED graph + add the
