@@ -51,6 +51,18 @@ export function installCanvasShim() {
     return { style: {}, setAttribute() {}, click() {}, remove() {} };
   };
 
+  // THREE calls document.createElementNS('http://www.w3.org/1999/xhtml', name)
+  // for its internal canvas/img elements (three.module.js createElementNS). Map
+  // it through the same factory so headless THREE geometry/export code runs.
+  const prevCreateNS = globalThis.document.createElementNS;
+  globalThis.document.createElementNS = (_ns, tag) => {
+    const t = String(tag).toLowerCase();
+    if (t === 'canvas') return makeCanvas();
+    if (t === 'img') return new Image();
+    if (typeof prevCreateNS === 'function') return prevCreateNS.call(globalThis.document, _ns, tag);
+    return { style: {}, setAttribute() {}, click() {}, remove() {} };
+  };
+
   if (typeof globalThis.Image === 'undefined') globalThis.Image = Image;
 
   // The texture code snapshots blobs to object URLs purely as opaque handles —
