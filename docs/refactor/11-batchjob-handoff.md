@@ -1,5 +1,26 @@
 # 11 — batchJob.js Decomposition (cold-start handoff)
 
+> ## ✅ DONE (`9332706`)
+> `batchJob.js` 1561 → **65-LOC re-export barrel + 13 `@layer`-tagged siblings**
+> (`grid` `schedulerConfig` `batchState` `batchReport` `tileTiming` `tileQueues` =
+> core; `statePersistence` `memorySampling` `tileSnapshot` `batchDownloads`
+> `compositeHeightmap` = io; `processTile` `batchRun` = flow). Public 15-name surface
+> preserved; allowlist entry dropped (ratchet empty of real work). Headless oracle
+> `tests/batchCoreHeadless.test.mjs` pins grid/schedulerConfig/batchState/batchReport
+> (5 golden hashes). Gate **102 tests** + boundaries + size + build + worker + dev-boot
+> all green. `processTile(state, tile, ctx, signal)` is a clean fn of explicit inputs —
+> the **batch-in-worker seam** (08 §3) is set up.
+>
+> **OUTSTANDING (headless can't cover the runner):** a real in-app **grid batch
+> export** (a 2×2, with + without Google tiles) to confirm `runBatchJob`/`processTile`
+> end-to-end, exactly as the single-tile/route bake confirmed exportBeamNGLevel.
+> The pure core is oracle-pinned; the renderer-coupled runner is verbatim-moved +
+> build-checked but not yet run live on this branch.
+>
+> The rest of this doc is the original cold-start brief, kept for provenance.
+
+---
+
 Single entry point for a fresh thread decomposing the **last real god-file**,
 `packages/batch/src/batchJob.js` (**1561 LOC**). Read **this** first; it is
 self-contained. For the general refactor context skim

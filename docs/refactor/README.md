@@ -21,7 +21,7 @@ byte-stable across every step. Each phase is shippable on its own.
 | [08-package-architecture.md](08-package-architecture.md) | The decided next package architecture (lift `terrain/*`→`@mapng/terrain`, `scene3d/*`+exporters→`@mapng/export`; batch-in-worker). |
 | [09-continuation-handoff.md](09-continuation-handoff.md) | **Single cold-start entry for the ongoing `@mapng/*` god-file decomposition.** Current state, the proven recipe, the headless oracle, remaining offenders. |
 | [10-exportbeamng-handoff.md](10-exportbeamng-handoff.md) | Dedicated handoff for `exportBeamNGLevel.js` (5558→`beamng/*`). **DONE & bake-verified** (9a/9b/9c). |
-| [11-batchjob-handoff.md](11-batchjob-handoff.md) | **Dedicated cold-start handoff for the last real god-file** `batchJob.js` (1561→`grid/config/state/report/processTile/…`): concrete seams + the worker boundary it sets up. **Start here next.** |
+| [11-batchjob-handoff.md](11-batchjob-handoff.md) | Handoff for `batchJob.js` (1561→65-LOC barrel + 13 layered modules). **DONE** (`9332706`); one outstanding in-app grid-batch run. Decomposition phase complete — next is the package lifts (08). |
 
 ## Guiding principles
 

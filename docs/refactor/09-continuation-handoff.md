@@ -14,26 +14,29 @@ needed to pick up cold is below.
   **Local only — NOT pushed.** Working tree clean, everything green.
 - **Two-phase plan (decided with maintainer, see §6):**
   1. **Decompose** the remaining god-files in-place into `<500` modules
-     (the proven recipe, §2). ← *`exportBeamNGLevel.js` ✅ DONE & bake-verified
-     (9a `4e76859` / 9b `b497038` / 9c `0f6d49e`); `batchJob.js` is the last one —
-     see **[11-batchjob-handoff.md](11-batchjob-handoff.md)**.*
+     (the proven recipe, §2). ✅ **ALL DONE** — `exportBeamNGLevel.js` (9a `4e76859`
+     / 9b `b497038` / 9c `0f6d49e`, bake-verified) and `batchJob.js` (`9332706`,
+     see **[11-batchjob-handoff.md](11-batchjob-handoff.md)**) are the last two.
      (`terrain.js` ✅ `8f14ff9`; `export3d.js` ✅ `636122c` — see §6a/§6b.)
+     **The size ratchet is now empty of real work** (only vendored ColladaExporter
+     remains). ← *you are here; next is phase 2.*
   2. **Lift** the clean module folders into new packages `@mapng/terrain` and
      `@mapng/export`, then re-architect `@mapng/batch` to run off-main-thread in
-     a worker.
-- **Remaining offenders (1 real + 1 vendored)** in `tools/lint-size-allow.json`:
+     a worker. **`processTile.js` is the worker seam** (08 §3) — already a clean
+     function of explicit inputs.
+- **Remaining offenders (0 real + 1 vendored)** in `tools/lint-size-allow.json`:
   | file | LOC | target | oracle? |
   |---|---|---|---|
   | ~~`exportBeamNGLevel.js`~~ | ~~5558~~ | ✅ `beamng/*` (18 modules, 162-LOC entry) | done — 3 golden oracles + real bake |
-  | `packages/batch/src/batchJob.js` | 1561 | `grid/config/state/report/processTile/…` (→ **doc 11**) | pure core yes; runner no (export3d→WebGLRenderer) |
+  | ~~`batchJob.js`~~ | ~~1561~~ | ✅ 65-LOC barrel + 13 layered modules (`9332706`) | pure core yes (`batchCoreHeadless`); runner = in-app grid run (outstanding) |
   | `packages/bake/src/ColladaExporter.js` | 697 | — | VENDORED, permanent exempt |
 - **Recommended order:** ~~`terrain.js`~~ → ~~`export3d.js`~~ → ~~`exportBeamNGLevel.js`~~
-  → `batchJob.js` (**doc 11**) → package lifts → batch-in-worker.
+  → ~~`batchJob.js`~~ → **package lifts → batch-in-worker** (next).
 
 ## 1. Resume gate (run before and after every change)
 
 ```
-npm run check     # = boundaries + lint:size + test:all (97 tests)
+npm run check     # = boundaries + lint:size + test:all (102 tests)
 npm run build     # vite build of the Vue app
 node --check scripts/googleBakeWorker.mjs   # the node bake sidecar must parse
 ```
