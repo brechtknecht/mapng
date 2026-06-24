@@ -1,7 +1,7 @@
-// @mapng/bake — terrain + tiles + OSM + export compute core (one coupled
-// subsystem). Consumers should prefer subpath imports (@mapng/bake/terrain);
-// this flat barrel is browser-app convenience. resamplerWorker.js is a worker
-// entry (self.onmessage) and is intentionally NOT re-exported.
+// @mapng/bake — tiles + OSM + export compute core (one coupled subsystem).
+// Terrain fetch/resample now lives in @mapng/terrain (below bake). Consumers
+// should prefer subpath imports (@mapng/bake/export3d); this flat barrel is
+// browser-app convenience.
 export * from './src/ColladaExporter.js';
 export * from './src/beamngFlavorCatalog.js';
 export * from './src/buildingFoundations.js';
@@ -18,14 +18,11 @@ export * from './src/junctionGeometry.js';
 export * from './src/junctionMesh.js';
 export * from './src/junctionRaster.js';
 export * from './src/osmTerrainMaterials.js';
-export * from './src/osmTexture.js';
-export * from './src/roadNetwork.js';
 export * from './src/scalarFieldGrid.js';
-export * from './src/surroundingTiles.js';
-export * from './src/terrain.js';
-export * from './src/terrainResampler.js';
 export * from './src/textureGenerator.js';
 export * from './src/tileGroundConform.js';
 export * from './src/uploadBounds.js';
 export * from './src/zipExportSidecar.js';
-export * from './src/resamplerClient.js';
+// terrain.js, terrainResampler.js, resamplerClient.js, surroundingTiles.js,
+// osmTexture.js, roadNetwork.js + terrain/* + resample/* + osm/* lifted to
+// @mapng/terrain (refactor doc 08 step 2).

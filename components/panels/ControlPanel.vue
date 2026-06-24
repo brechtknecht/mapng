@@ -262,7 +262,7 @@ import JobStateControls from '../controls/JobStateControls.vue';
 import TerrainStats from '../controls/TerrainStats.vue';
 import LazMetaCard from '../controls/LazMetaCard.vue';
 import TifMetaCard from '../controls/TifMetaCard.vue';
-import { checkUSGSStatus, probeGPXZLimits } from '@mapng/bake/terrain';
+import { checkUSGSStatus, probeGPXZLimits } from '@mapng/terrain/terrain';
 import { downloadJsonFile } from '@mapng/batch/traceability';
 import { exportJobData, importJobData } from '@mapng/batch/jobData';
 import { buildRunConfiguration as buildRunConfigurationBase } from '@mapng/batch/runConfiguration';

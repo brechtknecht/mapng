@@ -5,7 +5,7 @@
  * retry passes, composite heightmap + report finalization).
  */
 
-import { fetchTerrainData } from '@mapng/bake/terrain';
+import { fetchTerrainData } from '@mapng/terrain/terrain';
 import { JOB_STATES, TILE_STATES, ensureJobAndTileStates } from './batchRuntime.js';
 import { isPausedOrCanceled, addTiming, updateCounts } from './tileTiming.js';
 import { checkpoint, sampleMemory } from './memorySampling.js';

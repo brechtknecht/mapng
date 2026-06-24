@@ -11,7 +11,7 @@
 // Usage:
 //   import { installCanvasShim } from '../tools/testlab/canvasShim.mjs';
 //   installCanvasShim();
-//   const { generateOSMTexture } = await import('@mapng/bake/osmTexture');
+//   const { generateOSMTexture } = await import('@mapng/terrain/osmTexture');
 import { createCanvas, Image, loadImage } from '@napi-rs/canvas';
 
 let installed = false;

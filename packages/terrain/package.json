@@ -1,5 +1,5 @@
 {
-  "name": "@mapng/bake",
+  "name": "@mapng/terrain",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -11,10 +11,9 @@
   "dependencies": {
     "@mapng/fetching": "0.0.0",
     "@mapng/geo": "0.0.0",
-    "@mapng/terrain": "0.0.0",
+    "fast-png": "^6.1.0",
     "geotiff": "^2.1.4-beta.1",
     "jszip": "^3.10.1",
-    "proj4": "^2.20.2",
-    "three": "^0.162.0"
+    "proj4": "^2.20.2"
   }
 }

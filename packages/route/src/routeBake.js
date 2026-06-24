@@ -14,7 +14,7 @@
 // sidecar worker, and per-bounds caching makes re-runs of unchanged chunks free.
 
 import JSZip from 'jszip';
-import { fetchTerrainData } from '@mapng/bake/terrain';
+import { fetchTerrainData } from '@mapng/terrain/terrain';
 import { exportToGLB } from '@mapng/bake/export3d';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from '@mapng/bake/google3dTiles';

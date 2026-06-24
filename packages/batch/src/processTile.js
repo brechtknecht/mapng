@@ -10,7 +10,7 @@
  */
 
 import JSZip from 'jszip';
-import { fetchTerrainData } from '@mapng/bake/terrain';
+import { fetchTerrainData } from '@mapng/terrain/terrain';
 import { exportToGLB, exportToDAE } from '@mapng/bake/export3d';
 import {
   generateHeightmapBlob,

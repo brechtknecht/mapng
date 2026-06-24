@@ -2,7 +2,7 @@
 // MeshRoad emission: per-segment world-space prep, full junction analysis, and
 // the junction-aware MeshRoad generator (clip-back, decimate, prune, balance,
 // smooth, resample). Extracted verbatim from exportBeamNGLevel.js (06 step 9).
-import { buildRoadNetwork } from '../roadNetwork.js';
+import { buildRoadNetwork } from '@mapng/terrain/roadNetwork';
 import {
   analyzeJunctions,
   clipPolylineEnds,

@@ -253,7 +253,7 @@ import Preview3D from './components/three/Preview3D.vue';
 import RoutePreview from './components/three/RoutePreview.vue';
 import AppSidebar from './components/layout/AppSidebar.vue';
 import ViewTabs from './components/ui/ViewTabs.vue';
-import { fetchTerrainData, addOSMToTerrain, loadTerrainFromTif, parseTifFile, loadTerrainFromLaz, parseLazFile } from '@mapng/bake/terrain';
+import { fetchTerrainData, addOSMToTerrain, loadTerrainFromTif, parseTifFile, loadTerrainFromLaz, parseLazFile } from '@mapng/terrain/terrain';
 import { applyAscCoordinateSystem } from '@mapng/fetching';
 import { computeUploadedCropBounds } from '@mapng/bake/uploadBounds';
 import { fetchRoute } from '@mapng/fetching';

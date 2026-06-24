@@ -4,7 +4,7 @@
 // tile's edge, and textures them with satellite imagery.
 import * as THREE from "three";
 import { clamp } from '@mapng/geo';
-import { fetchSurroundingTiles, POSITIONS } from "../surroundingTiles.js";
+import { fetchSurroundingTiles, POSITIONS } from "@mapng/terrain/surroundingTiles";
 import { SCENE_SIZE, getHeightAtScenePos } from "./sceneProjection.js";
 
 const SURROUND_OFFSETS = {

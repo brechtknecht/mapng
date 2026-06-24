@@ -7,8 +7,8 @@ import { createWGS84ToLocal } from '@mapng/geo';
 import { getFeatureCategory } from "./osm/osmColors.js";
 import { renderFeaturesToCanvas, createNoisePattern } from "./osm/featureRender.js";
 
-// Re-export so existing consumers (`@mapng/bake`, `@mapng/bake/osmTexture`) keep
-// importing getFeatureCategory from here.
+// Re-export so consumers (`@mapng/terrain/osmTexture`) keep importing
+// getFeatureCategory from here.
 export { getFeatureCategory };
 
 export const generateOSMTexture = async (terrainData, options = {}) => {

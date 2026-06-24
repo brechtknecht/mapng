@@ -3,7 +3,7 @@
 // profiles, placedGroups) from clipped OSM roads, and decorates four-way
 // intersections with approach profiles + sidewalk arcs. Extracted verbatim
 // from exportBeamNGLevel.js (06 step 9).
-import { buildRoadNetwork } from '../roadNetwork.js';
+import { buildRoadNetwork } from '@mapng/terrain/roadNetwork';
 import { normalize2D, generatePersistentId } from './worldMath.js';
 import {
   createRoadArchitectCrossroadsApproachProfile,

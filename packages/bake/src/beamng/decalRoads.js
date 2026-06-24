@@ -2,7 +2,7 @@
 // DecalRoad geometry: margin clipping, node decimation/offsetting, layered decal
 // assembly, and the OSM→DecalRoad generator. Extracted verbatim from
 // exportBeamNGLevel.js (06 step 9).
-import { buildRoadNetwork } from '../roadNetwork.js';
+import { buildRoadNetwork } from '@mapng/terrain/roadNetwork';
 import { generatePersistentId, geoToWorld } from './worldMath.js';
 import {
   ROAD_TEMPLATES,

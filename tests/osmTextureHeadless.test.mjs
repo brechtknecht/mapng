@@ -13,7 +13,7 @@ import { createHash } from 'node:crypto';
 import { installCanvasShim } from '../tools/testlab/canvasShim.mjs';
 
 installCanvasShim();
-const { generateOSMTexture } = await import('@mapng/bake/osmTexture');
+const { generateOSMTexture } = await import('@mapng/terrain/osmTexture');
 
 // Deterministic mulberry32 — replaces Math.random for the duration of a render.
 const seededRandom = (seed) => () => {

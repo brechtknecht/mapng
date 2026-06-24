@@ -226,7 +226,7 @@ import { LMap, LTileLayer, LRectangle, LMarker, LTooltip, LPolyline } from '@vue
 import { Layers } from 'lucide-vue-next';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { getAdjacentBounds, POSITION_LABELS } from '@mapng/bake/surroundingTiles';
+import { getAdjacentBounds, POSITION_LABELS } from '@mapng/terrain/surroundingTiles';
 import { computeMetricSelectionBounds, computeUploadedCropBounds } from '@mapng/bake/uploadBounds';
 
 // Fix Leaflet icon assets
