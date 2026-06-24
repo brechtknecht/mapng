@@ -1,0 +1,4 @@
+{
+  "_doc": "Ratchet allowlist for tools/check-filesize.mjs (cap 500 LOC). Each entry is a god-file pending decomposition per docs/refactor/06-internal-decomposition.md. DELETE an entry when its file drops <=500 LOC. Do not ADD entries — new code must be born small.",
+  "packages/export/src/ColladaExporter.js": "697 LOC — VENDORED three.js example; exempt until replaced (lifted to @mapng/export, doc 08 step 2)"
+}

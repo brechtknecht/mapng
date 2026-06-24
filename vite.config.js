@@ -2,6 +2,9 @@ import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 import { templateCompilerOptions } from '@tresjs/core';
 import { execSync } from 'child_process';
+import blenderDaePlugin from './scripts/viteBlenderDaePlugin.mjs';
+import googleBakePlugin from './scripts/viteGoogleBakePlugin.mjs';
+import zipExportPlugin from './scripts/viteZipExportPlugin.mjs';
 
 const commitHash = (() => {
   try {
@@ -16,7 +19,19 @@ export default defineConfig({
   plugins: [
     vue({
       ...templateCompilerOptions
-    })
+    }),
+    // POST /api/convert-dae: GLB → BeamNG .dae via headless Blender, so the
+    // BeamNG export can bundle the final google_tiles.dae automatically.
+    blenderDaePlugin(),
+    // /api/google-bake/*: Google 3D Tiles bake sidecar — runs heavy bakes in
+    // a Node child process with a multi-GB heap instead of the 4 GB-capped
+    // browser tab. The browser falls back to the in-tab bake when absent.
+    googleBakePlugin(),
+    // /api/zip-export/*: BeamNG ZIP-export sidecar — streams each archive entry
+    // to Node and DEFLATEs it natively to a temp file, so large maps no longer
+    // hang the renderer at compression. Falls back to in-browser JSZip when
+    // absent (prod builds).
+    zipExportPlugin()
   ],
   optimizeDeps: {
     exclude: ['geotiff'],

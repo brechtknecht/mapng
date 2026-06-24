@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { applyAscCoordinateSystem, parseAscText } from '../services/ascLoader.js';
+import { applyAscCoordinateSystem, parseAscText } from '@mapng/fetching/ascLoader';
 
 test('parseAscText parses corner-registered geographic ASC grids', async () => {
   const asc = [

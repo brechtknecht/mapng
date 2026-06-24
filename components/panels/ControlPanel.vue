@@ -262,11 +262,11 @@ import JobStateControls from '../controls/JobStateControls.vue';
 import TerrainStats from '../controls/TerrainStats.vue';
 import LazMetaCard from '../controls/LazMetaCard.vue';
 import TifMetaCard from '../controls/TifMetaCard.vue';
-import { checkUSGSStatus, probeGPXZLimits } from '../../services/terrain';
-import { downloadJsonFile } from '../../services/traceability';
-import { exportJobData, importJobData } from '../../services/jobData';
-import { buildRunConfiguration as buildRunConfigurationBase } from '../../services/runConfiguration';
-import { getMaxSquareCropResolution } from '../../services/uploadBounds';
+import { checkUSGSStatus, probeGPXZLimits } from '@mapng/terrain/terrain';
+import { downloadJsonFile } from '@mapng/batch/traceability';
+import { exportJobData, importJobData } from '@mapng/batch/jobData';
+import { buildRunConfiguration as buildRunConfigurationBase } from '@mapng/batch/runConfiguration';
+import { getMaxSquareCropResolution } from '@mapng/bake/uploadBounds';
 
 const { t } = useI18n({ useScope: 'global' });
 

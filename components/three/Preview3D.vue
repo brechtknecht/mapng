@@ -50,6 +50,10 @@
               :feature-visibility="featureVisibility"
             />
 
+            <GoogleTiles3D
+              :terrain-data="terrainData"
+            />
+
             <SurroundingTerrain3D
               :terrain-data="terrainData"
               :visible="showSurroundings"
@@ -59,6 +63,7 @@
             />
 
             <OrbitControls
+              v-if="!flyMode"
               ref="controlsRef"
               make-default
               :min-distance="1"
@@ -68,6 +73,13 @@
               :enable-damping="true"
               :damping-factor="0.05"
             />
+            <FlyControls3D
+              v-if="flyMode"
+              ref="flyRef"
+              :fov="flyFov"
+              @refine="refineFromPose"
+              @locked-change="flyLocked = $event"
+            />
           </TresGroup>
         </template>
         <template #fallback>
@@ -75,6 +87,59 @@
         </template>
       </Suspense>
     </TresCanvas>
+
+    <!-- Fly-mode HUD -->
+    <div
+      v-if="flyMode"
+      class="absolute top-4 left-1/2 -translate-x-1/2 z-40 flex flex-col items-center gap-2 pointer-events-none"
+    >
+      <div
+        v-if="!flyLocked"
+        class="px-3 py-1.5 bg-black/70 backdrop-blur rounded-md text-xs text-white font-medium pointer-events-none"
+      >
+        {{ t('preview.flyClickToLook') }}
+      </div>
+      <div class="flex items-center gap-3 px-4 py-2.5 bg-black/70 backdrop-blur rounded-lg shadow-xl pointer-events-auto">
+        <button
+          @click="refineFromHud"
+          :disabled="googleTilesStore.refining"
+          class="flex items-center gap-1.5 px-3 py-1.5 bg-[#FF6600] hover:bg-[#e65c00] disabled:bg-gray-600 disabled:cursor-wait text-white text-xs font-bold rounded-md transition-colors"
+        >
+          <Crosshair :size="13" />
+          {{ t('preview.flyRefine') }}
+        </button>
+        <label class="flex items-center gap-1.5 text-[10px] text-gray-300">
+          {{ t('preview.flyFov') }}
+          <input type="range" min="30" max="110" step="1" v-model.number="flyFov" class="w-20 accent-[#FF6600]" />
+          <span class="w-6 text-right tabular-nums">{{ flyFov }}°</span>
+        </label>
+        <label class="flex items-center gap-1.5 text-[10px] text-gray-300 cursor-pointer" :title="t('preview.flyAutoRefineHint')">
+          <input type="checkbox" v-model="autoRefine" class="accent-[#FF6600]" />
+          {{ t('preview.flyAutoRefine') }}
+        </label>
+        <button
+          @click="flyMode = false"
+          class="px-2.5 py-1.5 bg-gray-700 hover:bg-gray-600 text-white text-[10px] font-medium rounded-md transition-colors"
+        >
+          {{ t('preview.flyExit') }}
+        </button>
+      </div>
+      <div class="px-3 py-1 bg-black/50 backdrop-blur rounded text-[10px] text-gray-300 pointer-events-none">
+        <template v-if="googleTilesStore.refining">
+          <!-- stations > 1 = the one-time base re-sweep that rebuilds a dead
+               worker session; a refinement sweep is always a single station -->
+          {{ googleTilesStore.progress.stations > 1
+            ? t('preview.flyPreparing', { station: googleTilesStore.progress.station, stations: googleTilesStore.progress.stations })
+            : t('preview.flyRefining', { visible: googleTilesStore.progress.visible, inflight: googleTilesStore.progress.inflight }) }}
+        </template>
+        <template v-else-if="googleTilesStore.refineError">
+          <span class="text-red-400">{{ googleTilesStore.refineError }}</span>
+        </template>
+        <template v-else>
+          {{ t('preview.flyHudHint') }}
+        </template>
+      </div>
+    </div>
 
     <!-- Toggle Tab -->
     <button
@@ -273,6 +338,192 @@
               </label>
             </div>
           </div>
+
+          <!-- Google Photorealistic 3D Tiles -->
+          <div class="space-y-2 pt-2">
+            <label class="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1 font-medium mb-1">
+              <Layers :size="12" /> {{ t('preview.googleTiles') }}
+            </label>
+
+            <p v-if="!googleTilesStore.apiKey" class="text-[10px] text-gray-400 dark:text-gray-500">
+              {{ t('preview.googleTilesNoKey') }}
+            </p>
+
+            <template v-else>
+              <div class="flex bg-gray-100 dark:bg-gray-800 rounded-md p-0.5 border border-gray-200 dark:border-gray-700">
+                <button
+                  @click="googleTilesStore.setQuality('standard')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityStandardHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'standard'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityStandard') }}
+                </button>
+                <button
+                  @click="googleTilesStore.setQuality('high')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityHighHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'high'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityHigh') }}
+                </button>
+                <button
+                  @click="googleTilesStore.setQuality('roads')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityRoadsHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'roads'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityRoads') }}
+                </button>
+                <button
+                  @click="googleTilesStore.setQuality('max')"
+                  :disabled="googleTilesStore.status === 'baking'"
+                  :title="t('preview.googleTilesQualityMaxHint')"
+                  :class="[
+                    'flex-1 text-[10px] py-1 rounded transition-colors',
+                    googleTilesStore.quality === 'max'
+                      ? 'bg-[#FF6600] text-white shadow-sm font-medium'
+                      : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white',
+                  ]"
+                >
+                  {{ t('preview.googleTilesQualityMax') }}
+                </button>
+              </div>
+
+              <div class="flex items-center gap-2">
+                <label class="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap">
+                  {{ t('preview.googleTilesZOffset') }}
+                </label>
+                <input
+                  type="range"
+                  min="-50"
+                  max="50"
+                  step="0.5"
+                  :value="googleTilesStore.zOffset"
+                  @input="googleTilesStore.setZOffset($event.target.valueAsNumber)"
+                  class="flex-1 accent-[#FF6600]"
+                />
+                <input
+                  type="number"
+                  step="0.5"
+                  :value="googleTilesStore.zOffset"
+                  @change="googleTilesStore.setZOffset($event.target.valueAsNumber)"
+                  class="w-14 text-[10px] text-right tabular-nums px-1 py-0.5 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300"
+                />
+                <span class="text-[10px] text-gray-400 dark:text-gray-500">m</span>
+              </div>
+
+              <label class="flex items-center gap-2 cursor-pointer group/check" :title="t('preview.googleTilesStripGroundHint')">
+                <div class="relative">
+                  <input
+                    type="checkbox"
+                    :checked="googleTilesStore.stripGround"
+                    :disabled="googleTilesStore.status === 'baking'"
+                    @change="googleTilesStore.setStripGround($event.target.checked)"
+                    class="peer sr-only"
+                  />
+                  <div
+                    class="w-7 h-4 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:bg-[#FF6600]"
+                  ></div>
+                </div>
+                <span class="text-[10px] text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">
+                  {{ t('preview.googleTilesStripGround') }}
+                </span>
+              </label>
+
+              <button
+                v-if="googleTilesStore.status === 'idle' || googleTilesStore.status === 'error'"
+                @click="googleTilesStore.bakeForPreview(terrainData)"
+                :disabled="!terrainData"
+                class="w-full flex items-center justify-center gap-2 py-1.5 bg-[#FF6600] hover:bg-[#e65c00] disabled:bg-gray-300 dark:disabled:bg-gray-700 disabled:cursor-not-allowed text-white text-xs font-bold rounded-md transition-colors"
+              >
+                {{ googleTilesStore.status === 'error' ? t('preview.googleTilesRetry') : t('preview.googleTilesLoad') }}
+              </button>
+
+              <p v-if="googleTilesStore.status === 'error'" class="text-[10px] text-red-500 break-words">
+                {{ googleTilesStore.error }}
+              </p>
+
+              <p v-if="googleTilesStore.status === 'baking'" class="text-[10px] text-gray-400 dark:text-gray-500">
+                {{ t('preview.googleTilesBaking', {
+                  station: googleTilesStore.progress.station,
+                  stations: googleTilesStore.progress.stations,
+                  visible: googleTilesStore.progress.visible,
+                  inflight: googleTilesStore.progress.inflight,
+                }) }}
+              </p>
+
+              <template v-if="googleTilesStore.status === 'ready'">
+                <label class="flex items-center gap-2 cursor-pointer group/check">
+                  <div class="relative">
+                    <input
+                      type="checkbox"
+                      v-model="googleTilesStore.show"
+                      class="peer sr-only"
+                    />
+                    <div
+                      class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#FF6600]"
+                    ></div>
+                  </div>
+                  <span class="text-xs text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">
+                    {{ t('preview.googleTilesShow') }}
+                  </span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer group/check">
+                  <div class="relative">
+                    <input
+                      type="checkbox"
+                      v-model="googleTilesStore.showCameras"
+                      class="peer sr-only"
+                    />
+                    <div
+                      class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#FF6600]"
+                    ></div>
+                  </div>
+                  <span class="text-xs text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">
+                    {{ t('preview.googleTilesShowCameras') }}
+                  </span>
+                </label>
+                <p v-if="googleTilesStore.showCameras" class="text-[10px] text-gray-400 dark:text-gray-500">
+                  {{ t('preview.googleTilesCamerasLegend') }}
+                </p>
+                <button
+                  @click="flyMode = !flyMode"
+                  :title="t('preview.googleTilesFlyHint')"
+                  :class="[
+                    'w-full flex items-center justify-center gap-2 py-1.5 text-xs font-bold rounded-md transition-colors',
+                    flyMode
+                      ? 'bg-gray-900 dark:bg-gray-700 hover:bg-black dark:hover:bg-gray-600 text-white'
+                      : 'bg-[#FF6600] hover:bg-[#e65c00] text-white',
+                  ]"
+                >
+                  <Plane :size="14" />
+                  {{ flyMode ? t('preview.flyExit') : t('preview.googleTilesFly') }}
+                </button>
+                <button
+                  @click="googleTilesStore.rebake(terrainData)"
+                  class="text-[10px] text-gray-400 dark:text-gray-500 hover:text-[#FF6600] underline"
+                >
+                  {{ t('preview.googleTilesRebake') }}
+                </button>
+              </template>
+            </template>
+          </div>
         </div>
 
         <div class="pt-4 border-t border-gray-100 dark:border-gray-700">
@@ -291,7 +542,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, onErrorCaptured } from "vue";
+import { ref, computed, reactive, watch, onErrorCaptured, onUnmounted } from "vue";
 import { useI18n } from 'vue-i18n';
 import * as THREE from "three";
 import { TresCanvas } from "@tresjs/core";
@@ -302,18 +553,145 @@ import {
   RotateCcw,
   ChevronLeft,
   ChevronRight,
+  Plane,
+  Crosshair,
 } from "lucide-vue-next";
 
 const { t } = useI18n({ useScope: 'global' });
 import TerrainMesh from "./TerrainMesh.vue";
 import MapngFlag3D from "./MapngFlag3D.vue";
 import OSMFeatures3D from "./OSMFeatures3D.vue";
+import GoogleTiles3D from "./GoogleTiles3D.vue";
+import FlyControls3D from "./FlyControls3D.vue";
 import CSMLight from "./CSMLight.vue";
 import SurroundingTerrain3D from "./SurroundingTerrain3D.vue";
+import { useGoogleTilesStore } from "../../stores/googleTilesStore.js";
+import { computeUnitsPerMeter } from '@mapng/bake/google3dTiles';
 
 const props = defineProps(["terrainData"]);
 
+const googleTilesStore = useGoogleTilesStore();
+
+// New AOI → the baked tiles no longer match the terrain; back to idle.
+// Then probe the persistent cache: if this AOI was baked before (even in a
+// previous session — IndexedDB survives reloads/HMR), restore it without a
+// click and without any Google refetch.
+watch(() => props.terrainData, (data) => {
+  if (googleTilesStore.status !== 'idle') googleTilesStore.reset();
+  googleTilesStore.engaged = false; // new AOI — tiles not loaded yet here
+  if (data) googleTilesStore.tryRestore(data); // a cache hit re-marks engaged
+}, { immediate: true });
+
+// Quality switch: the displayed bake no longer matches — drop it and probe
+// the caches for a bake of the newly selected quality (instant when cached,
+// otherwise the Load button reappears).
+watch(() => googleTilesStore.quality, () => {
+  if (googleTilesStore.status === 'baking') return;
+  googleTilesStore.reset();
+  if (props.terrainData) googleTilesStore.tryRestore(props.terrainData);
+});
+
+// Ground-strip toggle is part of the bake cache key. Restore the matching
+// variant if it's cached; otherwise BAKE it — unlike the quality switch, this
+// is a quick on/off comparison the user expects to SEE immediately (without it,
+// flipping to an un-baked variant just leaves the OSM buildings on screen).
+watch(() => googleTilesStore.stripGround, async () => {
+  if (googleTilesStore.status === 'baking') return;
+  // Only auto-bake the new variant if tiles were already loaded for this AOI;
+  // a cold checkbox flip just probes the cache (Load button stays otherwise).
+  const wasEngaged = googleTilesStore.engaged;
+  googleTilesStore.reset();
+  if (!props.terrainData) return;
+  await googleTilesStore.tryRestore(props.terrainData);
+  if (wasEngaged && googleTilesStore.status === 'idle') {
+    googleTilesStore.bakeForPreview(props.terrainData);
+  }
+});
+
+// Google photogrammetry replaces the OSM-extruded buildings — showing both
+// just z-fights inside the photogrammetry. Auto-hide OSM buildings while the
+// tiles are visible and restore the previous setting when they go away.
+let buildingsBeforeTiles = null;
+watch(
+  () => googleTilesStore.status === 'ready' && googleTilesStore.show,
+  (tilesVisible) => {
+    if (tilesVisible) {
+      buildingsBeforeTiles = featureVisibility.buildings;
+      featureVisibility.buildings = false;
+    } else if (buildingsBeforeTiles !== null) {
+      featureVisibility.buildings = buildingsBeforeTiles;
+      buildingsBeforeTiles = null;
+    }
+  },
+);
+
 const controlsRef = ref(null);
+
+// --- Fly mode: ego-camera refinement of the Google tiles bake --------------
+const flyMode = ref(false);
+const flyLocked = ref(false);
+const flyFov = ref(70);
+const flyRef = ref(null);
+
+// Leaving the ready state (re-bake, AOI change) ends fly mode.
+watch(() => googleTilesStore.status, (s) => {
+  if (s !== 'ready') flyMode.value = false;
+});
+
+/**
+ * Camera pose (scene coords) → refinement station (worker wire format):
+ * ENU metres from the AOI centre + heights in metres above the .ter datum.
+ * The preview scene is metrically uniform at `unitsPerMeter` (X/Z native
+ * scene units, Y pre-scaled), so it's a pure division; north is -Z.
+ */
+const refineFromPose = (pose) => {
+  const data = props.terrainData;
+  if (!data?.bounds || googleTilesStore.refining) return;
+  const upm = computeUnitsPerMeter(data);
+  const [px, py, pz] = pose.position;
+  const [dx, dy, dz] = pose.direction;
+  // Aim point ~60 m ahead — far enough that the frustum, not the point,
+  // defines what refines.
+  const aheadScene = 60 * upm;
+  const lx = px + dx * aheadScene;
+  const ly = py + dy * aheadScene;
+  const lz = pz + dz * aheadScene;
+  googleTilesStore.refineFromView(data, {
+    e: px / upm,
+    n: -pz / upm,
+    heightM: py / upm,
+    lookE: lx / upm,
+    lookN: -lz / upm,
+    lookHeightM: ly / upm,
+    fov: pose.fov,
+    aspect: pose.aspect,
+  });
+};
+
+const refineFromHud = () => {
+  const pose = flyRef.value?.getPose?.();
+  if (pose) refineFromPose(pose);
+};
+
+// Capture mode: refine continuously from the current view while flying —
+// one station every ~3 s (skipped while a refinement is still running).
+const autoRefine = ref(false);
+let autoRefineTimer = null;
+watch([flyMode, autoRefine], ([fm, on]) => {
+  if (autoRefineTimer) {
+    clearInterval(autoRefineTimer);
+    autoRefineTimer = null;
+  }
+  if (!fm) autoRefine.value = false;
+  if (fm && on) {
+    autoRefineTimer = setInterval(() => {
+      if (!googleTilesStore.refining) refineFromHud();
+    }, 3000);
+  }
+});
+onUnmounted(() => {
+  if (autoRefineTimer) clearInterval(autoRefineTimer);
+});
 
 const webGLAvailable = (() => {
   try {

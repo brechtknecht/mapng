@@ -27,3 +27,7 @@ refs/
 tests/
 .codex
 BASE_LEVEL.zip
+
+# test lab local artifacts (real-bake captures, temp job/out files)
+tools/testlab/captures/
+tools/testlab/.tmp/

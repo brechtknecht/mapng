@@ -1,0 +1,13 @@
+{
+  "name": "@mapng/geo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "dependencies": {
+    "proj4": "^2.20.2"
+  }
+}

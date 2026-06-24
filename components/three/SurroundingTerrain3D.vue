@@ -1,7 +1,7 @@
 <script setup>
 import { ref, shallowRef, watch, toRaw, markRaw, onUnmounted } from 'vue';
 import * as THREE from 'three';
-import { fetchSurroundingTiles, POSITIONS } from '../../services/surroundingTiles';
+import { fetchSurroundingTiles, POSITIONS } from '@mapng/terrain/surroundingTiles';
 
 const SCENE_SIZE = 100;
 const SEAM_BLEND_WIDTH_UNITS = SCENE_SIZE * 0.42;

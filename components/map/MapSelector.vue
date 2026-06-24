@@ -6,8 +6,10 @@
         :zoom="zoom" 
         :options="mapOptions"
         style="height: 100%; width: 100%"
+        :class="{ 'cursor-crosshair': routeMode && routeActivePoint }"
         @move="handleMove"
         @zoom="handleZoom"
+        @click="handleMapClick"
      >
       <!-- Base Layers -->
       <l-tile-layer
@@ -41,13 +43,68 @@
         :opacity="0.7"
       />
       
-      <l-rectangle 
-        v-if="selectionBounds && !hasBatchGrid && !showUploadedCoverageBounds"
-        :bounds="[[selectionBounds.south, selectionBounds.west], [selectionBounds.north, selectionBounds.east]]" 
+      <l-rectangle
+        v-if="selectionBounds && !hasBatchGrid && !showUploadedCoverageBounds && !routeMode"
+        :bounds="[[selectionBounds.south, selectionBounds.west], [selectionBounds.north, selectionBounds.east]]"
         color="#FF6600"
         :weight="2"
         :fill-opacity="0.1"
         :options="{ dashArray: '2, 8', lineCap: 'round' }"
+      />
+
+      <!-- Route corridor: straight connector (before a road route is fetched) -->
+      <l-polyline
+        v-if="routeMode && routeStart && routeEnd && routePolyline.length < 2"
+        :lat-lngs="[[routeStart.lat, routeStart.lng], [routeEnd.lat, routeEnd.lng]]"
+        color="#0f766e"
+        :weight="2"
+        :opacity="0.5"
+        :options="{ dashArray: '6, 8', lineCap: 'round' }"
+      />
+
+      <!-- Route corridor: AOI chunk boxes along the route (outline, status-coloured) -->
+      <l-rectangle
+        v-for="chunk in (routeMode ? routeChunks : [])"
+        :key="'route-chunk-' + chunk.id"
+        :bounds="[[chunk.bounds.south, chunk.bounds.west], [chunk.bounds.north, chunk.bounds.east]]"
+        :color="chunkColor(chunk)"
+        :weight="chunkStatusOf(chunk).phase === 'pending' ? 1.5 : 2"
+        :fill-opacity="0.05"
+        :options="chunkOutlineOpts(chunk)"
+      />
+      <!-- Route corridor: per-chunk progress fill (grows bottom→top with pct) -->
+      <l-rectangle
+        v-for="chunk in (routeMode && routeBaking ? routeChunks.filter(chunkHasFill) : [])"
+        :key="'route-chunk-fill-' + chunk.id"
+        :bounds="chunkFillBounds(chunk)"
+        :color="chunkColor(chunk)"
+        :weight="0"
+        :fill-color="chunkColor(chunk)"
+        :fill-opacity="0.4"
+        :options="{ interactive: false }"
+      />
+
+      <!-- Route corridor: fetched road centerline + start/end markers -->
+      <l-polyline
+        v-if="routeMode && routePolyline.length > 1"
+        :lat-lngs="routeLatLngs"
+        color="#0f766e"
+        :weight="4"
+        :opacity="0.85"
+      />
+      <l-marker
+        v-if="routeMode && routeStart"
+        :lat-lng="[routeStart.lat, routeStart.lng]"
+        :draggable="true"
+        :icon="routeStartIcon"
+        @dragend="(event) => handleRoutePointDrag('start', event)"
+      />
+      <l-marker
+        v-if="routeMode && routeEnd"
+        :lat-lng="[routeEnd.lat, routeEnd.lng]"
+        :draggable="true"
+        :icon="routeEndIcon"
+        @dragend="(event) => handleRoutePointDrag('end', event)"
       />
 
       <l-rectangle
@@ -150,7 +207,7 @@
     </div>
 
     <!-- Center Crosshair -->
-    <div class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-[400] pointer-events-none">
+    <div v-if="!routeMode" class="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-[400] pointer-events-none">
         <div class="w-8 h-8 text-[#FF6600] drop-shadow-lg flex items-center justify-center">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="w-full h-full filter drop-shadow-md">
                 <line x1="12" y1="4" x2="12" y2="20" />
@@ -165,12 +222,12 @@
 <script setup>
 import { ref, computed, watch, onMounted, nextTick } from 'vue';
 import { useI18n } from 'vue-i18n';
-import { LMap, LTileLayer, LRectangle, LMarker, LTooltip } from '@vue-leaflet/vue-leaflet';
+import { LMap, LTileLayer, LRectangle, LMarker, LTooltip, LPolyline } from '@vue-leaflet/vue-leaflet';
 import { Layers } from 'lucide-vue-next';
 import L from 'leaflet';
 import 'leaflet/dist/leaflet.css';
-import { getAdjacentBounds, POSITION_LABELS } from '../../services/surroundingTiles';
-import { computeMetricSelectionBounds, computeUploadedCropBounds } from '../../services/uploadBounds';
+import { getAdjacentBounds, POSITION_LABELS } from '@mapng/terrain/surroundingTiles';
+import { computeMetricSelectionBounds, computeUploadedCropBounds } from '@mapng/bake/uploadBounds';
 
 // Fix Leaflet icon assets
 // @ts-ignore
@@ -197,7 +254,53 @@ const props = defineProps({
   surroundingTilePositions: { type: Array, default: () => [] },
   batchGrid: { type: Array, default: () => [] },
   batchEditable: { type: Boolean, default: false },
+  routeMode: { type: Boolean, default: false },
+  routeStart: { type: Object, default: null },
+  routeEnd: { type: Object, default: null },
+  routePolyline: { type: Array, default: () => [] },
+  routeChunks: { type: Array, default: () => [] },
+  // Live per-chunk bake status (index-aligned with routeChunks): [{ index, phase, pct }]
+  routeChunkStatus: { type: Array, default: () => [] },
+  routeActivePoint: { type: String, default: null }, // 'start' | 'end' | null
 });
+
+const routeLatLngs = computed(() => (props.routePolyline || []).map((p) => [p.lat, p.lng]));
+
+const makeRoutePinIcon = (color) =>
+  L.divIcon({
+    className: 'mapng-route-pin',
+    html: `<div style="width:16px;height:16px;border-radius:9999px;background:${color};border:3px solid white;box-shadow:0 0 0 1px rgba(0,0,0,0.3);"></div>`,
+    iconSize: [16, 16],
+    iconAnchor: [8, 8],
+  });
+
+const routeStartIcon = makeRoutePinIcon('#10B981');
+const routeEndIcon = makeRoutePinIcon('#EF4444');
+
+// --- Route chunk live status (drives the per-box fill while baking) ---
+const PHASE_COLOR = {
+  pending: '#0f766e', // teal (idle)
+  terrain: '#0ea5e9', // sky — fetching terrain
+  bake: '#f59e0b',    // amber — baking tiles
+  encode: '#f59e0b',
+  done: '#10b981',    // green
+  error: '#ef4444',   // red
+};
+const chunkStatusOf = (chunk) =>
+  props.routeChunkStatus?.[chunk.index] ?? { phase: 'pending', pct: 0 };
+const routeBaking = computed(() => (props.routeChunkStatus?.length ?? 0) > 0);
+const chunkColor = (chunk) => PHASE_COLOR[chunkStatusOf(chunk).phase] ?? PHASE_COLOR.pending;
+const chunkOutlineOpts = (chunk) =>
+  (chunkStatusOf(chunk).phase === 'pending'
+    ? { dashArray: '4, 6', lineCap: 'round' }
+    : { lineCap: 'round' }); // solid once active/done — stands out from idle boxes
+const chunkHasFill = (chunk) => chunkStatusOf(chunk).pct > 0;
+// Fill grows bottom (south) → top with pct, so each box visibly "fills up".
+const chunkFillBounds = (chunk) => {
+  const { south, north, west, east } = chunk.bounds;
+  const pct = Math.max(0, Math.min(100, chunkStatusOf(chunk).pct)) / 100;
+  return [[south, west], [south + (north - south) * pct, east]];
+};
 
 const hasBatchGrid = computed(() => props.batchGrid && props.batchGrid.length > 0);
 
@@ -219,7 +322,30 @@ const batchTileFillOpacity = (tile) => {
   }
 };
 
-const emit = defineEmits(['move', 'zoom', 'batchTileDrag']);
+const emit = defineEmits(['move', 'zoom', 'batchTileDrag', 'routePoint']);
+
+// Route mode: click the map to place the active point (start/end).
+const handleMapClick = (event) => {
+  if (!props.routeMode || !props.routeActivePoint) return;
+  const latLng = event?.latlng;
+  if (!latLng) return;
+  emit('routePoint', {
+    which: props.routeActivePoint,
+    lat: latLng.lat,
+    lng: normalizeDatelineLongitude(latLng.lng),
+  });
+};
+
+// Route mode: dragging a start/end pin repositions that point.
+const handleRoutePointDrag = (which, event) => {
+  const latLng = event?.target?.getLatLng?.();
+  if (!latLng) return;
+  emit('routePoint', {
+    which,
+    lat: latLng.lat,
+    lng: normalizeDatelineLongitude(latLng.lng),
+  });
+};
 
 const mapRef = ref(null);
 const currentCenter = ref(props.center);

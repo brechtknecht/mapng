@@ -122,6 +122,17 @@
             </label>
           </div>
 
+          <div class="flex items-center justify-between gap-2 px-0.5" :title="googleApiKey ? 'Use Google Photorealistic 3D Tiles for building geometry (untextured in BeamNG)' : 'Set VITE_GOOGLE_MAPS_API_KEY in .env.local to enable'">
+            <span class="text-[10px] shrink-0" :class="googleApiKey ? 'text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'">
+              Google 3D buildings
+              <span class="ml-1 text-[8px] uppercase tracking-wider bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1 py-0.5 rounded font-bold">exp</span>
+            </span>
+            <label class="flex items-center gap-1.5 cursor-pointer">
+              <input type="checkbox" v-model="useGoogle3DTiles" :disabled="!googleApiKey || !beamNGIncludeBuildings" class="rounded border-gray-300 dark:border-gray-600 accent-[#FF6600] cursor-pointer disabled:cursor-not-allowed disabled:opacity-60" />
+              <span class="text-[9px]" :class="googleApiKey ? 'text-gray-500 dark:text-gray-400' : 'text-gray-400 dark:text-gray-500'">{{ googleApiKey ? 'replace OSM extrusion' : 'no API key' }}</span>
+            </label>
+          </div>
+
           <div class="flex items-center justify-between gap-2 px-0.5">
             <span class="text-[10px] text-gray-500 dark:text-gray-400 shrink-0">{{ t('exportPanel.applyFoundations') }}</span>
             <label class="flex items-center gap-1.5 cursor-pointer">
@@ -323,6 +334,16 @@
                 <span class="text-[9px] text-gray-500 dark:text-gray-400">{{ t('exportPanel.surroundingsOnly') }}</span>
               </label>
             </div>
+            <div class="flex items-center justify-between gap-2 pt-1 border-t border-gray-200 dark:border-gray-600">
+              <label class="flex items-center gap-1.5 cursor-pointer" :title="googleApiKey ? 'Bake Google Photorealistic 3D Tiles into the export (skips OSM building extrusion)' : 'Set VITE_GOOGLE_MAPS_API_KEY in .env to enable'">
+                <input type="checkbox" v-model="useGoogle3DTiles" :disabled="!googleApiKey" class="accent-[#FF6600] w-3 h-3" />
+                <span class="text-[9px]" :class="googleApiKey ? 'text-gray-600 dark:text-gray-300' : 'text-gray-400 dark:text-gray-500'">
+                  Google Photorealistic 3D
+                  <span class="ml-1 text-[8px] uppercase tracking-wider bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 px-1 py-0.5 rounded font-bold">exp</span>
+                </span>
+              </label>
+              <span v-if="!googleApiKey" class="text-[8px] text-gray-400 dark:text-gray-500">no API key</span>
+            </div>
           </div>
 
           <div class="grid grid-cols-2 gap-1.5">
@@ -488,16 +509,17 @@ import { useI18n } from 'vue-i18n';
 import {
   Download, ChevronDown, Loader2, Mountain, Box, Trees, Layers, Route, FileCode, FileJson, PackageOpen
 } from 'lucide-vue-next';
-import { buildRunConfiguration as buildRunConfigurationBase } from '../../services/runConfiguration';
-import { generateHeightmapBlob, generateTerBlob } from '../../services/batchExports';
-import { exportToGLB, exportToDAE } from '../../services/export3d';
-import { exportGeoTiff } from '../../services/exportGeoTiff';
-import { buildCommonTraceMetadata, downloadJsonFile } from '../../services/traceability';
-import { createWGS84ToLocal } from '../../services/geoUtils';
-import { exportBeamNGLevel } from '../../services/exportBeamNGLevel';
-import { prepareCroppedTerrainData } from '../../services/cropTerrain';
-import { getBeamNGFlavorOptions } from '../../services/beamngFlavorCatalog.js';
-import { reverseLocationName } from '../../services/nominatim';
+import { buildRunConfiguration as buildRunConfigurationBase } from '@mapng/batch/runConfiguration';
+import { generateHeightmapBlob, generateTerBlob } from '@mapng/batch/batchExports';
+import { exportToGLB, exportToDAE } from '@mapng/export/export3d';
+import { exportGeoTiff } from '@mapng/export/exportGeoTiff';
+import { buildCommonTraceMetadata, downloadJsonFile } from '@mapng/batch/traceability';
+import { createWGS84ToLocal } from '@mapng/geo';
+import { exportBeamNGLevel } from '@mapng/export/exportBeamNGLevel';
+import { disposeSidecarZip } from '@mapng/bake/zipExportSidecar';
+import { prepareCroppedTerrainData } from '@mapng/bake/cropTerrain';
+import { getBeamNGFlavorOptions } from '@mapng/bake/beamngFlavorCatalog';
+import { reverseLocationName } from '@mapng/fetching';
 
 const { t } = useI18n({ useScope: 'global' });
 
@@ -573,8 +595,10 @@ const canUseGpxzBackdrop = computed(() => props.elevationSource === 'gpxz' && !!
 const beamNGPendingDownloadUrl = ref('');
 const beamNGPendingDownloadName = ref('');
 
+// The pending URL is either a blob: URL (in-browser fallback) or a same-origin
+// sidecar result URL streamed straight to disk. Only blob: URLs need revoking.
 const clearPendingBeamNGDownload = () => {
-  if (beamNGPendingDownloadUrl.value) {
+  if (beamNGPendingDownloadUrl.value.startsWith('blob:')) {
     const urlToRevoke = beamNGPendingDownloadUrl.value;
     setTimeout(() => URL.revokeObjectURL(urlToRevoke), 120_000);
   }
@@ -598,6 +622,8 @@ const isAnyExporting = computed(() => (
 
 const modelCenterTextureType = ref('none');
 const modelTileSelection = ref('center-only');
+const googleApiKey = import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '';
+const useGoogle3DTiles = ref(false);
 
 // Collapsible section states
 const showExports = ref(localStorage.getItem('mapng_showExports') !== 'false');
@@ -1131,7 +1157,10 @@ const handleGLBExport = async () => {
       surroundingTilePositions: props.surroundingTilePositions,
       center: props.center,
       resolution: props.resolution,
-      returnBlob: true
+      returnBlob: true,
+      useGoogle3DTiles: useGoogle3DTiles.value && !!googleApiKey,
+      googleApiKey,
+      onProgress: (msg) => console.log('[GLB export]', msg),
     });
     const typedBlob = await ensureDownloadBlobType(blob, 'model/gltf-binary', 'application/octet-stream');
     const filename = `terrain_${props.center.lat.toFixed(4)}_${props.center.lng.toFixed(4)}.glb`;
@@ -1164,7 +1193,10 @@ const handleDAEExport = async () => {
       surroundingTilePositions: props.surroundingTilePositions,
       center: props.center,
       resolution: props.resolution,
-      returnBlob: true
+      returnBlob: true,
+      useGoogle3DTiles: useGoogle3DTiles.value && !!googleApiKey,
+      googleApiKey,
+      onProgress: (msg) => console.log('[DAE export]', msg),
     });
     const typedBlob = await ensureDownloadBlobType(zipBlob, 'application/zip');
     const filename = `terrain_${props.center.lat.toFixed(4)}_${props.center.lng.toFixed(4)}.dae.zip`;
@@ -1289,7 +1321,7 @@ const handleBeamNGLevelExport = async () => {
       requestedResolution: props.resolution,
     });
 
-    const { blob, filename } = await exportBeamNGLevel(td, props.center, {
+    const exportResult = await exportBeamNGLevel(td, props.center, {
       baseTexture: effectiveBaseTexture,
       includeBackdrop: effectiveIncludeBackdrop,
       backdropElevationSource: effectiveBackdropSource,
@@ -1305,6 +1337,8 @@ const handleBeamNGLevelExport = async () => {
       levelName: beamNGLevelName.value.trim(),
       elevationSource: props.elevationSource,
       requestedResolution: props.resolution,
+      useGoogle3DTiles: useGoogle3DTiles.value && !!googleApiKey,
+      googleApiKey,
       onProgress: ({ step, pct }) => {
         beamNGProgressStep.value = step;
         beamNGProgressPct.value  = pct;
@@ -1316,27 +1350,49 @@ const handleBeamNGLevelExport = async () => {
       console.warn(`${BEAMNG_EXPORT_UI_LOG} GPXZ backdrop selected but no GPXZ key was passed to export.`);
     }
 
+    // The export returns either { download: { url, jobId }, filename } when the
+    // sidecar compressed it (stream GET → disk, never a renderer-held blob), or
+    // { blob, filename } from the in-browser fallback.
+    const { blob, download, filename } = exportResult ?? {};
     console.log(`${BEAMNG_EXPORT_UI_LOG} Export returned payload:`, {
       filename,
-      blobType: blob?.type,
+      via: download ? 'sidecar' : 'in-browser',
       blobSize: blob?.size,
-      isBlob: blob instanceof Blob,
+      downloadUrl: download?.url,
     });
 
-    if (!(blob instanceof Blob)) {
-      throw new Error('BeamNG export did not return a Blob payload.');
-    }
     if (!filename || typeof filename !== 'string') {
       throw new Error('BeamNG export did not return a valid filename.');
     }
+    if (!download && !(blob instanceof Blob)) {
+      throw new Error('BeamNG export did not return a Blob or download URL.');
+    }
 
-    console.log(`${BEAMNG_EXPORT_UI_LOG} Triggering browser download...`, {
-      filename,
-      blobType: blob.type,
-      blobSize: blob.size,
-    });
+    console.log(`${BEAMNG_EXPORT_UI_LOG} Triggering browser download...`, { filename, via: download ? 'sidecar' : 'in-browser' });
 
-    if (beamNGSaveHandle) {
+    if (download) {
+      // Sidecar path: stream the finished .zip from the dev server straight to
+      // the save location — the renderer never holds the compressed archive.
+      if (beamNGSaveHandle) {
+        try {
+          const res = await fetch(download.url);
+          if (!res.ok || !res.body) {
+            throw new Error(`sidecar result unavailable (HTTP ${res.status})`);
+          }
+          await res.body.pipeTo(await beamNGSaveHandle.createWritable());
+          console.log(`${BEAMNG_EXPORT_UI_LOG} Download streamed to disk via File System Access API.`);
+          notifyExportSuccess('beamng_level_zip', filename);
+        } finally {
+          disposeSidecarZip(download.jobId);
+        }
+      } else {
+        // No FSA: point the anchor at the same-origin result URL. The browser
+        // streams it to disk on click; the sidecar TTL-reaps the temp file.
+        beamNGPendingDownloadUrl.value = download.url;
+        beamNGPendingDownloadName.value = filename;
+        console.warn(`${BEAMNG_EXPORT_UI_LOG} Awaiting explicit anchor click for sidecar download.`);
+      }
+    } else if (beamNGSaveHandle) {
       const writable = await beamNGSaveHandle.createWritable();
       await writable.write(blob);
       await writable.close();
@@ -1376,10 +1432,13 @@ const handleBeamNGPendingDownloadClick = () => {
     urlLength: beamNGPendingDownloadUrl.value.length,
   });
 
-  // Do not clear immediately; allow browser to fully consume the blob URL.
+  // Do not clear immediately; allow the browser to fully consume the URL.
+  // A sidecar result URL is same-origin (streamed to disk) — no blob to revoke;
+  // just clear our refs. A blob: URL (in-browser fallback) must be revoked.
   const urlToRevoke = beamNGPendingDownloadUrl.value;
+  const isBlobUrl = urlToRevoke.startsWith('blob:');
   setTimeout(() => {
-    URL.revokeObjectURL(urlToRevoke);
+    if (isBlobUrl) URL.revokeObjectURL(urlToRevoke);
     if (beamNGPendingDownloadUrl.value === urlToRevoke) {
       beamNGPendingDownloadUrl.value = '';
       beamNGPendingDownloadName.value = '';
