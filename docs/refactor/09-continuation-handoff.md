@@ -13,20 +13,20 @@ needed to pick up cold is below.
 - **Branch:** `refactor/internal-decomposition` (off `feat/tile-ground-conform`).
   **Local only — NOT pushed.** Working tree clean, everything green.
 - **Two-phase plan (decided with maintainer, see §6):**
-  1. **Decompose** the remaining 4 god-files in-place into `<500` modules
-     (the proven recipe, §2). ← *you are here; do `terrain.js` next.*
+  1. **Decompose** the remaining 3 god-files in-place into `<500` modules
+     (the proven recipe, §2). ← *you are here; do `export3d.js` next.*
+     (`terrain.js` ✅ done — commit `8f14ff9`, see §6a.)
   2. **Lift** the clean module folders into new packages `@mapng/terrain` and
      `@mapng/export`, then re-architect `@mapng/batch` to run off-main-thread in
      a worker.
-- **Remaining offenders (4 real + 1 vendored)** in `tools/lint-size-allow.json`:
+- **Remaining offenders (3 real + 1 vendored)** in `tools/lint-size-allow.json`:
   | file | LOC | target | oracle? |
   |---|---|---|---|
-  | `packages/bake/src/terrain.js` | 1986 | `terrain/*` | no (pure+fetch) |
   | `packages/bake/src/export3d.js` | 2163 | `scene3d/*` | THREE; render oracle helps |
   | `packages/bake/src/exportBeamNGLevel.js` | 5558 | `beamng/*` | yes — canvas+zip |
   | `packages/batch/src/batchJob.js` | 1561 | `batch/{grid,state,run}` | no |
   | `packages/bake/src/ColladaExporter.js` | 697 | — | VENDORED, permanent exempt |
-- **Recommended order:** `terrain.js` → `export3d.js` → `exportBeamNGLevel.js`
+- **Recommended order:** ~~`terrain.js`~~ → `export3d.js` → `exportBeamNGLevel.js`
   → `batchJob.js` → package lifts → batch-in-worker.
 
 ## 1. Resume gate (run before and after every change)
@@ -132,8 +132,10 @@ DEM). Use it if a geometry change needs a real-bake oracle.
   `osmLayerMap` (osmTerrainMaterials) (step 10).
 - `resample/` — `resampleKernels` (terrainResampler) + `heightSampling`,
   `heightFinalize` (resamplerWorker) (step 7).
-- `terrain/` — `surroundingTileMath`, `surroundingTilesZip` (surroundingTiles).
-  **`terrain.js` will add more here.**
+- `terrain/` — `surroundingTileMath`, `surroundingTilesZip` (surroundingTiles)
+  + (terrain.js, step 7) `mercatorTiles`, `heightDecode`, `pMap` (core),
+  `gpxzFetch`, `usgsFetch`, `tileLoaders`, `globalTiles`, `tifLoader`,
+  `lazLoader` (io), `fetchTerrainData` (flow).
 - `roads/` — `junctionConstants`, `geomPrimitives`, `junctionPolygons`,
   `polylineCleanup` (junctionGeometry, step 10).
 - `osm/` — `osmColors`, `pathGeometry`, `laneInference`, `roadWidths`,
@@ -141,39 +143,30 @@ DEM). Use it if a geometry change needs a real-bake oracle.
 
 Done files (all verbatim, barrels/slim entries): beamngFlavorCatalog 1008→128,
 osmTerrainMaterials 961→381, google3dTiles 862→30, resamplerWorker 828→188,
-surroundingTiles 668→466, junctionGeometry 629→24, osmTexture 1886→146.
+surroundingTiles 668→466, junctionGeometry 629→24, osmTexture 1886→146,
+terrain 1986→10.
 
-## 6. Decompose the 4 remaining giants (concrete seams)
+## 6. Decompose the 3 remaining giants (concrete seams)
 
-### 6a. `terrain.js` (1986) → `terrain/*`   ← DO THIS NEXT
-Heavily io: **61 canvas/fetch sites**. Consumers: `@mapng/bake/terrain` imported
-by route (`exportRouteLevel`, `routeBake`), batch (`batchJob`, `traceability`),
-and the Vue app. Public exports to preserve: `TERRAIN_ZOOM`, `project`,
+### 6a. `terrain.js` (1986) → `terrain/*`   ✅ DONE (commit `8f14ff9`)
+Split exactly as proposed. terrain.js is now a 10-line re-export barrel; the
+public surface (`TERRAIN_ZOOM`, `project`, `parseTifFile`, `parseLazFile`,
 `probeGPXZLimits`, `getGPXZRateLimitInfo`, `fetchTerrainData`,
-`loadTerrainFromTif`, `loadTerrainFromLaz`, `checkUSGSStatus`, `addOSMToTerrain`.
-Proposed split:
-- `terrain/mercatorTiles.js` (**core**): `TILE_SIZE`, `TERRAIN_ZOOM`,
-  `SATELLITE_ZOOM`, URL consts, `normalizeLng`, `unwrapLngNearRef`,
-  `computeMetricFetchBounds`, `project`, `MAX_LATITUDE`. (lines ~26-148)
-- `terrain/heightDecode.js` (**core**): `resolveElevationUnitScale`,
-  `convertHeightMapToMeters`, `FEET_TO_METERS`, `US_SURVEY_FEET_TO_METERS`,
-  `NO_DATA_VALUE`, `parseGeoTiffBuffers`. (~93-249)
-- `terrain/gpxzFetch.js` (**io**): `probeGPXZLimits`, `getGPXZRateLimitInfo`,
-  `fetchGPXZRaw` (big, ~250-534). **Candidate to move DOWN to
-  `@mapng/fetching/elevation/` during phase-2 lift** (tightens geo<fetching).
-- `terrain/usgsFetch.js` (**io**): `fetchUSGSRaw` (~535-699), `checkUSGSStatus`.
-  Also a fetching-layer candidate.
-- `terrain/tileLoaders.js` (**io**): `loadImage`, `loadTerrainTileCached`,
-  `loadSatelliteTileCached`, `canvasToSatelliteBlobUrl`, `SAT_TEX_MAX_SIZE`.
-  (~700-872)
-- `terrain/tifLazLoaders.js` (**io**): `loadTerrainFromTif` (~1411-1698),
-  `loadTerrainFromLaz` (~1699-1921).
-- `terrain.js` keeps `fetchTerrainData` (~538 lines — **may itself need an
-  internal split**, e.g. pull the per-source dispatch out) + `addOSMToTerrain` +
-  re-exports. Watch: if `fetchTerrainData` stays >500 after extraction, split its
-  global-tile-stitch / compose sub-steps into `terrain/terrainCompose.js`.
-- No canvas oracle strictly needed (verbatim move), but `terrain/mercatorTiles`
-  `project` is trivially unit-testable — add a tiny snapshot if you touch it.
+`loadTerrainFromTif`, `loadTerrainFromLaz`, `checkUSGSStatus`,
+`addOSMToTerrain`) + the `@mapng/bake/terrain` subpath are byte-for-byte stable.
+Modules under `terrain/`: `mercatorTiles`, `heightDecode`, `pMap` (core);
+`gpxzFetch`, `usgsFetch`, `tileLoaders`, `globalTiles`, `tifLoader`, `lazLoader`
+(io); `fetchTerrainData` (= fetchTerrainData + addOSMToTerrain, flow).
+Two deviations from the proposed seam, both forced & verbatim:
+- `fetchTerrainData`'s sampler-prep block (global-tile stitch, ~250 lines) was
+  extracted to `terrain/globalTiles.js` (`fetchGlobalTileSamplers`) — the only
+  non-pure-move; it returns `{heightSampler, colorSampler, fallbackSamplerData,
+  imageSamplerData}` so the orchestrator stays <500.
+- `tifLazLoaders` (proposed single file) was 548 LOC → split into `tifLoader.js`
+  + `lazLoader.js` (kept separate per the "don't merge near-duplicate kernels"
+  rule; the two sat-tile loops differ in progress payloads).
+Phase-2 note still stands: `gpxzFetch`/`usgsFetch` are candidates to sink into
+`@mapng/fetching/elevation/`.
 
 ### 6b. `export3d.js` (2163) → `scene3d/*`   (06 step 8)
 Mostly THREE geometry (canvas=2). Public: `SCENE_SIZE`, `createOSMGroup`,
