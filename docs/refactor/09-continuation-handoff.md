@@ -197,7 +197,11 @@ captured against the monolith, byte-identical after the split.
 - Phase-2: when `@mapng/export` lands, `glbExport`/`daeExport` (the only
   google3dTiles importers) gate headless tests — keep leaf-module oracles.
 
-### 6c. `exportBeamNGLevel.js` (5558) → `beamng/*`   (06 step 9, most care)
+### 6c. `exportBeamNGLevel.js` (5558) → `beamng/*`   ← DO THIS NEXT
+**Dedicated cold-start handoff: [10-exportbeamng-handoff.md](10-exportbeamng-handoff.md)**
+(concrete seams verified against the file + the .zip-oracle headless traps:
+`.py?raw` import + the export3d→WebGLRenderer pull). Summary below; read 10 first.
+
 One enormous `exportBeamNGLevel(terrainData, center, options)` entry at ~4216,
 preceded by ~4200 lines of helpers; canvas=17; 13 local `./` imports
 (osmTexture, junctionMesh, exportTer, google3dTiles, beamngFlavorCatalog…).

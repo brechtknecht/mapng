@@ -17,6 +17,10 @@ byte-stable across every step. Each phase is shippable on its own.
 | [03-migration-plan.md](03-migration-plan.md) | Phased, ordered, shippable steps. Each phase lists files moved, risk, and the verification gate. |
 | [04-conventions.md](04-conventions.md) | Engineering standards the refactor enforces: package template, import rules, naming, file-size budgets, test strategy, the god-file split playbook. |
 | [05-execution-log.md](05-execution-log.md) | What was actually executed vs planned, the deviations forced by the real dependency graph, and what is deliberately deferred (and why). **Read this for current state.** |
+| [07-decomposition-handoff.md](07-decomposition-handoff.md) | Mid-progress notes + hard-won learnings from the in-place god-file decomposition. |
+| [08-package-architecture.md](08-package-architecture.md) | The decided next package architecture (lift `terrain/*`→`@mapng/terrain`, `scene3d/*`+exporters→`@mapng/export`; batch-in-worker). |
+| [09-continuation-handoff.md](09-continuation-handoff.md) | **Single cold-start entry for the ongoing `@mapng/*` god-file decomposition.** Current state, the proven recipe, the headless oracle, remaining offenders. |
+| [10-exportbeamng-handoff.md](10-exportbeamng-handoff.md) | **Dedicated cold-start handoff for the last/largest giant** `exportBeamNGLevel.js` (5558→`beamng/*`): concrete seams + the .zip-oracle headless traps. |
 
 ## Guiding principles
 
