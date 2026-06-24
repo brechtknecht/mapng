@@ -15,7 +15,7 @@
     "test:weld": "node --test tests/weldSeams.test.mjs tests/stripGroundTris.test.mjs",
     "test:conform": "node --test tests/scalarFieldGrid.test.mjs tests/tileGroundConform.test.mjs tests/groundMask.test.mjs",
     "test:route": "node --test tests/routeConform.test.mjs",
-    "test:all": "node --test tests/exportGeoTiff.test.mjs tests/weldSeams.test.mjs tests/stripGroundTris.test.mjs tests/scalarFieldGrid.test.mjs tests/tileGroundConform.test.mjs tests/groundMask.test.mjs tests/routeConform.test.mjs tests/routeStitch.test.mjs tests/routeCorridor.test.mjs tests/routeProgress.test.mjs tests/routeTerrainComposite.test.mjs tests/buildCorridorStations.test.mjs tests/junctionGeometry.test.mjs tests/ascLoader.test.mjs tests/gmlLoader.test.mjs",
+    "test:all": "node --test tests/exportGeoTiff.test.mjs tests/weldSeams.test.mjs tests/stripGroundTris.test.mjs tests/scalarFieldGrid.test.mjs tests/tileGroundConform.test.mjs tests/groundMask.test.mjs tests/routeConform.test.mjs tests/routeStitch.test.mjs tests/routeCorridor.test.mjs tests/routeProgress.test.mjs tests/routeTerrainComposite.test.mjs tests/buildCorridorStations.test.mjs tests/junctionGeometry.test.mjs tests/ascLoader.test.mjs tests/gmlLoader.test.mjs tests/osmTextureHeadless.test.mjs",
     "boundaries": "node tools/check-boundaries.mjs",
     "lint:size": "node tools/check-filesize.mjs",
     "check": "node tools/check-boundaries.mjs && node tools/check-filesize.mjs && npm run test:all",
@@ -42,6 +42,7 @@
     "vue-i18n": "^11.3.0"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "^1.0.0",
     "@vitejs/plugin-vue": "^6.0.3",
     "autoprefixer": "^10.4.22",
     "baseline-browser-mapping": "^2.9.19",
