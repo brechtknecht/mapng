@@ -13,26 +13,25 @@ needed to pick up cold is below.
 - **Branch:** `refactor/internal-decomposition` (off `feat/tile-ground-conform`).
   **Local only — NOT pushed.** Working tree clean, everything green.
 - **Two-phase plan (decided with maintainer, see §6):**
-  1. **Decompose** the remaining 3 god-files in-place into `<500` modules
-     (the proven recipe, §2). ← *you are here; do `export3d.js` next.*
-     (`terrain.js` ✅ done — commit `8f14ff9`, see §6a.)
+  1. **Decompose** the remaining 2 god-files in-place into `<500` modules
+     (the proven recipe, §2). ← *you are here; do `exportBeamNGLevel.js` next.*
+     (`terrain.js` ✅ `8f14ff9`; `export3d.js` ✅ `636122c` — see §6a/§6b.)
   2. **Lift** the clean module folders into new packages `@mapng/terrain` and
      `@mapng/export`, then re-architect `@mapng/batch` to run off-main-thread in
      a worker.
-- **Remaining offenders (3 real + 1 vendored)** in `tools/lint-size-allow.json`:
+- **Remaining offenders (2 real + 1 vendored)** in `tools/lint-size-allow.json`:
   | file | LOC | target | oracle? |
   |---|---|---|---|
-  | `packages/bake/src/export3d.js` | 2163 | `scene3d/*` | THREE; render oracle helps |
   | `packages/bake/src/exportBeamNGLevel.js` | 5558 | `beamng/*` | yes — canvas+zip |
   | `packages/batch/src/batchJob.js` | 1561 | `batch/{grid,state,run}` | no |
   | `packages/bake/src/ColladaExporter.js` | 697 | — | VENDORED, permanent exempt |
-- **Recommended order:** ~~`terrain.js`~~ → `export3d.js` → `exportBeamNGLevel.js`
+- **Recommended order:** ~~`terrain.js`~~ → ~~`export3d.js`~~ → `exportBeamNGLevel.js`
   → `batchJob.js` → package lifts → batch-in-worker.
 
 ## 1. Resume gate (run before and after every change)
 
 ```
-npm run check     # = boundaries + lint:size + test:all (91 tests)
+npm run check     # = boundaries + lint:size + test:all (93 tests)
 npm run build     # vite build of the Vue app
 node --check scripts/googleBakeWorker.mjs   # the node bake sidecar must parse
 ```
@@ -141,10 +140,15 @@ DEM). Use it if a geometry change needs a real-bake oracle.
 - `osm/` — `osmColors`, `pathGeometry`, `laneInference`, `roadWidths`,
   `junctionCaps` (core) + `roadDraw`, `featureRender` (io) (osmTexture, step 6).
 
+- `scene3d/` — (export3d.js, step 8) `sceneProjection` (SCENE_SIZE + the shared
+  projection/height cache), `osmGeometry`, `osmFeatureConfig`, `osmFeatureCollect`,
+  `osmMeshes` (createOSMGroup), `corridorMask`, `sceneUtils` (core) +
+  `terrainMesh`, `surroundingMeshes` (io) + `glbExport`, `daeExport` (flow).
+
 Done files (all verbatim, barrels/slim entries): beamngFlavorCatalog 1008→128,
 osmTerrainMaterials 961→381, google3dTiles 862→30, resamplerWorker 828→188,
 surroundingTiles 668→466, junctionGeometry 629→24, osmTexture 1886→146,
-terrain 1986→10.
+terrain 1986→10, export3d 2163→11.
 
 ## 6. Decompose the 3 remaining giants (concrete seams)
 
@@ -168,20 +172,30 @@ Two deviations from the proposed seam, both forced & verbatim:
 Phase-2 note still stands: `gpxzFetch`/`usgsFetch` are candidates to sink into
 `@mapng/fetching/elevation/`.
 
-### 6b. `export3d.js` (2163) → `scene3d/*`   (06 step 8)
-Mostly THREE geometry (canvas=2). Public: `SCENE_SIZE`, `createOSMGroup`,
-`exportToGLB`, `exportToDAE`, `createSurroundingMeshes`. Consumers: route
-(`exportToGLB`), batch (`exportToGLB`, `exportToDAE`), exportBeamNGLevel
-(`createOSMGroup`, `createSurroundingMeshes`, `SCENE_SIZE`), the app.
-- `createOSMGroup` is the beast (~675-1546, ~870 lines) — build THREE meshes from
-  OSM. Split into `scene3d/osmMeshes.js` (+ maybe `scene3d/tilePlacement3d.js`).
-- `scene3d/colladaExport.js` (wraps vendored `ColladaExporter`) ← `exportToDAE`.
-- `scene3d/glbExport.js` ← `exportToGLB` (GLTFExporter).
-- `scene3d/surroundingMeshes.js` ← `createSurroundingMeshes`.
-- `export3d.js` slims to the orchestrator + re-exports `SCENE_SIZE`.
-- Oracle: GLB/DAE bytes are hashable; capture a golden against the monolith for a
-  small fixture (use the canvas shim — GLTFExporter/Collada don't need DOM, but
-  `createOSMGroup` may touch canvas for textures).
+### 6b. `export3d.js` (2163) → `scene3d/*`   ✅ DONE (commit `636122c`)
+export3d.js is now an 11-line barrel; public surface (`SCENE_SIZE`,
+`createOSMGroup`, `exportToGLB`, `exportToDAE`, `createSurroundingMeshes`) + the
+`@mapng/bake/export3d` subpath are byte-for-byte stable. Modules: see §5
+`scene3d/`. createOSMGroup (713 LOC) was split 3 ways — `osmFeatureConfig`
+(tag→config), `osmFeatureCollect` (feature→list bucketing, owns the random
+tree/bush placement), `osmMeshes` (setup + per-category assembly). The shared
+projection/height cache lives in `sceneProjection` (single module instance =
+single cache, exactly as before); `getCachedUnitsPerMeter()` exposes the one
+private constant that createRoadGeometry + corridorMask read directly.
+**Oracle (`tests/export3dHeadless.test.mjs`):** seeded Math.random, hash the
+merged buffer attributes of every mesh createOSMGroup emits — pinned golden
+captured against the monolith, byte-identical after the split.
+**Two traps learned, write them down:**
+1. **The export3d barrel is NOT headless-importable.** `glbExport`/`daeExport`
+   import `google3dTiles` → `3d-tiles-renderer` instantiates a `WebGLRenderer`
+   at module-eval (needs a GPU). So the oracle imports the *leaf* module
+   `@mapng/bake/scene3d/osmMeshes` directly, not the barrel. To capture the
+   monolith golden I had to temporarily stub the google3dTiles import line in
+   export3d.js (createOSMGroup never uses it), capture, then revert.
+2. Taught `tools/testlab/canvasShim.mjs` `document.createElementNS` (THREE uses
+   it for its internal canvas/img) — needed for any headless THREE test now.
+- Phase-2: when `@mapng/export` lands, `glbExport`/`daeExport` (the only
+  google3dTiles importers) gate headless tests — keep leaf-module oracles.
 
 ### 6c. `exportBeamNGLevel.js` (5558) → `beamng/*`   (06 step 9, most care)
 One enormous `exportBeamNGLevel(terrainData, center, options)` entry at ~4216,
