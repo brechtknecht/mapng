@@ -32,10 +32,24 @@ Self-contained: read this + 06 and you have everything.
   - `junctionGeometry.js` **629→24** (barrel) → `roads/{junctionConstants,
     geomPrimitives,junctionPolygons,polylineCleanup}.js` (step 10). Covered by
     `tests/junctionGeometry.test.mjs`.
-- **Offenders remaining: 6** (tracked in `tools/lint-size-allow.json`; one is
-  vendored → permanent). **5 real targets — all giants (1561–5558 LOC):**
-  `exportBeamNGLevel.js`, `export3d.js`, `terrain.js`, `osmTexture.js`,
-  `batchJob.js`. The small/medium files are all done.
+- **Also done this thread — `osmTexture.js` 1886→146 (the first giant, step 6):**
+  pure core: `osm/{osmColors,pathGeometry,laneInference,roadWidths,junctionCaps}`;
+  canvas io: `osm/{roadDraw,featureRender}`. Entry keeps the three texture
+  builders + re-exports `getFeatureCategory`. **The handoff's "1430-LOC
+  getFeatureCategory rewrite" was WRONG** — `getFeatureCategory` is a one-liner;
+  the real classifier is `getFeatureColor` (208 lines, pure, moved verbatim). No
+  rewrite was needed.
+- **NEW: headless render oracle (no browser).** `tools/testlab/canvasShim.mjs`
+  backs `document.createElement('canvas')`/`Image`/`URL` with `@napi-rs/canvas`
+  (a devDep). `tests/osmTextureHeadless.test.mjs` renders `generateOSMTexture` in
+  Node and pins a **golden PNG hash**, verified byte-identical to the
+  pre-split monolith. This is the pattern for de-risking the remaining
+  canvas-coupled giants (export3d, exportBeamNGLevel): import the shim, render,
+  hash. Earlier claims that these "need a browser" were wrong.
+- **Offenders remaining: 5** (tracked in `tools/lint-size-allow.json`; one is
+  vendored → permanent). **4 real targets — all giants (1561–5558 LOC):**
+  `exportBeamNGLevel.js`, `export3d.js`, `terrain.js`, `batchJob.js`. The
+  small/medium files and the first giant are all done.
 
 ## The recipe that works (follow it every time)
 
