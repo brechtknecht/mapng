@@ -13,7 +13,6 @@ import JSZip from 'jszip';
 import { fetchTerrainData } from '@mapng/terrain/terrain';
 import { exportToGLB, exportToDAE } from '@mapng/export/export3d';
 import {
-  generateHeightmapBlob,
   generateSatelliteBlob,
   generateOSMTextureBlob,
   generateHybridTextureBlob,
@@ -22,6 +21,7 @@ import {
   generateGeoJSONBlob,
   generateTerBlob,
 } from './batchExports.js';
+import { encodeHeightmapOffThread } from './batchEncodeClient.js';
 import { JOB_STATES, TILE_STATES } from './batchRuntime.js';
 import { classifyError, runWithRetry } from '@mapng/fetching';
 import { getTileLabel, sanitizeFilenamePart } from './grid.js';
@@ -163,7 +163,7 @@ export async function processTile(state, tile, ctx, signal) {
               maxHeight: state.elevationNormalization.globalMaxHeight,
             }
             : null;
-        const blob = await scheduleEncode(tile, () => runTimedStage(tile, 'encode_png_heightmap', async () => generateHeightmapBlob(terrainData, sharedRange)));
+        const blob = await scheduleEncode(tile, () => runTimedStage(tile, 'encode_png_heightmap', async () => encodeHeightmapOffThread(terrainData, sharedRange)));
         if (blob) zip.file('heightmap_16bit.png', await ensureExportBlobType(blob, 'image/png'));
         onHeightmapGenerated?.(tile, terrainData);
         checkpoint(state);
