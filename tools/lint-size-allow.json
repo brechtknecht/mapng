@@ -6,6 +6,5 @@
   "packages/bake/src/osmTexture.js": "god-file 1886 LOC — decompose into osm/* (06 step 6)",
   "packages/batch/src/batchJob.js": "god-file 1561 LOC — decompose into batch grid/state/run (06 step 4)",
   "packages/bake/src/ColladaExporter.js": "697 LOC — VENDORED three.js example; exempt until replaced",
-  "packages/bake/src/surroundingTiles.js": "668 LOC — fold into terrain/* (06 step 7)",
   "packages/bake/src/junctionGeometry.js": "629 LOC — split if still >500 after beamng/* (06 step 10)"
 }
