@@ -13,25 +13,27 @@ needed to pick up cold is below.
 - **Branch:** `refactor/internal-decomposition` (off `feat/tile-ground-conform`).
   **Local only — NOT pushed.** Working tree clean, everything green.
 - **Two-phase plan (decided with maintainer, see §6):**
-  1. **Decompose** the remaining 2 god-files in-place into `<500` modules
-     (the proven recipe, §2). ← *you are here; do `exportBeamNGLevel.js` next.*
+  1. **Decompose** the remaining god-files in-place into `<500` modules
+     (the proven recipe, §2). ← *`exportBeamNGLevel.js` ✅ DONE & bake-verified
+     (9a `4e76859` / 9b `b497038` / 9c `0f6d49e`); `batchJob.js` is the last one —
+     see **[11-batchjob-handoff.md](11-batchjob-handoff.md)**.*
      (`terrain.js` ✅ `8f14ff9`; `export3d.js` ✅ `636122c` — see §6a/§6b.)
   2. **Lift** the clean module folders into new packages `@mapng/terrain` and
      `@mapng/export`, then re-architect `@mapng/batch` to run off-main-thread in
      a worker.
-- **Remaining offenders (2 real + 1 vendored)** in `tools/lint-size-allow.json`:
+- **Remaining offenders (1 real + 1 vendored)** in `tools/lint-size-allow.json`:
   | file | LOC | target | oracle? |
   |---|---|---|---|
-  | `packages/bake/src/exportBeamNGLevel.js` | 5558 | `beamng/*` | yes — canvas+zip |
-  | `packages/batch/src/batchJob.js` | 1561 | `batch/{grid,state,run}` | no |
+  | ~~`exportBeamNGLevel.js`~~ | ~~5558~~ | ✅ `beamng/*` (18 modules, 162-LOC entry) | done — 3 golden oracles + real bake |
+  | `packages/batch/src/batchJob.js` | 1561 | `grid/config/state/report/processTile/…` (→ **doc 11**) | pure core yes; runner no (export3d→WebGLRenderer) |
   | `packages/bake/src/ColladaExporter.js` | 697 | — | VENDORED, permanent exempt |
-- **Recommended order:** ~~`terrain.js`~~ → ~~`export3d.js`~~ → `exportBeamNGLevel.js`
-  → `batchJob.js` → package lifts → batch-in-worker.
+- **Recommended order:** ~~`terrain.js`~~ → ~~`export3d.js`~~ → ~~`exportBeamNGLevel.js`~~
+  → `batchJob.js` (**doc 11**) → package lifts → batch-in-worker.
 
 ## 1. Resume gate (run before and after every change)
 
 ```
-npm run check     # = boundaries + lint:size + test:all (93 tests)
+npm run check     # = boundaries + lint:size + test:all (97 tests)
 npm run build     # vite build of the Vue app
 node --check scripts/googleBakeWorker.mjs   # the node bake sidecar must parse
 ```

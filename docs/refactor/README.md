@@ -20,7 +20,8 @@ byte-stable across every step. Each phase is shippable on its own.
 | [07-decomposition-handoff.md](07-decomposition-handoff.md) | Mid-progress notes + hard-won learnings from the in-place god-file decomposition. |
 | [08-package-architecture.md](08-package-architecture.md) | The decided next package architecture (lift `terrain/*`→`@mapng/terrain`, `scene3d/*`+exporters→`@mapng/export`; batch-in-worker). |
 | [09-continuation-handoff.md](09-continuation-handoff.md) | **Single cold-start entry for the ongoing `@mapng/*` god-file decomposition.** Current state, the proven recipe, the headless oracle, remaining offenders. |
-| [10-exportbeamng-handoff.md](10-exportbeamng-handoff.md) | **Dedicated cold-start handoff for the last/largest giant** `exportBeamNGLevel.js` (5558→`beamng/*`): concrete seams + the .zip-oracle headless traps. |
+| [10-exportbeamng-handoff.md](10-exportbeamng-handoff.md) | Dedicated handoff for `exportBeamNGLevel.js` (5558→`beamng/*`). **DONE & bake-verified** (9a/9b/9c). |
+| [11-batchjob-handoff.md](11-batchjob-handoff.md) | **Dedicated cold-start handoff for the last real god-file** `batchJob.js` (1561→`grid/config/state/report/processTile/…`): concrete seams + the worker boundary it sets up. **Start here next.** |
 
 ## Guiding principles
 
