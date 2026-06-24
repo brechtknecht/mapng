@@ -92,13 +92,15 @@ geo < fetching < terrain < bake < export < { route, batch } < pipelines
      roadArchitect{Profiles,Session}/meshRoads/report/levelZip/barriers +
      textures/meshAssets/googleTilesAssets/water/forest). **9b DONE** (`b497038`):
      archive serialization → `levelArchive`/`levelFiles`/`missionGroup`/`levelLua`
-     (pure core, ctx-threaded) + headless oracle. Entry now 748 LOC. **9c TODO:**
-     extract the ~480-line compute phase → `beamng/levelArtifacts.js` (flow, via a
-     small progress-tracker passed in), thin the orchestrator <500, barrel
-     `src/exportBeamNGLevel.js`, drop the allowlist entry. 9c's compute path can't
-     run headless (google3dTiles WebGLRenderer + canvas + fetch) — verify the
-     artifacts→orchestrator field contract statically (as 9b did) and confirm with
-     ONE real in-app bake.
+     (pure core, ctx-threaded) + headless oracle. **9c DONE** (`0f6d49e`):
+     compute phase → `beamng/levelArtifacts.js` (flow), Google-tiles export
+     orchestration → `beamng/googleTilesAssets.js` (`exportGoogleTilesForLevel`);
+     `src/exportBeamNGLevel.js` is now a 162-LOC orchestrator (stayed in src/,
+     no barrel needed since <500), allowlist entry dropped. The 5558-LOC giant is
+     fully retired. 9c's compute path can't run headless (google3dTiles
+     WebGLRenderer + canvas + fetch) — field contract verified statically
+     (artifacts return 42 = writer reads 42) + vite build; a real in-app bake is
+     the outstanding end-to-end confirmation.
    - `batchJob.js` (1561) → grid / state / run modules.
 2. **Lift folders into `@mapng/terrain` and `@mapng/export`** (mechanical move +
    repoint imports + update `tools/check-boundaries.mjs` ALLOWED graph + add the
