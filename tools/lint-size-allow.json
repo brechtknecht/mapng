@@ -11,7 +11,6 @@
   "packages/bake/src/resamplerWorker.js": "828 LOC — split kernels vs worker entry (06 step 7)",
   "packages/bake/src/ColladaExporter.js": "697 LOC — VENDORED three.js example; exempt until replaced",
   "packages/bake/src/surroundingTiles.js": "668 LOC — fold into terrain/* (06 step 7)",
-  "packages/fetching/src/osm.js": "658 LOC — split osm fetch vs parse (06 step 5)",
   "packages/bake/src/junctionGeometry.js": "629 LOC — split if still >500 after beamng/* (06 step 10)",
   "packages/fetching/src/kron86.js": "582 LOC — split kron86 fetch vs parse (06 step 5)",
   "packages/bake/src/terrainResampler.js": "535 LOC — fold into terrain/* (06 step 7)"
