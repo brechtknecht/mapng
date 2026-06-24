@@ -1,6 +1,6 @@
 {
   "_doc": "Ratchet allowlist for tools/check-filesize.mjs (cap 500 LOC). Each entry is a god-file pending decomposition per docs/refactor/06-internal-decomposition.md. DELETE an entry when its file drops <=500 LOC. Do not ADD entries — new code must be born small.",
-  "packages/bake/src/exportBeamNGLevel.js": "god-file 5558 LOC — decompose into beamng/* (06 step 9)",
+  "packages/bake/src/exportBeamNGLevel.js": "orchestrator — ~95 helpers extracted to beamng/* (06 step 9); the ~1340-line exportBeamNGLevel() entry awaits decomposition (06 step 9b: writeLevelEntries/ctx + barrel)",
   "packages/batch/src/batchJob.js": "god-file 1561 LOC — decompose into batch grid/state/run (06 step 4)",
   "packages/bake/src/ColladaExporter.js": "697 LOC — VENDORED three.js example; exempt until replaced"
 }
