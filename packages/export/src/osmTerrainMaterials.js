@@ -17,7 +17,7 @@
 import {
   getTerrainLevelFallbacks,
   getTerrainSemanticCandidates,
-} from './beamngFlavorCatalog.js';
+} from '@mapng/bake/beamngFlavorCatalog';
 import {
   MATERIAL_NAMES,
   MATERIAL_NAMES_LIST,

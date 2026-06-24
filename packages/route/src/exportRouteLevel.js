@@ -19,8 +19,8 @@
 // (chunkMinHeight − combinedMinHeight) so its ground meets the terrain datum.
 
 import { fetchTerrainData } from '@mapng/terrain/terrain';
-import { exportToGLB } from '@mapng/bake/export3d';
-import { exportBeamNGLevel } from '@mapng/bake/exportBeamNGLevel';
+import { exportToGLB } from '@mapng/export/export3d';
+import { exportBeamNGLevel } from '@mapng/export/exportBeamNGLevel';
 import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION, TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';

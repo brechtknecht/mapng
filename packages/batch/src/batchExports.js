@@ -1,4 +1,4 @@
-import { exportTer } from '@mapng/bake/exportTer';
+import { exportTer } from '@mapng/export/exportTer';
 /**
  * batchExports.js — Pure functions that generate export Blobs from terrainData.
  * Used by the batch job runner to produce tile exports without triggering downloads.
@@ -6,7 +6,7 @@ import { exportTer } from '@mapng/bake/exportTer';
 
 import { encode } from 'fast-png';
 import { createWGS84ToLocal } from '@mapng/geo';
-import { exportGeoTiff } from '@mapng/bake/exportGeoTiff';
+import { exportGeoTiff } from '@mapng/export/exportGeoTiff';
 
 const isJsonMimeType = (mime = '') => {
   const normalized = String(mime).toLowerCase();

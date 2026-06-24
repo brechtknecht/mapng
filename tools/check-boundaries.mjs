@@ -12,9 +12,10 @@ const ALLOWED = {
     fetching: new Set(['geo']),
     terrain: new Set(['geo', 'fetching']),
     bake: new Set(['geo', 'fetching', 'terrain']),
-    route: new Set(['geo', 'fetching', 'terrain', 'bake']),
-    batch: new Set(['geo', 'fetching', 'terrain', 'bake']),
-    pipelines: new Set(['geo', 'fetching', 'terrain', 'bake', 'route', 'batch']),
+    export: new Set(['geo', 'fetching', 'terrain', 'bake']),
+    route: new Set(['geo', 'fetching', 'terrain', 'bake', 'export']),
+    batch: new Set(['geo', 'fetching', 'terrain', 'bake', 'export']),
+    pipelines: new Set(['geo', 'fetching', 'terrain', 'bake', 'export', 'route', 'batch']),
 };
 
 const ROOT = new URL('../packages', import.meta.url).pathname;
@@ -85,4 +86,4 @@ if (violations) {
     console.error(`\n${violations} boundary violation(s).`);
     process.exit(1);
 }
-console.log('✓ package boundaries OK (geo < fetching < terrain < bake < {route, batch} < pipelines; core ↛ io/flow)');
+console.log('✓ package boundaries OK (geo < fetching < terrain < bake < export < {route, batch} < pipelines; core ↛ io/flow)');

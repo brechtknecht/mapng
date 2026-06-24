@@ -4,7 +4,7 @@
 // group, then encode with GLTFExporter and download/return the blob.
 import * as THREE from "three";
 import { GLTFExporter } from "three/examples/jsm/exporters/GLTFExporter.js";
-import { getOrBakeGoogle3DTiles, computeUnitsPerMeter, getGoogleTilesZOffset } from "../google3dTiles.js";
+import { getOrBakeGoogle3DTiles, computeUnitsPerMeter, getGoogleTilesZOffset } from "@mapng/bake/google3dTiles";
 import { createTerrainMesh } from "./terrainMesh.js";
 import { createOSMGroup } from "./osmMeshes.js";
 import { createSurroundingMeshes } from "./surroundingMeshes.js";

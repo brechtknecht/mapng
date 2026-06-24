@@ -11,7 +11,7 @@
 
 import JSZip from 'jszip';
 import { fetchTerrainData } from '@mapng/terrain/terrain';
-import { exportToGLB, exportToDAE } from '@mapng/bake/export3d';
+import { exportToGLB, exportToDAE } from '@mapng/export/export3d';
 import {
   generateHeightmapBlob,
   generateSatelliteBlob,

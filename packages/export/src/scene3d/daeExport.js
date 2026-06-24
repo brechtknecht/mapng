@@ -5,7 +5,7 @@
 import * as THREE from "three";
 import JSZip from "jszip";
 import { ColladaExporter } from "../ColladaExporter.js";
-import { getOrBakeGoogle3DTiles, computeUnitsPerMeter, getGoogleTilesZOffset } from "../google3dTiles.js";
+import { getOrBakeGoogle3DTiles, computeUnitsPerMeter, getGoogleTilesZOffset } from "@mapng/bake/google3dTiles";
 import { createTerrainMesh } from "./terrainMesh.js";
 import { createOSMGroup } from "./osmMeshes.js";
 import { createSurroundingMeshes } from "./surroundingMeshes.js";

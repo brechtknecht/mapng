@@ -12,7 +12,7 @@ import {
   resolveBushType,
   getRockCandidates,
   getGroundCoverProfile,
-} from '../beamngFlavorCatalog.js';
+} from '@mapng/bake/beamngFlavorCatalog';
 import { roundTo } from './format.js';
 import {
   geoToWorldPoint,

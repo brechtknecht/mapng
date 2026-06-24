@@ -5,7 +5,7 @@ import {
   validateJunctionPolygon,
   mergeJunctionClusters,
   JUNCTION_POLYGON_Z_CLAMP_RANGE_M,
-} from '@mapng/bake/junctionGeometry';
+} from '@mapng/export/junctionGeometry';
 
 // ─── clampPolygonZRange ───────────────────────────────────────────────────
 

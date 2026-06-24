@@ -17,8 +17,8 @@ installCanvasShim();
 // Import the leaf module directly — the export3d barrel pulls in google3dTiles
 // (3d-tiles-renderer instantiates a WebGLRenderer at import), which needs a GPU.
 // osmMeshes has no such dependency, so it runs headless.
-const { createOSMGroup } = await import('@mapng/bake/scene3d/osmMeshes');
-const { SCENE_SIZE } = await import('@mapng/bake/scene3d/sceneProjection');
+const { createOSMGroup } = await import('@mapng/export/scene3d/osmMeshes');
+const { SCENE_SIZE } = await import('@mapng/export/scene3d/sceneProjection');
 
 // Deterministic mulberry32 — replaces Math.random for the duration of a build.
 const seededRandom = (seed) => () => {

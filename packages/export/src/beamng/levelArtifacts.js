@@ -10,9 +10,9 @@
 // (06 step 9c).
 import { exportTer } from '../exportTer.js';
 import { buildTerrainMaterials } from '../osmTerrainMaterials.js';
-import { TILE_RENDER_BIAS_M } from '../google3dTiles.js';
+import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 import beamngGlbToDaeScript from '../../../../scripts/beamng_glb_to_dae.py?raw';
-import { prepareCroppedTerrainData } from '../cropTerrain.js';
+import { prepareCroppedTerrainData } from '@mapng/bake/cropTerrain';
 import { applyBuildingFoundations } from '../buildingFoundations.js';
 import {
   buildJunctionPolygons,
@@ -25,7 +25,7 @@ import {
   getBeamNGFlavorById,
   getGroundCoverProfile,
   getShapeMaterialDefsForFlavor,
-} from '../beamngFlavorCatalog.js';
+} from '@mapng/bake/beamngFlavorCatalog';
 import {
   sanitizeLevelName,
   filterOSMFeaturesToBounds,

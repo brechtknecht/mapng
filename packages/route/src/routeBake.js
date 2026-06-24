@@ -15,7 +15,7 @@
 
 import JSZip from 'jszip';
 import { fetchTerrainData } from '@mapng/terrain/terrain';
-import { exportToGLB } from '@mapng/bake/export3d';
+import { exportToGLB } from '@mapng/export/export3d';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from '@mapng/bake/google3dTiles';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';

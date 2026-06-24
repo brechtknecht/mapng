@@ -5,7 +5,7 @@
 // catalog (getWaterProfile) — that module carries a lazy material fetch, so a
 // core file may not import it. (Lazy: these builders still run headless.)
 // Extracted verbatim from exportBeamNGLevel.js (06 step 9).
-import { getWaterProfile } from '../beamngFlavorCatalog.js';
+import { getWaterProfile } from '@mapng/bake/beamngFlavorCatalog';
 import { clamp, roundTo } from './format.js';
 import {
   geoToWorldPoint,

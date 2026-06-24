@@ -16,14 +16,14 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
-import { computeSquareSize } from '@mapng/bake/beamng/worldMath';
-import { generateDecalRoads } from '@mapng/bake/beamng/decalRoads';
-import { generateMeshRoads } from '@mapng/bake/beamng/meshRoads';
-import { generateRoadArchitectSession } from '@mapng/bake/beamng/roadArchitectSession';
-import { buildNativeBarrierObjects, buildBarrierFolderItems } from '@mapng/bake/beamng/barriers';
-import { buildWaterBlockObjects, buildRiverObjects, buildSeaLevelWaterPlane } from '@mapng/bake/beamng/water';
-import { buildForestPlacements, serializeForestFiles, buildGroundCoverObjects } from '@mapng/bake/beamng/forest';
-import { buildBeamNGExportReport } from '@mapng/bake/beamng/report';
+import { computeSquareSize } from '@mapng/export/beamng/worldMath';
+import { generateDecalRoads } from '@mapng/export/beamng/decalRoads';
+import { generateMeshRoads } from '@mapng/export/beamng/meshRoads';
+import { generateRoadArchitectSession } from '@mapng/export/beamng/roadArchitectSession';
+import { buildNativeBarrierObjects, buildBarrierFolderItems } from '@mapng/export/beamng/barriers';
+import { buildWaterBlockObjects, buildRiverObjects, buildSeaLevelWaterPlane } from '@mapng/export/beamng/water';
+import { buildForestPlacements, serializeForestFiles, buildGroundCoverObjects } from '@mapng/export/beamng/forest';
+import { buildBeamNGExportReport } from '@mapng/export/beamng/report';
 import { getBeamNGFlavorById } from '@mapng/bake/beamngFlavorCatalog';
 
 // Deterministic mulberry32 — generatePersistentId() calls Math.random, so the

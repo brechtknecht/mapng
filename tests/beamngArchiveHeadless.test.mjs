@@ -15,7 +15,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { writeLevelEntries } from '@mapng/bake/beamng/levelArchive';
+import { writeLevelEntries } from '@mapng/export/beamng/levelArchive';
 
 const seededRandom = (seed) => () => {
   seed |= 0;

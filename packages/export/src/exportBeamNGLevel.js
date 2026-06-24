@@ -7,7 +7,7 @@
 // compress (Node sidecar when available, in-browser JSZip fallback). Consumers:
 // components/panels/ExportPanel.vue, packages/route exportRouteLevel.js.
 import JSZip from 'jszip';
-import { zipSidecarAvailable, compressZipViaSidecar, isServerPathEntry } from './zipExportSidecar.js';
+import { zipSidecarAvailable, compressZipViaSidecar, isServerPathEntry } from '@mapng/bake/zipExportSidecar';
 import { buildLevelArtifacts } from './beamng/levelArtifacts.js';
 import { writeLevelEntries } from './beamng/levelArchive.js';
 

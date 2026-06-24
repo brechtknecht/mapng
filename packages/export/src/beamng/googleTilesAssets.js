@@ -8,7 +8,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { ColladaExporter } from '../ColladaExporter.js';
-import { getOrBakeGoogle3DTiles, getGoogleTilesZOffset, exportGoogleTilesViaSidecar, googleBakeSidecarAvailable } from '../google3dTiles.js';
+import { getOrBakeGoogle3DTiles, getGoogleTilesZOffset, exportGoogleTilesViaSidecar, googleBakeSidecarAvailable } from '@mapng/bake/google3dTiles';
 import { SCENE_SIZE } from '../scene3d/sceneProjection.js';
 
 /**

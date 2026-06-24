@@ -511,11 +511,11 @@ import {
 } from 'lucide-vue-next';
 import { buildRunConfiguration as buildRunConfigurationBase } from '@mapng/batch/runConfiguration';
 import { generateHeightmapBlob, generateTerBlob } from '@mapng/batch/batchExports';
-import { exportToGLB, exportToDAE } from '@mapng/bake/export3d';
-import { exportGeoTiff } from '@mapng/bake/exportGeoTiff';
+import { exportToGLB, exportToDAE } from '@mapng/export/export3d';
+import { exportGeoTiff } from '@mapng/export/exportGeoTiff';
 import { buildCommonTraceMetadata, downloadJsonFile } from '@mapng/batch/traceability';
 import { createWGS84ToLocal } from '@mapng/geo';
-import { exportBeamNGLevel } from '@mapng/bake/exportBeamNGLevel';
+import { exportBeamNGLevel } from '@mapng/export/exportBeamNGLevel';
 import { disposeSidecarZip } from '@mapng/bake/zipExportSidecar';
 import { prepareCroppedTerrainData } from '@mapng/bake/cropTerrain';
 import { getBeamNGFlavorOptions } from '@mapng/bake/beamngFlavorCatalog';

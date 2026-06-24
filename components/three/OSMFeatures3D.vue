@@ -1,6 +1,6 @@
 <script setup>
 import { shallowRef, watch, toRaw, onUnmounted } from 'vue';
-import { createOSMGroup } from '@mapng/bake/export3d';
+import { createOSMGroup } from '@mapng/export/export3d';
 
 const props = defineProps({
   terrainData: { required: true },
