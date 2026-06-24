@@ -46,15 +46,38 @@ geo < fetching < terrain < bake < export < { route, batch } < pipelines
   dep. Subpath mapping `@mapng/bake/terrain` → `@mapng/terrain/terrain` (1:1,
   preserves the subpath convention, avoids root-barrel `export *` collisions).
 
-### 2. `@mapng/export`  (new layer: bake < export < {route, batch})
-- **Why it's a real boundary:** the export *formats* (GLB/DAE via `export3d`,
-  BeamNG `.zip` via `exportBeamNGLevel`, `.ter` via `exportTer`, GeoTIFF via
-  `exportGeoTiff`) consume bake internals (`google3dTiles`, `junctionMesh`,
-  `osmTexture`, `ColladaExporter`); route/batch consume the exports. Distinct
-  concern, sits above bake.
-- **Cycle to break:** `bake/index.js` currently `export *`s `export3d` +
-  `exportBeamNGLevel`. Those re-exports MUST be removed when the files leave
-  (else bake→export→bake). Consumers import from `@mapng/export/*` instead.
+### 2. `@mapng/export`  ✅ DONE (`9853323`) — new layer bake < export < {route, batch}
+- **The boundary, made precise by an import-closure partition** (the eyeballed
+  "thin format layer on a fat bake core" was wrong-sized in both directions):
+  a file MOVES iff it is *export-private* — reachable from the 4 format entries
+  AND NOT in the down-closure of bake's **public compute surface** (the subpaths
+  route/batch/pipelines import directly: `googleBakeCore`, `google3dTiles`,
+  `tileGroundConform`, `groundMask`, `cropTerrain`, `zipExportSidecar`,
+  `uploadBounds`, `beamngFlavorCatalog`, `textureGenerator`, `googleBakeSidecar`).
+  Result: **47 move, 28 stay, ZERO bake→export cycle edges** (a staying file
+  importing a mover — verified none). `materials/` and `scene/` split (some
+  files each side); `scene3d/ beamng/ roads/` moved wholesale.
+- **Moved (47):** `export3d`, `exportBeamNGLevel`, `exportGeoTiff`, `exportTer`,
+  `scene3d/*`, `beamng/*`, `roads/*`, `junction{Geometry,Mesh,Raster}`,
+  `osmTerrainMaterials`, `materials/{osmLayerMap,terrainReferenceMaterials}`,
+  `buildingFoundations`, `ColladaExporter`.
+- **Stayed in bake (28) = the tile/scene compute core:** `google3dTiles`,
+  `googleBakeCore`, `googleBakeSidecar`, `tiles/*`, `scene/*`, `scalarFieldGrid`,
+  `tileGroundConform`, `groundMask`, `cropTerrain`, `uploadBounds`,
+  `zipExportSidecar`, `beamngFlavorCatalog`, `textureGenerator`, the 6 staying
+  `materials/*`.
+- **Cycle broken:** dropped `bake/index.js` re-exports of the 4 formats +
+  junction*/osmTerrainMaterials/buildingFoundations/ColladaExporter.
+- **export→bake crossings repointed (10 edges → `@mapng/bake/*`):**
+  `google3dTiles` (4), `beamngFlavorCatalog` (4), `cropTerrain` (1),
+  `zipExportSidecar` (1). **Watch-out hit during the lift:** a perl replacement
+  with `@mapng` in a DOUBLE-quoted string silently interpolated `@mapng` as an
+  empty array → `/bake/...`. Use single-quoted perl or `\@`. The both-quote-styles
+  closure scan caught it.
+- **Consumers repointed to `@mapng/export/*`:** ExportPanel, OSMFeatures3D,
+  route/{exportRouteLevel,routeBake}, batch/{batchExports,processTile}, + 5
+  headless tests. ALLOWED gained `export`; route/batch gained the `@mapng/export`
+  dep.
 - **Consumers to repoint:** route (`@mapng/bake/export3d`,
   `@mapng/bake/exportBeamNGLevel`), batch (`@mapng/bake/export3d`,
   `@mapng/bake/exportTer`, `@mapng/bake/exportGeoTiff`), the Vue app.
@@ -119,11 +142,13 @@ geo < fetching < terrain < bake < export < { route, batch } < pipelines
    new layers; drop bake's re-exports of the moved files).
    - **`@mapng/terrain` ✅ DONE (`72c798e`)** — see §1 (closure was bigger than
      planned: OSM texture group came along).
-   - **`@mapng/export` — NEXT.** Heed §2's cycle warning (bake/index `export *`s
-     export3d + exportBeamNGLevel; those re-exports must be dropped) and run the
-     both-quote-styles closure scan FIRST (the terrain lift proved the entry
-     file's direct imports under-count the real footprint).
-3. **batch → worker** (runtime change), last.
+   - **`@mapng/export` ✅ DONE (`9853323`)** — see §2 (47 move / 28 stay,
+     zero cycle edges, partitioned by closure not eyeball).
+3. **batch → worker** (runtime change), last — **NEXT and final.** Move
+   `processTile` (the marshallable seam set up by the batchJob decomposition,
+   §3) off the main thread. This is a RUNTIME change, not a mechanical move — and
+   `processTile` imports the export3d barrel (WebGLRenderer at eval) so it can't
+   be headless-verified; it needs a real in-app grid batch run to confirm.
 
 ## Notes / guardrails
 

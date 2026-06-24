@@ -27,9 +27,15 @@ needed to pick up cold is below.
      - **`@mapng/terrain` ✅ DONE (`72c798e`)** — lifted terrain.js + terrain/* +
        resampler* + resample/* + surroundingTiles **+ the OSM texture group**
        (osmTexture/osm/*/roadNetwork, which the closure dragged along — the
-       single-quote-only scan had missed the double-quoted deps). Layer is now
-       `geo < fetching < terrain < bake < {route,batch} < pipelines`. ← *you are
-       here; `@mapng/export` is next (heed 08 §2's bake↔export cycle).*
+       single-quote-only scan had missed the double-quoted deps).
+     - **`@mapng/export` ✅ DONE (`9853323`)** — lifted the 47 export-private files
+       (the 4 format entries + scene3d/beamng/roads/junction*/osmTerrainMaterials/
+       2 materials/buildingFoundations/ColladaExporter). bake keeps the 28-file
+       compute core. Partitioned by import-closure (move = export-private, not in
+       bake's public-compute down-closure); zero bake→export cycle edges. Layer is
+       now `geo < fetching < terrain < bake < export < {route,batch} < pipelines`.
+       ← *you are here; only **batch-in-worker** (08 §3) remains — a RUNTIME change,
+       not a mechanical move.*
 - **Remaining offenders (0 real + 1 vendored)** in `tools/lint-size-allow.json`:
   | file | LOC | target | oracle? |
   |---|---|---|---|
