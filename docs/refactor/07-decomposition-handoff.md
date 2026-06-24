@@ -11,13 +11,31 @@ Self-contained: read this + 06 and you have everything.
 - **Resume check:** `npm run check` (= `boundaries` + `lint:size` + `test:all`,
   89 tests) must pass; `npm run build` and `node --check scripts/googleBakeWorker.mjs`
   too.
-- **Done so far (6 commits):** tooling/ratchet (step 0); `scene/` extracted
+- **Done in earlier threads:** tooling/ratchet (step 0); `scene/` extracted
   (step 1); `googleBakeCore.js` **1218→272** drained into `tiles/*` (step 2);
   `osm.js` **658→138** (step 5); `kron86.js` **582→366** (step 5);
   `terrainResampler.js` **535→341** (step 7, `resample/resampleKernels.js`).
   → **`@mapng/fetching` is fully <500.**
-- **Offenders remaining: 12** (tracked in `tools/lint-size-allow.json`; one is
-  vendored → permanent). **11 real targets.**
+- **Done this thread (6 more files, 6 commits — all verbatim moves + barrels):**
+  - `beamngFlavorCatalog.js` **1008→128** → `materials/{groundCoverMaterials,
+    forestAssetSets(A/B+combiner),waterProfiles,beamngFlavors}.js` (step 10).
+  - `osmTerrainMaterials.js` **961→381** → `materials/terrainReferenceMaterials.js`
+    + `materials/osmLayerMap.js` (pure rasterizer) (step 10).
+  - `google3dTiles.js` **862→30** (barrel) → `tiles/{bakeCache,bakeFlags,
+    bakeGoogle3DTiles,bakeSession}.js` (step 3). `bakeGoogle3DTiles` moved to its
+    own module to avoid a barrel↔session import cycle.
+  - `resamplerWorker.js` **828→188** → `resample/heightSampling.js` (io) +
+    `resample/heightFinalize.js` (core) (step 7). Kernels kept SEPARATE from
+    `resample/resampleKernels.js` — they are tuned differently (see Learnings).
+  - `surroundingTiles.js` **668→466** → `terrain/surroundingTileMath.js` (core)
+    + `terrain/surroundingTilesZip.js` (io) (step 7).
+  - `junctionGeometry.js` **629→24** (barrel) → `roads/{junctionConstants,
+    geomPrimitives,junctionPolygons,polylineCleanup}.js` (step 10). Covered by
+    `tests/junctionGeometry.test.mjs`.
+- **Offenders remaining: 6** (tracked in `tools/lint-size-allow.json`; one is
+  vendored → permanent). **5 real targets — all giants (1561–5558 LOC):**
+  `exportBeamNGLevel.js`, `export3d.js`, `terrain.js`, `osmTexture.js`,
+  `batchJob.js`. The small/medium files are all done.
 
 ## The recipe that works (follow it every time)
 
@@ -66,27 +84,35 @@ Self-contained: read this + 06 and you have everything.
   if it also exports a pure helper; that's fine (consumers ignore the tag). When
   a pure helper is imported by a `core` module, it MUST live in a `core` file —
   that's the only hard constraint.
+- **Watch for near-duplicate kernels — don't "helpfully" merge them.** The
+  resampler worker and `terrainResampler` each carried their OWN copies of
+  `pushPullInpaint`/`expandFill`/`relaxFilled`. They look identical but are
+  **tuned differently** (the worker's `relaxFilled` defaults to 200 iters and
+  precomputes a filled-index list; `pushPullInpaint` uses a `!== noData` check
+  without the finite guard the `resampleKernels.js` copy has). With no tests on
+  either, the safe move is to relocate each copy verbatim into its own module
+  (`resample/heightFinalize.js` vs `resample/resampleKernels.js`), NOT dedupe.
+  A real dedup is a separate, test-first task (capture an oracle first).
+- **The size-lint allowlist is real JSON — mind the trailing comma.** When you
+  delete the LAST entry, remove the comma on the now-last line or
+  `check-filesize.mjs` dies parsing it (it `JSON.parse`s the file before linting).
+- **Barrel vs. accessor-file are both fine.** Most files here became a pure
+  re-export barrel (`google3dTiles`, `junctionGeometry`). A couple kept logic and
+  imported data modules (`beamngFlavorCatalog`, `osmTerrainMaterials`,
+  `surroundingTiles`) — also fine, as long as the original file keeps re-exporting
+  every name consumers use. The cycle trap: if the barrel re-exports from a module
+  that imports back from the barrel, move the shared entry into its own module
+  (as done for `tiles/bakeGoogle3DTiles.js`).
 
 ## Remaining steps (recommended order)
 
-Risk-ascending. Each is one commit, kept green.
+Risk-ascending. Each is one commit, kept green. **Steps 1–4 below are DONE** (see
+"Done this thread"); the remaining work is the five giants, all in this list:
 
-1. **Data tables → `materials/` (step 10, lowest risk).**
-   `beamngFlavorCatalog.js` (1008) and `osmTerrainMaterials.js` (960) are mostly
-   static data. Split the big tables into `materials/` data modules (or `.json`
-   imported by a thin loader). Almost no logic → very safe. Drops 2 offenders.
-2. **`google3dTiles.js` (862) → `tiles/` orchestration (step 3).**
-   Extract `bakeCache.js` (BAKE_FORMAT_VERSION, `bakeCacheKey`, `hashSegment` —
-   pure), `bakeFlags.js` (localStorage toggles — io), `bakeSession.js`
-   (restore/refine/sidecar/cleanup — io); leave `bakeGoogle3DTiles` as the flow
-   entry. Keep `TILE_RENDER_BIAS_M` + the cache-version constant exported from the
-   same place consumers use today.
-3. **`resamplerWorker.js` (828) + `surroundingTiles.js` (668).** resamplerWorker:
-   split pure resample/blur kernels out (mirror `resample/resampleKernels.js`),
-   keep the worker postMessage entry. surroundingTiles: fold the pure tile-math
-   out into `terrain/`.
-4. **`junctionGeometry.js` (629).** Has a test (`tests/junctionGeometry.test.mjs`)
-   — good safety net. Split the pure miter/clip math from the emission glue.
+1. ~~**Data tables → `materials/` (step 10).**~~ DONE.
+2. ~~**`google3dTiles.js` → `tiles/` orchestration (step 3).**~~ DONE.
+3. ~~**`resamplerWorker.js` + `surroundingTiles.js` (step 7).**~~ DONE.
+4. ~~**`junctionGeometry.js` (step 10).**~~ DONE → `roads/*`.
 5. **`terrain.js` (1986) → `terrain/* ` (step 7).** Split: `mercatorTiles.js`
    (slippy/mercator math, core), `heightmapResample.js` (resample/decode/unit
    conversion, core), `terrainData.js` (fetchTerrainData orchestration, flow).
