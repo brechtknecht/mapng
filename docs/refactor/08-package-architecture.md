@@ -20,19 +20,31 @@ export formats, the Google-tiles bake, etc.
 geo < fetching < terrain < bake < export < { route, batch } < pipelines
 ```
 
-### 1. `@mapng/terrain`  (new layer: fetching < terrain < bake)
-- **Why it's clean:** `terrain.js` imports ONLY `@mapng/fetching` + `@mapng/geo`
-  (verified) — zero upward/bake deps. bake/route/batch all sit above it and
-  consume it. So it lifts with no cycle.
-- **Contents:** `terrain.js` + its decomposition (`terrain/mercatorTiles`,
-  `terrain/heightmapResample`, `terrain/terrainData`, the surrounding-tiles
-  modules already under `terrain/`), `terrainResampler.js`, `resamplerWorker.js`
-  + `resample/*`, `surroundingTiles.js`. Possibly the raw elevation HTTP fetchers
-  move down into `@mapng/fetching/elevation/` (06 step 7 note) — decide during
-  the lift.
-- **Consumers to repoint:** `@mapng/bake/terrain` → `@mapng/terrain` in route
-  (`exportRouteLevel`, `routeBake`), batch (`batchJob`, `traceability`), bake
-  internals, and the Vue app.
+### 1. `@mapng/terrain`  ✅ DONE (`72c798e`) — new layer fetching < terrain < bake
+- **Correction to the original "it's clean" claim:** the closure was BIGGER than
+  documented. `terrain.js`'s *direct* imports are only fetching+geo, but its
+  transitive tree (`terrain/{fetchTerrainData,lazLoader,tifLoader}`) imports
+  `osmTexture.js` (with **double quotes** — the original single-quote-only grep
+  missed it), which pulls `osm/*` → `roadNetwork.js`. So the OSM texture group
+  came down into terrain too. The true closure (verified by a both-quote-styles
+  import-closure scan) is clean: imports only `@mapng/geo` + `@mapng/fetching` +
+  npm + intra-package. **Lesson: scan BOTH quote styles + follow the transitive
+  closure, not just the entry file's direct imports.**
+- **Contents (moved verbatim, git-renamed):** `terrain.js` + `terrain/*` (12),
+  `terrainResampler.js`, `resamplerClient.js`, `resamplerWorker.js`,
+  `surroundingTiles.js`, `resample/*` (3), **plus** `osmTexture.js`, `osm/*` (7),
+  `roadNetwork.js`. (Raw elevation fetchers did NOT move to `@mapng/fetching` —
+  deferred; they're fine where they are.)
+- **Back-edges bake→terrain (all allowed):** `scene3d/surroundingMeshes` →
+  `@mapng/terrain/surroundingTiles`; `beamng/{decalRoads,meshRoads,
+  roadArchitectSession}` → `@mapng/terrain/roadNetwork`.
+- **Consumers repointed:** `@mapng/bake/{terrain,surroundingTiles,osmTexture}` →
+  `@mapng/terrain/*` in route (`exportRouteLevel`, `routeBake`), batch
+  (`processTile`, `batchRun`, `traceability`), the Vue app (App.vue + 5
+  components), and the osmTexture headless test. `tools/check-boundaries.mjs`
+  ALLOWED gained the `terrain` layer; bake/route/batch gained the `@mapng/terrain`
+  dep. Subpath mapping `@mapng/bake/terrain` → `@mapng/terrain/terrain` (1:1,
+  preserves the subpath convention, avoids root-barrel `export *` collisions).
 
 ### 2. `@mapng/export`  (new layer: bake < export < {route, batch})
 - **Why it's a real boundary:** the export *formats* (GLB/DAE via `export3d`,
@@ -105,6 +117,12 @@ geo < fetching < terrain < bake < export < { route, batch } < pipelines
 2. **Lift folders into `@mapng/terrain` and `@mapng/export`** (mechanical move +
    repoint imports + update `tools/check-boundaries.mjs` ALLOWED graph + add the
    new layers; drop bake's re-exports of the moved files).
+   - **`@mapng/terrain` ✅ DONE (`72c798e`)** — see §1 (closure was bigger than
+     planned: OSM texture group came along).
+   - **`@mapng/export` — NEXT.** Heed §2's cycle warning (bake/index `export *`s
+     export3d + exportBeamNGLevel; those re-exports must be dropped) and run the
+     both-quote-styles closure scan FIRST (the terrain lift proved the entry
+     file's direct imports under-count the real footprint).
 3. **batch → worker** (runtime change), last.
 
 ## Notes / guardrails
