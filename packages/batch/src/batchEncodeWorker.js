@@ -13,13 +13,24 @@
  * download stay on the main thread.
  */
 
-import { generateHeightmapBlob } from './batchExports.js';
+import { generateHeightmapBlob, generateTerBlob, generateGeoTIFFBlob } from './batchExports.js';
 
 const encoders = {
   // payload.terrainData carries only the DOM-free fields the encoder reads.
   heightmap: (payload) => ({
     blob: generateHeightmapBlob(payload.terrainData, payload.normalization),
     mime: 'image/png',
+  }),
+  ter: async (payload) => ({
+    blob: await generateTerBlob(payload.terrainData),
+    mime: 'application/octet-stream',
+  }),
+  // The client only routes the heightMap-based geotiff path here (no
+  // sourceGeoTiffs in the payload), so exportGeoTiff goes straight to the
+  // WGS84 build (writeArrayBuffer) — the actual CPU work.
+  geotiff: async (payload) => ({
+    blob: await generateGeoTIFFBlob(payload.terrainData, payload.center),
+    mime: 'image/tiff',
   }),
 };
 
@@ -28,7 +39,7 @@ self.onmessage = async (e) => {
   try {
     const encode = encoders[op];
     if (!encode) throw new Error(`Unknown encode op: ${op}`);
-    const { blob, mime } = encode(payload);
+    const { blob, mime } = await encode(payload);
     const buffer = blob ? await blob.arrayBuffer() : null;
     self.postMessage({ id, ok: true, buffer, mime }, buffer ? [buffer] : []);
   } catch (error) {

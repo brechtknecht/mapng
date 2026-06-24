@@ -7,7 +7,7 @@
  * pure offload, never a behaviour change.
  */
 
-import { generateHeightmapBlob } from './batchExports.js';
+import { generateHeightmapBlob, generateTerBlob, generateGeoTIFFBlob } from './batchExports.js';
 
 let worker = null;
 let messageId = 0;
@@ -47,6 +47,15 @@ const post = (op, payload, transfer = []) => new Promise((resolve, reject) => {
   w.postMessage({ id, op, payload }, transfer);
 });
 
+// Both heightmap and ter read the same DOM-free subset of terrainData. Copy the
+// heightMap and transfer the COPY — the main thread keeps the original (the
+// composite-heightmap pass reads terrainData.heightMap after these encodes).
+const heightSubset = (terrainData) => {
+  const { width, height, heightMap, minHeight, maxHeight } = terrainData;
+  const copy = heightMap.slice();
+  return { terrainData: { width, height, heightMap: copy, minHeight, maxHeight }, transfer: [copy.buffer] };
+};
+
 /**
  * Encode the 16-bit PNG heightmap off the main thread. Falls back to a
  * synchronous main-thread encode if no worker is available or the worker fails.
@@ -55,18 +64,48 @@ export async function encodeHeightmapOffThread(terrainData, normalization = null
   if (!terrainData?.heightMap) return null;
   const w = getWorker();
   if (!w) return generateHeightmapBlob(terrainData, normalization);
-
-  const { width, height, heightMap, minHeight, maxHeight } = terrainData;
-  // Copy the heightMap and transfer the COPY — the main thread keeps the
-  // original (the composite-heightmap pass reads terrainData.heightMap after
-  // this encode completes).
-  const copy = heightMap.slice();
+  const { terrainData: sub, transfer } = heightSubset(terrainData);
   try {
-    return await post('heightmap', {
-      terrainData: { width, height, heightMap: copy, minHeight, maxHeight },
-      normalization,
-    }, [copy.buffer]);
+    return await post('heightmap', { terrainData: sub, normalization }, transfer);
   } catch {
     return generateHeightmapBlob(terrainData, normalization);
+  }
+}
+
+/**
+ * Encode the BeamNG .ter binary off the main thread. Falls back to a
+ * synchronous main-thread encode if no worker is available or the worker fails.
+ */
+export async function encodeTerOffThread(terrainData) {
+  if (!terrainData?.heightMap) return generateTerBlob(terrainData);
+  const w = getWorker();
+  if (!w) return generateTerBlob(terrainData);
+  const { terrainData: sub, transfer } = heightSubset(terrainData);
+  try {
+    return await post('ter', { terrainData: sub }, transfer);
+  } catch {
+    return generateTerBlob(terrainData);
+  }
+}
+
+/**
+ * Encode the GeoTIFF off the main thread. The single-source passthrough (just
+ * wrapping an existing GeoTIFF buffer) is cheap, so it stays on the main thread;
+ * only the heightMap → writeArrayBuffer encode is offloaded. Falls back to the
+ * main-thread encoder if no worker / worker failure.
+ */
+export async function encodeGeoTiffOffThread(terrainData, center) {
+  const sources = terrainData?.sourceGeoTiffs?.arrayBuffers;
+  if (sources?.length === 1) return generateGeoTIFFBlob(terrainData, center); // passthrough, no encode
+  if (!terrainData?.heightMap) return generateGeoTIFFBlob(terrainData, center);
+  const w = getWorker();
+  if (!w) return generateGeoTIFFBlob(terrainData, center);
+  const { width, height, heightMap } = terrainData;
+  const copy = heightMap.slice();
+  try {
+    // Omit sourceGeoTiffs so exportGeoTiff takes the WGS84 heightMap path.
+    return await post('geotiff', { terrainData: { width, height, heightMap: copy }, center }, [copy.buffer]);
+  } catch {
+    return generateGeoTIFFBlob(terrainData, center);
   }
 }

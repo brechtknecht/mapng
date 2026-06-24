@@ -17,11 +17,9 @@ import {
   generateOSMTextureBlob,
   generateHybridTextureBlob,
   generateRoadMaskBlob,
-  generateGeoTIFFBlob,
   generateGeoJSONBlob,
-  generateTerBlob,
 } from './batchExports.js';
-import { encodeHeightmapOffThread } from './batchEncodeClient.js';
+import { encodeHeightmapOffThread, encodeTerOffThread, encodeGeoTiffOffThread } from './batchEncodeClient.js';
 import { JOB_STATES, TILE_STATES } from './batchRuntime.js';
 import { classifyError, runWithRetry } from '@mapng/fetching';
 import { getTileLabel, sanitizeFilenamePart } from './grid.js';
@@ -217,13 +215,13 @@ export async function processTile(state, tile, ctx, signal) {
       }
 
       if (state.exports.geotiff) {
-        const blob = await scheduleEncode(tile, () => runTimedStage(tile, 'encode_geotiff', async () => generateGeoTIFFBlob(terrainData, tile.center)));
+        const blob = await scheduleEncode(tile, () => runTimedStage(tile, 'encode_geotiff', async () => encodeGeoTiffOffThread(terrainData, tile.center)));
         if (blob) zip.file('heightmap.tif', await ensureExportBlobType(blob, 'image/tiff'));
         checkpoint(state);
       }
 
       if (state.exports.ter) {
-        const blob = await scheduleEncode(tile, () => runTimedStage(tile, 'encode_ter', async () => generateTerBlob(terrainData)));
+        const blob = await scheduleEncode(tile, () => runTimedStage(tile, 'encode_ter', async () => encodeTerOffThread(terrainData)));
         if (blob) zip.file('terrain.ter', await ensureExportBlobType(blob, 'application/octet-stream', 'application/octet-stream'));
         checkpoint(state);
       }
