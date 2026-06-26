@@ -20,21 +20,51 @@ import { buildTileHeightField } from './heightField.js';
 import { FILTERS } from './filters/index.js';
 import { postProcessorById } from './postprocess/index.js';
 
+// The Scene-settings menu persists the whole ground strategy here as JSON
+// (source + filter + filterParams + post toggle/effect + postParams). The export
+// reads it so the UI and the .ter agree — same contract as quality/stripGround.
+const GROUND_STRATEGY_LS = 'mapng_ter_ground_strategy';
+
+function readGroundConfig() {
+  try {
+    const raw = localStorage.getItem(GROUND_STRATEGY_LS);
+    if (raw) return JSON.parse(raw);
+  } catch (_) { /* private mode / bad JSON */ }
+  return null;
+}
+
 /**
  * Source for the exported BeamNG `.ter` ground heightmap:
- *   'tiles' (DEFAULT) — extract the drivable ground FROM the baked Google tiles
- *           (this module), so the .ter matches the photogrammetry you see.
+ *   'tiles' (DEFAULT) — extract the drivable ground FROM the baked Google tiles.
  *   'dem'  — the legacy coarse DEM heightmap (fallback / escape hatch).
  * The export also falls back to 'dem' automatically when no tiles/key are
  * available or extraction throws.
- *   localStorage mapng_ter_ground='dem'  forces the old DEM behaviour.
  */
 export function getPreferredTerGround() {
+  const cfg = readGroundConfig();
+  if (cfg && cfg.source) return cfg.source === 'dem' ? 'dem' : 'tiles';
   try {
     return localStorage.getItem('mapng_ter_ground') === 'dem' ? 'dem' : 'tiles';
   } catch (_) {
     return 'tiles';
   }
+}
+
+/**
+ * The configured ground strategy (Scene-settings menu) merged over the defaults,
+ * shaped as extractTileGround options. `postId` is null when post-processing is
+ * toggled off.
+ */
+export function getGroundStrategy() {
+  const cfg = readGroundConfig();
+  if (!cfg || typeof cfg !== 'object') return { ...DEFAULT_GROUND_STRATEGY };
+  return {
+    ...DEFAULT_GROUND_STRATEGY,
+    filterId: cfg.filterId || DEFAULT_GROUND_STRATEGY.filterId,
+    filterParams: cfg.filterParams || {},
+    postId: cfg.postOn === false ? null : (cfg.postId || DEFAULT_GROUND_STRATEGY.postId),
+    postParams: cfg.postParams || {},
+  };
 }
 
 const filterById = (id) =>

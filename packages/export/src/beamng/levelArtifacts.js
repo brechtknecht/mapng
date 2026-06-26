@@ -11,7 +11,7 @@
 import { exportTer } from '../exportTer.js';
 import { buildTerrainMaterials } from '../osmTerrainMaterials.js';
 import { TILE_RENDER_BIAS_M, getOrBakeGoogle3DTiles } from '@mapng/bake/google3dTiles';
-import { extractTileGround, getPreferredTerGround } from '@mapng/bake/ground/extractTileGround';
+import { extractTileGround, getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/extractTileGround';
 import beamngGlbToDaeScript from '../../../../scripts/beamng_glb_to_dae.py?raw';
 import { prepareCroppedTerrainData } from '@mapng/bake/cropTerrain';
 import { applyBuildingFoundations } from '../buildingFoundations.js';
@@ -149,7 +149,7 @@ export async function buildLevelArtifacts(terrainData, center, options = {}, pro
         apiKey: googleApiKey,
         errorTarget: google3DErrorTarget,
       });
-      const ground = extractTileGround(group, td);
+      const ground = extractTileGround(group, td, getGroundStrategy());
       td = { ...td, heightMap: ground.heightMap, minHeight: ground.minHeight, maxHeight: ground.maxHeight };
       console.log(`${BEAMNG_EXPORT_SERVICE_LOG} tile ground: ${(ground.coverage * 100).toFixed(0)}% tile coverage, ` +
         `range ${ground.minHeight.toFixed(1)}–${ground.maxHeight.toFixed(1)}m`);
