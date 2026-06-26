@@ -20,17 +20,34 @@ import { buildTileHeightField } from './heightField.js';
 import { FILTERS } from './filters/index.js';
 import { postProcessorById } from './postprocess/index.js';
 
+/**
+ * Source for the exported BeamNG `.ter` ground heightmap:
+ *   'tiles' (DEFAULT) — extract the drivable ground FROM the baked Google tiles
+ *           (this module), so the .ter matches the photogrammetry you see.
+ *   'dem'  — the legacy coarse DEM heightmap (fallback / escape hatch).
+ * The export also falls back to 'dem' automatically when no tiles/key are
+ * available or extraction throws.
+ *   localStorage mapng_ter_ground='dem'  forces the old DEM behaviour.
+ */
+export function getPreferredTerGround() {
+  try {
+    return localStorage.getItem('mapng_ter_ground') === 'dem' ? 'dem' : 'tiles';
+  } catch (_) {
+    return 'tiles';
+  }
+}
+
 const filterById = (id) =>
   FILTERS.find((f) => f.meta.id === id) ||
   FILTERS.find((f) => f.meta.id === 'csf') ||
   FILTERS[0];
 
-// The default ground strategy chosen in the sandbox: cloth simulation for robust
-// building removal + bilateral smoothing to even the road without bleeding
-// buildings into it. Per-filter / per-effect params default to each module's own
-// meta defaults when left empty.
+// The default ground strategy chosen in the sandbox: PMF (progressive
+// morphological filter) for building removal + bilateral smoothing to even the
+// road without bleeding buildings into it. Per-filter / per-effect params
+// default to each module's own meta defaults when left empty.
 export const DEFAULT_GROUND_STRATEGY = {
-  filterId: 'csf',
+  filterId: 'pmf',
   filterParams: {},
   postId: 'bilateral',
   postParams: {},
@@ -52,6 +69,14 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
   const minHeight = terrain.minHeight ?? 0;
   const upm = computeUnitsPerMeter(terrain) || 1;
 
+  // buildTileHeightField reads world-Y in SCENE UNITS, but getOrBakeGoogle3DTiles
+  // hands back a group whose Y is in METRES (scale.y = 1). Temporarily apply the
+  // metres→scene-units scale, then restore — never leave the shared/cached group
+  // mutated (the same group is placed as the level's tile meshes).
+  const prevScaleY = tilesGroup.scale.y;
+  const rescale = Math.abs(prevScaleY - upm) > 1e-9;
+  if (rescale) { tilesGroup.scale.y = upm; tilesGroup.updateMatrixWorld(true); }
+
   // Match the field grid to the .ter resolution so a node maps 1:1 to a pixel
   // (same orientation: node row zi == heightMap row zi == north→south).
   const maxSeg = options.maxSeg ?? (Math.max(width, height) - 1);
@@ -60,6 +85,8 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
     belowBandM: opt.belowBandM,
     aboveBandM: opt.aboveBandM,
   });
+
+  if (rescale) { tilesGroup.scale.y = prevScaleY; tilesGroup.updateMatrixWorld(true); }
 
   const filter = filterById(opt.filterId);
   let heights = filter.apply(field, { ...opt.filterParams }); // scene units

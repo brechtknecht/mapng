@@ -10,7 +10,8 @@
 // (06 step 9c).
 import { exportTer } from '../exportTer.js';
 import { buildTerrainMaterials } from '../osmTerrainMaterials.js';
-import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
+import { TILE_RENDER_BIAS_M, getOrBakeGoogle3DTiles } from '@mapng/bake/google3dTiles';
+import { extractTileGround, getPreferredTerGround } from '@mapng/bake/ground/extractTileGround';
 import beamngGlbToDaeScript from '../../../../scripts/beamng_glb_to_dae.py?raw';
 import { prepareCroppedTerrainData } from '@mapng/bake/cropTerrain';
 import { applyBuildingFoundations } from '../buildingFoundations.js';
@@ -130,6 +131,31 @@ export async function buildLevelArtifacts(terrainData, center, options = {}, pro
   if (td.width !== td.height) {
     const cropSize = Math.min(td.width, td.height);
     td = await prepareCroppedTerrainData({ ...td, exportCropSize: cropSize });
+  }
+
+  // Tile-derived ground (terrain-sandbox strategy): replace the coarse DEM
+  // heightmap with the bare-earth ground extracted from the baked Google tiles,
+  // so the .ter driving surface matches the photogrammetry. Done BEFORE
+  // foundations so they carve into the new ground. The bake here is a cache hit
+  // for the tile-mesh bake later (same bounds/options), keeping the .ter and the
+  // placed tiles vertically consistent. Falls back to the DEM on any failure or
+  // when tiles/key are unavailable. Route mode (pre-baked placements) is handled
+  // upstream in exportRouteLevel.
+  if (getPreferredTerGround() === 'tiles' && useGoogle3DTiles && googleApiKey && !routeTilePieces) {
+    try {
+      report('Extracting drivable ground from Google tiles…', 1);
+      await yield_();
+      const group = await getOrBakeGoogle3DTiles(td, {
+        apiKey: googleApiKey,
+        errorTarget: google3DErrorTarget,
+      });
+      const ground = extractTileGround(group, td);
+      td = { ...td, heightMap: ground.heightMap, minHeight: ground.minHeight, maxHeight: ground.maxHeight };
+      console.log(`${BEAMNG_EXPORT_SERVICE_LOG} tile ground: ${(ground.coverage * 100).toFixed(0)}% tile coverage, ` +
+        `range ${ground.minHeight.toFixed(1)}–${ground.maxHeight.toFixed(1)}m`);
+    } catch (e) {
+      console.warn(`${BEAMNG_EXPORT_SERVICE_LOG} tile-ground extraction failed, using DEM heightmap`, e);
+    }
   }
 
   const foundationInput = {
