@@ -17,14 +17,15 @@
 // value). Output is a fresh, fully-finite Float32Array — field arrays are never
 // mutated.
 
-import { medianFilter, morphClose, windowNodes } from '../groundRaster.js';
+import { medianFilter, liftDownSpikes, windowNodes } from '../groundRaster.js';
 
 export const meta = {
   id: 'csf',
   label: 'Cloth simulation',
   params: [
     { key: 'preMedian', label: 'Despike (median passes)', min: 0, max: 6, step: 1, default: 2 },
-    { key: 'pitFillM', label: 'Pit fill / down-spikes (m)', min: 0, max: 20, step: 1, default: 0 },
+    { key: 'pitWidthM', label: 'Down-spike max width (m)', min: 0, max: 40, step: 1, default: 12 },
+    { key: 'pitDropM', label: 'Down-spike min depth (m)', min: 0, max: 20, step: 0.5, default: 2 },
     { key: 'iterations', label: 'Iterations', min: 20, max: 600, step: 10, default: 200 },
     { key: 'rigidness', label: 'Rigidness (stiffness)', min: 1, max: 6, step: 1, default: 3 },
     { key: 'stepM', label: 'Step per iter (m)', min: 0.05, max: 2, step: 0.05, default: 0.5 },
@@ -52,7 +53,8 @@ const clampIdx = (i, n) => (i < 0 ? 0 : i > n - 1 ? n - 1 : i);
 export function apply(field, params) {
   const { nx, nz, unitsPerMeter } = field;
   const preMedian = param(params, 'preMedian');
-  const pitFillM = param(params, 'pitFillM');
+  const pitWidthM = param(params, 'pitWidthM');
+  const pitDropM = param(params, 'pitDropM');
   const iterations = param(params, 'iterations');
   const rigidness = param(params, 'rigidness');
   const stepM = param(params, 'stepM');
@@ -62,12 +64,12 @@ export function apply(field, params) {
   const step = stepM * unitsPerMeter; // downward move per iteration, scene units
   const eps = 1e-4 * unitsPerMeter; // contact tolerance, scene units
 
-  // Despike the near-min seed first: a down-spike becomes a tall UP-spike once
-  // inverted, and the cloth would snag on it (settling too low). Median kills
-  // isolated needles; closing fills wider down-pillars — BOTH must go before the
-  // drape or the cloth catches on the inverted pillar.
+  // Clean the seed BEFORE draping: median kills isolated needles, then lift the
+  // down-spikes where Google's mesh sinks below the street — otherwise the cloth
+  // settles into those pits (it always seeks the lowest surface) and the .ter
+  // dives into the floor. Roads aren't pits, so they're left alone.
   let seed = medianFilter(field.seed, nx, nz, 1, preMedian);
-  seed = morphClose(seed, nx, nz, windowNodes(field, pitFillM));
+  seed = liftDownSpikes(seed, nx, nz, windowNodes(field, pitWidthM), pitDropM * unitsPerMeter);
 
   // 1. Invert the target surface: buildings/trees now point DOWN, ground is UP.
   const inv = new Float32Array(n);

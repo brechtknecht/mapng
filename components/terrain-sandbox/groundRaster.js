@@ -307,6 +307,27 @@ export function windowNodes(field, sizeM) {
 }
 
 /**
+ * Lift DOWNWARD spikes/pits — the Google mesh sometimes sinks far below the
+ * street (reconstruction artifacts, LOD-seam skirts, sunken features), and the
+ * per-cell min faithfully grabs that, dragging the .ter into the floor.
+ *
+ * A cell is lifted to the local ground level (the morphological closing) ONLY
+ * when it is BOTH deeper than `dropU` below its surroundings AND inside a dip
+ * narrower than the closing window `w`. Real roads aren't pits (closing ≈ src
+ * there) so they're untouched — unlike a plain closing, which would also fill
+ * narrow alleys. `w<=0` or `dropU<=0` is a no-op. Returns a new array.
+ */
+export function liftDownSpikes(src, nx, nz, w, dropU) {
+  if (w <= 0 || dropU <= 0) return Float32Array.from(src);
+  const closed = morphClose(src, nx, nz, w); // pits raised to their surroundings
+  const out = new Float32Array(src.length);
+  for (let i = 0; i < src.length; i++) {
+    out[i] = (closed[i] - src[i] > dropU) ? closed[i] : src[i];
+  }
+  return out;
+}
+
+/**
  * Mean signed offset of a height array vs the DEM, in metres (+ above DEM).
  * The DEM is anchored to the tile street at the AOI centre, so for the raw/min
  * pane this reads ≈ how far the tile street sits above/below the DEM on average

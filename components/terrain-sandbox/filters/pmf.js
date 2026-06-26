@@ -17,14 +17,15 @@
 // metre threshold). Output is a fresh, fully-finite Float32Array — field arrays
 // are never mutated.
 
-import { medianFilter, morphClose, windowNodes } from '../groundRaster.js';
+import { medianFilter, liftDownSpikes, windowNodes } from '../groundRaster.js';
 
 export const meta = {
   id: 'pmf',
   label: 'PMF (morphological)',
   params: [
     { key: 'preMedian', label: 'Despike (median passes)', min: 0, max: 6, step: 1, default: 2 },
-    { key: 'pitFillM', label: 'Pit fill / down-spikes (m)', min: 0, max: 20, step: 1, default: 0 },
+    { key: 'pitWidthM', label: 'Down-spike max width (m)', min: 0, max: 40, step: 1, default: 12 },
+    { key: 'pitDropM', label: 'Down-spike min depth (m)', min: 0, max: 20, step: 0.5, default: 2 },
     { key: 'maxWindowM', label: 'Max window (m)', min: 10, max: 200, step: 5, default: 70 },
     { key: 'baseThreshM', label: 'Base threshold (m)', min: 0.1, max: 5, step: 0.1, default: 0.5 },
     { key: 'slope', label: 'Slope tolerance (m/m)', min: 0, max: 1, step: 0.02, default: 0.3 },
@@ -129,20 +130,21 @@ function smoothOnce(src, nx, nz) {
 export function apply(field, params) {
   const { nx, nz, unitsPerMeter, cellSizeM } = field;
   const preMedian = param(params, 'preMedian');
-  const pitFillM = param(params, 'pitFillM');
+  const pitWidthM = param(params, 'pitWidthM');
+  const pitDropM = param(params, 'pitDropM');
   const maxWindowM = param(params, 'maxWindowM');
   const baseThreshM = param(params, 'baseThreshM');
   const slope = param(params, 'slope');
   const smoothIters = param(params, 'smoothIters');
 
-  // Despike FIRST: the seed is a near-min surface that reaches the street but
-  // carries salt-and-pepper needles. Erosion would otherwise propagate any
-  // down-spike across a whole window, so kill them with a median before opening.
+  // Despike FIRST: the seed (per-cell min) carries salt-and-pepper needles.
   let surface = medianFilter(field.seed, nx, nz, 1, preMedian);
 
-  // Fill DOWNWARD pillars (closing) before the opening — opening's erosion would
-  // smear a surviving pit across its window, so the pit must die first.
-  surface = morphClose(surface, nx, nz, windowNodes(field, pitFillM));
+  // LIFT down-spikes before the opening: where Google's mesh sinks below the
+  // street the min dives with it, and the opening's erosion would then smear
+  // that pit across its window. Lift only narrow, deep pits — roads are left
+  // alone (they're not pits).
+  surface = liftDownSpikes(surface, nx, nz, windowNodes(field, pitWidthM), pitDropM * unitsPerMeter);
 
   // Progressive loop: window half-width grows 1, 2, 4, 8, … until the window
   // diameter in metres would exceed the largest object footprint we want to cut.
