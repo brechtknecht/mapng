@@ -195,9 +195,9 @@ import { getTilesApiKey } from '@mapng/pipelines/credentials';
 import {
   PRESETS, TILE_SIZES, fmt, disposeGroup, computeGroupStats, bakeTerrainScene,
 } from './terrainSandbox.js';
-import { buildMeshFromHeights, reliefMeters, meanOffsetVsDem } from './groundRaster.js';
-import { FILTERS, defaultParams } from './filters/index.js';
-import { POSTPROCESSORS, postProcessorById } from './postprocess/index.js';
+import { buildMeshFromHeights, reliefMeters, meanOffsetVsDem } from '@mapng/bake/ground/heightField';
+import { FILTERS, defaultParams } from '@mapng/bake/ground/filters/index';
+import { POSTPROCESSORS, postProcessorById } from '@mapng/bake/ground/postprocess/index';
 import { loadSatelliteTexture } from './textureLoader.js';
 
 const apiKey = getTilesApiKey();

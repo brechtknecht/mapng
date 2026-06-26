@@ -5,7 +5,7 @@
 // Post-processor contract (mirrors the filters' { meta, apply }, but apply takes
 // the heights to transform):
 //   apply(heights, field, params) -> Float32Array   (scene units; heights untouched)
-import { gaussianBlur } from '../groundRaster.js';
+import { gaussianBlur } from '../heightField.js';
 
 export const meta = {
   id: 'gaussian',
@@ -24,7 +24,7 @@ function param(params, key) {
 
 /**
  * @param {Float32Array} heights  source ground (scene units)
- * @param {import('../groundRaster.js').HeightField} field
+ * @param {import('../heightField.js').HeightField} field
  * @param {Object<string, number>} params
  * @returns {Float32Array} smoothed heights (scene units), heights never mutated
  */

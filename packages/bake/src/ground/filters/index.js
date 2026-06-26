@@ -1,5 +1,5 @@
 // Ground-extraction filter registry. Each filter module exports { meta, apply }
-// per the HeightField contract in ../groundRaster.js. The sandbox renders one
+// per the HeightField contract in ../heightField.js. The sandbox renders one
 // pane per approach (plus the built-in DEM + Raw baselines) so they can be
 // judged side by side.
 import * as pmf from './pmf.js';

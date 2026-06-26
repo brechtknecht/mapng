@@ -15,7 +15,7 @@
 import { bakeVariant } from '../quality-sandbox/sandbox.js';
 import { computeUnitsPerMeter } from '@mapng/bake/google3dTiles';
 import { loadSatelliteTexture } from './textureLoader.js';
-import { buildTileHeightField } from './groundRaster.js';
+import { buildTileHeightField } from '@mapng/bake/ground/heightField';
 
 // Re-export the curated AOI presets + tile sizes so the app shares one source.
 export { PRESETS, TILE_SIZES, disposeGroup, fmt, computeGroupStats } from '../quality-sandbox/sandbox.js';

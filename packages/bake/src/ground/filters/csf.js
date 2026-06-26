@@ -17,7 +17,7 @@
 // value). Output is a fresh, fully-finite Float32Array — field arrays are never
 // mutated.
 
-import { medianFilter, liftDownSpikes, windowNodes } from '../groundRaster.js';
+import { medianFilter, liftDownSpikes, windowNodes } from '../heightField.js';
 
 export const meta = {
   id: 'csf',
@@ -46,7 +46,7 @@ const clampIdx = (i, n) => (i < 0 ? 0 : i > n - 1 ? n - 1 : i);
 /**
  * Run CSF over field.seed and return a bare-earth DTM (scene units).
  *
- * @param {import('../groundRaster.js').HeightField} field
+ * @param {import('../heightField.js').HeightField} field
  * @param {Object<string, number>} params
  * @returns {Float32Array}
  */

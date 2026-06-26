@@ -29,7 +29,7 @@ function param(params, key) {
 
 /**
  * @param {Float32Array} heights  source ground (scene units)
- * @param {import('../groundRaster.js').HeightField} field
+ * @param {import('../heightField.js').HeightField} field
  * @param {Object<string, number>} params
  * @returns {Float32Array} edge-preserving-smoothed heights (heights never mutated)
  */

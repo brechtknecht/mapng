@@ -1,19 +1,22 @@
-// Shared ground-extraction substrate for the terrain sandbox.
+/** @layer core */
+// Shared ground-extraction substrate (used by the terrain sandbox AND the
+// BeamNG export — see ./extractTileGround.js).
 //
 // Turns the baked Google tiles (a DSM — surface incl. buildings/trees) into a
 // regular height raster, then lets pluggable filters distil a DTM (bare-earth
 // drivable ground) from it. Every filter consumes the SAME HeightField and
-// returns a flat Float32Array of node heights — so approaches stay independent
-// and directly comparable side by side.
+// returns a flat Float32Array of node heights. Pure / DOM-free (THREE is used
+// only for vector math), so the headless Node bake/export imports it with no
+// renderer.
 //
 // UNITS: every height in the field (and every filter output) is in SCENE UNITS
 // (tilesGroup already carries scale.y = unitsPerMeter), so meshes built from
 // them need NO further y-scale.
 import * as THREE from 'three';
-import { sampleHeightAtScene } from '@mapng/bake/google3dTiles';
+import { SCENE_SIZE } from '../scene/sceneFrame.js';
+import { sampleHeightAtScene } from '../scene/sceneSample.js';
 
-// Bake scene plane: X/Z span [-SCENE_SIZE/2, +SCENE_SIZE/2] (see sceneFrame.js).
-export const SCENE_SIZE = 100;
+export { SCENE_SIZE };
 
 /**
  * @typedef {Object} HeightField
