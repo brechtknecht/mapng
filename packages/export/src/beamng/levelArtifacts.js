@@ -150,7 +150,11 @@ export async function buildLevelArtifacts(terrainData, center, options = {}, pro
         errorTarget: google3DErrorTarget,
       });
       const ground = extractTileGround(group, td, getGroundStrategy());
-      td = { ...td, heightMap: ground.heightMap, minHeight: ground.minHeight, maxHeight: ground.maxHeight };
+      // Keep the ORIGINAL minHeight as the .ter datum — the baked tiles are
+      // anchored to it, so re-datuming to the extracted min would float the
+      // ground ~metres off the tiles (the sandbox aligns only because it never
+      // re-datums). Extend maxHeight just for quantisation headroom.
+      td = { ...td, heightMap: ground.heightMap, maxHeight: Math.max(td.maxHeight, ground.maxHeight) };
       console.log(`${BEAMNG_EXPORT_SERVICE_LOG} tile ground: ${(ground.coverage * 100).toFixed(0)}% tile coverage, ` +
         `range ${ground.minHeight.toFixed(1)}–${ground.maxHeight.toFixed(1)}m`);
     } catch (e) {

@@ -940,7 +940,10 @@ onUnmounted(() => clearTimeout(_groundTimer));
 
 const mergedTerrainData = computed(() => {
   const pg = previewGround.value;
-  if (pg) return { ...props.terrainData, heightMap: pg.heightMap, minHeight: pg.minHeight, maxHeight: pg.maxHeight };
+  // Swap ONLY the heightMap — keep the original minHeight as the datum so the
+  // ground stays referenced to the same zero the tiles are anchored to. Using
+  // the extracted ground's own min would shift the terrain ~metres off the tiles.
+  if (pg) return { ...props.terrainData, heightMap: pg.heightMap };
   return props.terrainData;
 });
 
