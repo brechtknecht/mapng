@@ -84,21 +84,30 @@ export function buildTileHeightField(tilesGroup, terrain, unitsPerMeter, { maxSe
   tilesGroup.updateMatrixWorld(true);
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
 
+  // Extract in the GROUP'S LOCAL frame (X/Z in scene units, Y in metres), then
+  // scale Y to scene units ourselves. Localising via the group's inverse strips
+  // ALL ancestor transforms — so this is correct whether the group is unparented
+  // (export) or parented under a scaled/offset TresGroup (the live preview adds
+  // an upm scale + z-offset that must NOT leak into the band logic).
+  const groupInv = tilesGroup.matrixWorld.clone().invert();
+  const localMat = new THREE.Matrix4();
+
   let tris = 0;
   tilesGroup.traverse((node) => {
     if (!node.isMesh || !node.geometry?.attributes?.position) return;
     const pos = node.geometry.attributes.position;
     const index = node.geometry.index;
-    const mat = node.matrixWorld;
+    localMat.multiplyMatrices(groupInv, node.matrixWorld); // child geom → group-local
     const triCount = index ? index.count / 3 : pos.count / 3;
 
     for (let t = 0; t < triCount; t++) {
       const i0 = index ? index.getX(t * 3) : t * 3;
       const i1 = index ? index.getX(t * 3 + 1) : t * 3 + 1;
       const i2 = index ? index.getX(t * 3 + 2) : t * 3 + 2;
-      a.set(pos.getX(i0), pos.getY(i0), pos.getZ(i0)).applyMatrix4(mat);
-      b.set(pos.getX(i1), pos.getY(i1), pos.getZ(i1)).applyMatrix4(mat);
-      c.set(pos.getX(i2), pos.getY(i2), pos.getZ(i2)).applyMatrix4(mat);
+      a.set(pos.getX(i0), pos.getY(i0), pos.getZ(i0)).applyMatrix4(localMat);
+      b.set(pos.getX(i1), pos.getY(i1), pos.getZ(i1)).applyMatrix4(localMat);
+      c.set(pos.getX(i2), pos.getY(i2), pos.getZ(i2)).applyMatrix4(localMat);
+      a.y *= unitsPerMeter; b.y *= unitsPerMeter; c.y *= unitsPerMeter; // metres → scene units
 
       // Grid coordinates (node units): x,z ∈ [-half,half] → [0,segX]/[0,segZ].
       const Ax = (a.x + half) / SCENE_SIZE * segX, Az = (a.z + half) / SCENE_SIZE * segZ;

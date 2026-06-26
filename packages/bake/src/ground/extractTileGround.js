@@ -16,7 +16,7 @@
 // Pure / DOM-free: traverses the THREE.Group geometry only (no renderer), so it
 // runs in the browser export AND a headless Node worker.
 import { computeUnitsPerMeter } from '../scene/sceneFrame.js';
-import { buildTileHeightField } from './heightField.js';
+import { buildTileHeightField, buildMeshFromHeights } from './heightField.js';
 import { FILTERS } from './filters/index.js';
 import { postProcessorById } from './postprocess/index.js';
 
@@ -99,24 +99,16 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
   const minHeight = terrain.minHeight ?? 0;
   const upm = computeUnitsPerMeter(terrain) || 1;
 
-  // buildTileHeightField reads world-Y in SCENE UNITS, but getOrBakeGoogle3DTiles
-  // hands back a group whose Y is in METRES (scale.y = 1). Temporarily apply the
-  // metres→scene-units scale, then restore — never leave the shared/cached group
-  // mutated (the same group is placed as the level's tile meshes).
-  const prevScaleY = tilesGroup.scale.y;
-  const rescale = Math.abs(prevScaleY - upm) > 1e-9;
-  if (rescale) { tilesGroup.scale.y = upm; tilesGroup.updateMatrixWorld(true); }
-
   // Match the field grid to the .ter resolution so a node maps 1:1 to a pixel
   // (same orientation: node row zi == heightMap row zi == north→south).
+  // buildTileHeightField extracts in the group's LOCAL frame and applies upm
+  // itself, so the group's scale/parenting is irrelevant — no scale juggling.
   const maxSeg = options.maxSeg ?? (Math.max(width, height) - 1);
   const field = buildTileHeightField(tilesGroup, terrain, upm, {
     maxSeg,
     belowBandM: opt.belowBandM,
     aboveBandM: opt.aboveBandM,
   });
-
-  if (rescale) { tilesGroup.scale.y = prevScaleY; tilesGroup.updateMatrixWorld(true); }
 
   const filter = filterById(opt.filterId);
   let heights = filter.apply(field, { ...opt.filterParams }); // scene units
@@ -173,4 +165,31 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
     maxHeight: hi,
     coverage: +(covered / field.covered.length).toFixed(3),
   };
+}
+
+/**
+ * Same pipeline as extractTileGround, but returns a THREE.Mesh in SCENE UNITS
+ * (Y = scene units, X/Z in [-50,50]) for the live 3D preview — so the user can
+ * see the extracted ground and tune the strategy against the tiles. Defaults to
+ * a coarser grid than the export (snappy live re-extraction).
+ *
+ * @param {import('three').Group} tilesGroup
+ * @param {object} terrain
+ * @param {object} [options]  strategy overrides (+ optional `maxSeg`, default 192)
+ * @param {object} [meshOpts] { texture, color } for buildMeshFromHeights
+ * @returns {import('three').Mesh}
+ */
+export function buildGroundMesh(tilesGroup, terrain, options = {}, meshOpts = {}) {
+  const opt = { ...DEFAULT_GROUND_STRATEGY, ...options };
+  const upm = computeUnitsPerMeter(terrain) || 1;
+
+  const field = buildTileHeightField(tilesGroup, terrain, upm, {
+    maxSeg: options.maxSeg ?? 192,
+    belowBandM: opt.belowBandM,
+    aboveBandM: opt.aboveBandM,
+  });
+
+  let heights = filterById(opt.filterId).apply(field, { ...opt.filterParams });
+  if (opt.postId) heights = postProcessorById(opt.postId).apply(heights, field, { ...opt.postParams });
+  return buildMeshFromHeights(field, heights, meshOpts);
 }

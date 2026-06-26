@@ -54,6 +54,10 @@
               :terrain-data="terrainData"
             />
 
+            <GroundPreview3D
+              :terrain-data="terrainData"
+            />
+
             <SurroundingTerrain3D
               :terrain-data="terrainData"
               :visible="showSurroundings"
@@ -544,6 +548,15 @@
             </div>
 
             <template v-if="googleTilesStore.ground.source === 'tiles'">
+              <!-- live 3D preview of the extracted ground (debug) -->
+              <label class="flex items-center gap-2 cursor-pointer" :title="googleTilesStore.status === 'ready' ? '' : 'Load Google tiles first'">
+                <div class="relative">
+                  <input type="checkbox" :checked="googleTilesStore.groundPreviewShow" :disabled="googleTilesStore.status !== 'ready'" @change="googleTilesStore.groundPreviewShow = $event.target.checked" class="peer sr-only" />
+                  <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#34d399] peer-disabled:opacity-40 after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+                </div>
+                <span class="text-[10px] text-gray-700 dark:text-gray-300">preview ground in 3D (live)</span>
+              </label>
+
               <!-- bare-earth filter -->
               <div class="flex items-center gap-2">
                 <label class="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap w-12">filter</label>
@@ -638,6 +651,7 @@ import TerrainMesh from "./TerrainMesh.vue";
 import MapngFlag3D from "./MapngFlag3D.vue";
 import OSMFeatures3D from "./OSMFeatures3D.vue";
 import GoogleTiles3D from "./GoogleTiles3D.vue";
+import GroundPreview3D from "./GroundPreview3D.vue";
 import FlyControls3D from "./FlyControls3D.vue";
 import CSMLight from "./CSMLight.vue";
 import SurroundingTerrain3D from "./SurroundingTerrain3D.vue";

@@ -213,6 +213,9 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     return base;
   }
   const ground = reactive(loadGround());
+  // Live 3D preview of the extracted ground mesh (debug). Not persisted — purely
+  // a viewport overlay, rebuilt from the cached tile bake on every strategy tweak.
+  const groundPreviewShow = ref(false);
   function persistGround() {
     try { localStorage.setItem(GROUND_LS, JSON.stringify(ground)); } catch (_) { /* private mode */ }
   }
@@ -237,7 +240,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     setQuality, setZOffset, setStripGround,
     bakeForPreview, rebake, reset, tryRestore, refineFromView,
     // drivable-ground strategy (Scene-settings menu)
-    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST,
+    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow,
     setGroundSource, setGroundFilter, setGroundFilterParam,
     setGroundPostOn, setGroundPostEffect, setGroundPostParam,
   };
