@@ -7,7 +7,10 @@ const props = defineProps({
   terrainData: { required: true },
   quality: { required: true },
   textureType: { default: 'satellite' },
-  wireframe: { default: false, type: Boolean }
+  wireframe: { default: false, type: Boolean },
+  // Debug "ghost" mode: drop the texture and render the terrain semi-transparent
+  // so the Google tiles / .ter alignment is visible through it.
+  transparent: { default: false, type: Boolean },
 });
 
 const SCENE_SIZE = 100;
@@ -362,13 +365,16 @@ onUnmounted(() => {
       :geometry="geometry"
     >
       <TresMeshStandardMaterial
-        :key="texture ? 'tex' : 'clay'"
-        :map="texture"
-        :color="texture ? 0xffffff : 0xb0a898"
-        :roughness="texture ? 1 : 0.5"
-        :metalness="texture ? 0 : 0.5"
+        :key="transparent ? 'ghost' : (texture ? 'tex' : 'clay')"
+        :map="transparent ? null : texture"
+        :color="(texture && !transparent) ? 0xffffff : 0xb0a898"
+        :roughness="(texture && !transparent) ? 1 : 0.5"
+        :metalness="(texture && !transparent) ? 0 : 0.5"
         :side="2"
         :wireframe="wireframe"
+        :transparent="transparent"
+        :opacity="transparent ? 0.35 : 1"
+        :depth-write="!transparent"
       />
     </TresMesh>
   </TresGroup>

@@ -39,6 +39,7 @@
               :quality="meshQuality"
               :texture-type="textureType"
               :wireframe="showWireframe"
+              :transparent="terrainTransparent"
             />
 
             <MapngFlag3D
@@ -316,6 +317,14 @@
             >
           </label>
 
+          <label class="flex items-center gap-2 cursor-pointer group/check" title="Drop the terrain texture and render it see-through to check .ter ↔ tile alignment">
+            <div class="relative">
+              <input type="checkbox" v-model="terrainTransparent" class="peer sr-only" />
+              <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#FF6600]"></div>
+            </div>
+            <span class="text-xs text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">terrain transparent (no texture)</span>
+          </label>
+
           <div class="space-y-2">
             <label class="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1 font-medium mb-1">
               <Layers :size="12" /> {{ t('preview.features3d') }}
@@ -524,6 +533,90 @@
               </template>
             </template>
           </div>
+
+          <!-- Drivable ground (.ter) — bare-earth strategy used by the BeamNG export -->
+          <div v-if="googleTilesStore.apiKey" class="space-y-2 pt-3 mt-1 border-t border-gray-100 dark:border-gray-700">
+            <label class="text-xs text-gray-500 dark:text-gray-400 flex items-center gap-1 font-medium mb-1">
+              <Mountain :size="12" /> Drivable ground (.ter)
+            </label>
+
+            <!-- source: tiles vs DEM -->
+            <div class="flex bg-gray-100 dark:bg-gray-800 rounded-md p-0.5 border border-gray-200 dark:border-gray-700">
+              <button
+                @click="googleTilesStore.setGroundSource('tiles')"
+                :class="['flex-1 text-[10px] py-1 rounded transition-colors', googleTilesStore.ground.source === 'tiles' ? 'bg-[#FF6600] text-white shadow-sm font-medium' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white']"
+              >From Google tiles</button>
+              <button
+                @click="googleTilesStore.setGroundSource('dem')"
+                :class="['flex-1 text-[10px] py-1 rounded transition-colors', googleTilesStore.ground.source === 'dem' ? 'bg-[#FF6600] text-white shadow-sm font-medium' : 'text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-white']"
+              >DEM (legacy)</button>
+            </div>
+
+            <template v-if="googleTilesStore.ground.source === 'tiles'">
+              <!-- live 3D preview of the extracted ground (debug) -->
+              <label class="flex items-center gap-2 cursor-pointer" :title="googleTilesStore.status === 'ready' ? '' : 'Load Google tiles first'">
+                <div class="relative">
+                  <input type="checkbox" :checked="googleTilesStore.groundPreviewShow" :disabled="googleTilesStore.status !== 'ready'" @change="googleTilesStore.groundPreviewShow = $event.target.checked" class="peer sr-only" />
+                  <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#34d399] peer-disabled:opacity-40 after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+                </div>
+                <span class="text-[10px] text-gray-700 dark:text-gray-300">preview .ter from tiles (live — replaces terrain)</span>
+              </label>
+
+              <!-- bare-earth filter -->
+              <div class="flex items-center gap-2">
+                <label class="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap w-12">filter</label>
+                <select
+                  :value="googleTilesStore.ground.filterId"
+                  @change="googleTilesStore.setGroundFilter($event.target.value)"
+                  class="flex-1 text-[10px] px-1 py-0.5 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300"
+                >
+                  <option v-for="f in googleTilesStore.groundFilters" :key="f.meta.id" :value="f.meta.id">{{ f.meta.label }}</option>
+                </select>
+              </div>
+              <div v-for="d in groundFilterMeta.params" :key="d.key" class="flex items-center gap-2">
+                <label class="text-[10px] text-gray-500 dark:text-gray-400 truncate w-16" :title="d.label">{{ d.short || d.label }}</label>
+                <input
+                  type="range" :min="d.min" :max="d.max" :step="d.step"
+                  :value="googleTilesStore.ground.filterParams[d.key]"
+                  @input="googleTilesStore.setGroundFilterParam(d.key, $event.target.valueAsNumber)"
+                  class="flex-1 accent-[#FF6600]"
+                />
+                <span class="text-[10px] text-gray-400 dark:text-gray-500 w-8 text-right tabular-nums">{{ googleTilesStore.ground.filterParams[d.key] }}</span>
+              </div>
+
+              <!-- post-process smoothing -->
+              <label class="flex items-center gap-2 cursor-pointer pt-1">
+                <div class="relative">
+                  <input type="checkbox" :checked="googleTilesStore.ground.postOn" @change="googleTilesStore.setGroundPostOn($event.target.checked)" class="peer sr-only" />
+                  <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#FF6600] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+                </div>
+                <span class="text-[10px] text-gray-700 dark:text-gray-300">smooth (post-process)</span>
+              </label>
+              <template v-if="googleTilesStore.ground.postOn">
+                <div class="flex items-center gap-2">
+                  <label class="text-[10px] text-gray-500 dark:text-gray-400 whitespace-nowrap w-12">effect</label>
+                  <select
+                    :value="googleTilesStore.ground.postId"
+                    @change="googleTilesStore.setGroundPostEffect($event.target.value)"
+                    class="flex-1 text-[10px] px-1 py-0.5 rounded border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-700 dark:text-gray-300"
+                  >
+                    <option v-for="p in googleTilesStore.groundPost" :key="p.meta.id" :value="p.meta.id">{{ p.meta.label }}</option>
+                  </select>
+                </div>
+                <div v-for="d in groundPostMeta.params" :key="d.key" class="flex items-center gap-2">
+                  <label class="text-[10px] text-gray-500 dark:text-gray-400 truncate w-16" :title="d.label">{{ d.short || d.label }}</label>
+                  <input
+                    type="range" :min="d.min" :max="d.max" :step="d.step"
+                    :value="googleTilesStore.ground.postParams[d.key]"
+                    @input="googleTilesStore.setGroundPostParam(d.key, $event.target.valueAsNumber)"
+                    class="flex-1 accent-[#FF6600]"
+                  />
+                  <span class="text-[10px] text-gray-400 dark:text-gray-500 w-8 text-right tabular-nums">{{ googleTilesStore.ground.postParams[d.key] }}</span>
+                </div>
+              </template>
+              <p class="text-[10px] text-gray-400 dark:text-gray-500 leading-tight">Applied to the exported .ter (driving surface). Needs Google tiles enabled in the export.</p>
+            </template>
+          </div>
         </div>
 
         <div class="pt-4 border-t border-gray-100 dark:border-gray-700">
@@ -542,7 +635,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, watch, onErrorCaptured, onUnmounted } from "vue";
+import { ref, shallowRef, computed, reactive, watch, onErrorCaptured, onUnmounted } from "vue";
 import { useI18n } from 'vue-i18n';
 import * as THREE from "three";
 import { TresCanvas } from "@tresjs/core";
@@ -555,6 +648,7 @@ import {
   ChevronRight,
   Plane,
   Crosshair,
+  Mountain,
 } from "lucide-vue-next";
 
 const { t } = useI18n({ useScope: 'global' });
@@ -567,10 +661,20 @@ import CSMLight from "./CSMLight.vue";
 import SurroundingTerrain3D from "./SurroundingTerrain3D.vue";
 import { useGoogleTilesStore } from "../../stores/googleTilesStore.js";
 import { computeUnitsPerMeter } from '@mapng/bake/google3dTiles';
+import { extractTileGround } from '@mapng/bake/ground/extractTileGround';
 
 const props = defineProps(["terrainData"]);
 
 const googleTilesStore = useGoogleTilesStore();
+
+// Currently-selected ground filter / post-effect meta — drives the auto-generated
+// param sliders in the Scene-settings "Drivable ground" menu.
+const groundFilterMeta = computed(() =>
+  (googleTilesStore.groundFilters.find((f) => f.meta.id === googleTilesStore.ground.filterId)
+    || googleTilesStore.groundFilters[0]).meta);
+const groundPostMeta = computed(() =>
+  (googleTilesStore.groundPost.find((p) => p.meta.id === googleTilesStore.ground.postId)
+    || googleTilesStore.groundPost[0]).meta);
 
 // New AOI → the baked tiles no longer match the terrain; back to idle.
 // Then probe the persistent cache: if this AOI was baked before (even in a
@@ -779,6 +883,7 @@ const sunPosition = ref("Mid Morning");
 const textureType = ref("hybrid");
 const surroundingTextureType = ref("none");
 const showWireframe = ref(false);
+const terrainTransparent = ref(false);
 const showSurroundings = ref(false);
 const showSceneSettings = ref(false);
 const isSurroundingsLoading = ref(false);
@@ -805,7 +910,50 @@ const handleSurroundingsLoadingState = (state) => {
   surroundingsSatelliteProgress.total = Number(state?.totalSatellite || 0);
 };
 
+// Live .ter preview: when "preview ground" is on, re-extract the bare-earth
+// ground from the cached tile bake and feed it to the TERRAIN mesh itself — so
+// the previewed ground IS the exported .ter, updating live as the Scene-settings
+// strategy changes. Debounced (extraction is ~hundreds of ms). Coarse grid,
+// resampled to the terrain resolution by extractTileGround.
+const previewGround = shallowRef(null); // { heightMap, minHeight, maxHeight } | null
+let _groundTimer = null;
+function recomputePreviewGround() {
+  const data = props.terrainData;
+  const live = googleTilesStore.groundPreviewShow
+    && googleTilesStore.status === 'ready'
+    && googleTilesStore.group && data?.heightMap
+    && googleTilesStore.ground.source === 'tiles';
+  if (!live) { previewGround.value = null; return; }
+  try {
+    const g = googleTilesStore.ground;
+    const res = extractTileGround(googleTilesStore.group, data, {
+      filterId: g.filterId,
+      filterParams: { ...g.filterParams },
+      postId: g.postOn ? g.postId : null,
+      postParams: { ...g.postParams },
+      maxSeg: 192,
+    });
+    previewGround.value = { heightMap: res.heightMap, minHeight: res.minHeight, maxHeight: res.maxHeight };
+  } catch (e) {
+    console.warn('[preview .ter] ground extraction failed:', e);
+    previewGround.value = null;
+  }
+}
+function scheduleGround() { clearTimeout(_groundTimer); _groundTimer = setTimeout(recomputePreviewGround, 200); }
+watch(
+  () => [googleTilesStore.groundPreviewShow, googleTilesStore.status, props.terrainData],
+  scheduleGround,
+  { immediate: true },
+);
+watch(() => googleTilesStore.ground, scheduleGround, { deep: true });
+onUnmounted(() => clearTimeout(_groundTimer));
+
 const mergedTerrainData = computed(() => {
+  const pg = previewGround.value;
+  // Swap ONLY the heightMap — keep the original minHeight as the datum so the
+  // ground stays referenced to the same zero the tiles are anchored to. Using
+  // the extracted ground's own min would shift the terrain ~metres off the tiles.
+  if (pg) return { ...props.terrainData, heightMap: pg.heightMap };
   return props.terrainData;
 });
 

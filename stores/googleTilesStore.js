@@ -9,6 +9,9 @@ import {
   refineGoogleTilesBake,
   disposeBakeGroup,
 } from '@mapng/bake/google3dTiles';
+import { FILTERS as GROUND_FILTERS } from '@mapng/bake/ground/filters/index';
+import { POSTPROCESSORS as GROUND_POST } from '@mapng/bake/ground/postprocess/index';
+import { DEFAULT_GROUND_STRATEGY } from '@mapng/bake/ground/extractTileGround';
 
 /**
  * State for the Google Photorealistic 3D Tiles preview in Preview3D.
@@ -183,10 +186,62 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     await bakeForPreview(terrainData, true);
   }
 
+  // --- drivable ground (.ter) strategy (Scene-settings menu) -----------------
+  // Persisted as JSON; the export reads it via getGroundStrategy /
+  // getPreferredTerGround so the menu and the exported .ter agree. Export-time
+  // only — NOT part of the bake cache key (it runs on the already-baked group).
+  const GROUND_LS = 'mapng_ter_ground_strategy';
+  const metaById = (list, id) => (list.find((m) => m.meta.id === id) || list[0]).meta;
+  const defaultParamsFor = (meta) => {
+    const o = {};
+    for (const p of meta.params) o[p.key] = p.default;
+    return o;
+  };
+  function loadGround() {
+    const base = {
+      source: 'tiles',
+      filterId: DEFAULT_GROUND_STRATEGY.filterId,
+      filterParams: defaultParamsFor(metaById(GROUND_FILTERS, DEFAULT_GROUND_STRATEGY.filterId)),
+      postOn: true,
+      postId: DEFAULT_GROUND_STRATEGY.postId,
+      postParams: defaultParamsFor(metaById(GROUND_POST, DEFAULT_GROUND_STRATEGY.postId)),
+    };
+    try {
+      const raw = localStorage.getItem(GROUND_LS);
+      if (raw) return { ...base, ...JSON.parse(raw) };
+    } catch (_) { /* private mode / bad JSON */ }
+    return base;
+  }
+  const ground = reactive(loadGround());
+  // Live 3D preview of the extracted ground mesh (debug). Not persisted — purely
+  // a viewport overlay, rebuilt from the cached tile bake on every strategy tweak.
+  const groundPreviewShow = ref(false);
+  function persistGround() {
+    try { localStorage.setItem(GROUND_LS, JSON.stringify(ground)); } catch (_) { /* private mode */ }
+  }
+  function setGroundSource(s) { ground.source = s === 'dem' ? 'dem' : 'tiles'; persistGround(); }
+  function setGroundFilter(id) {
+    ground.filterId = id;
+    ground.filterParams = defaultParamsFor(metaById(GROUND_FILTERS, id));
+    persistGround();
+  }
+  function setGroundFilterParam(key, v) { ground.filterParams[key] = Number(v); persistGround(); }
+  function setGroundPostOn(v) { ground.postOn = !!v; persistGround(); }
+  function setGroundPostEffect(id) {
+    ground.postId = id;
+    ground.postParams = defaultParamsFor(metaById(GROUND_POST, id));
+    persistGround();
+  }
+  function setGroundPostParam(key, v) { ground.postParams[key] = Number(v); persistGround(); }
+
   return {
     status, error, show, showCameras, progress, group, apiKey, quality, zOffset,
     refining, refineError, stripGround, engaged,
     setQuality, setZOffset, setStripGround,
     bakeForPreview, rebake, reset, tryRestore, refineFromView,
+    // drivable-ground strategy (Scene-settings menu)
+    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow,
+    setGroundSource, setGroundFilter, setGroundFilterParam,
+    setGroundPostOn, setGroundPostEffect, setGroundPostParam,
   };
 });
