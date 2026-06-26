@@ -54,10 +54,6 @@
               :terrain-data="terrainData"
             />
 
-            <GroundPreview3D
-              :terrain-data="terrainData"
-            />
-
             <SurroundingTerrain3D
               :terrain-data="terrainData"
               :visible="showSurroundings"
@@ -554,7 +550,7 @@
                   <input type="checkbox" :checked="googleTilesStore.groundPreviewShow" :disabled="googleTilesStore.status !== 'ready'" @change="googleTilesStore.groundPreviewShow = $event.target.checked" class="peer sr-only" />
                   <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#34d399] peer-disabled:opacity-40 after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
                 </div>
-                <span class="text-[10px] text-gray-700 dark:text-gray-300">preview ground in 3D (live)</span>
+                <span class="text-[10px] text-gray-700 dark:text-gray-300">preview .ter from tiles (live — replaces terrain)</span>
               </label>
 
               <!-- bare-earth filter -->
@@ -630,7 +626,7 @@
 </template>
 
 <script setup>
-import { ref, computed, reactive, watch, onErrorCaptured, onUnmounted } from "vue";
+import { ref, shallowRef, computed, reactive, watch, onErrorCaptured, onUnmounted } from "vue";
 import { useI18n } from 'vue-i18n';
 import * as THREE from "three";
 import { TresCanvas } from "@tresjs/core";
@@ -651,12 +647,12 @@ import TerrainMesh from "./TerrainMesh.vue";
 import MapngFlag3D from "./MapngFlag3D.vue";
 import OSMFeatures3D from "./OSMFeatures3D.vue";
 import GoogleTiles3D from "./GoogleTiles3D.vue";
-import GroundPreview3D from "./GroundPreview3D.vue";
 import FlyControls3D from "./FlyControls3D.vue";
 import CSMLight from "./CSMLight.vue";
 import SurroundingTerrain3D from "./SurroundingTerrain3D.vue";
 import { useGoogleTilesStore } from "../../stores/googleTilesStore.js";
 import { computeUnitsPerMeter } from '@mapng/bake/google3dTiles';
+import { extractTileGround } from '@mapng/bake/ground/extractTileGround';
 
 const props = defineProps(["terrainData"]);
 
@@ -904,7 +900,47 @@ const handleSurroundingsLoadingState = (state) => {
   surroundingsSatelliteProgress.total = Number(state?.totalSatellite || 0);
 };
 
+// Live .ter preview: when "preview ground" is on, re-extract the bare-earth
+// ground from the cached tile bake and feed it to the TERRAIN mesh itself — so
+// the previewed ground IS the exported .ter, updating live as the Scene-settings
+// strategy changes. Debounced (extraction is ~hundreds of ms). Coarse grid,
+// resampled to the terrain resolution by extractTileGround.
+const previewGround = shallowRef(null); // { heightMap, minHeight, maxHeight } | null
+let _groundTimer = null;
+function recomputePreviewGround() {
+  const data = props.terrainData;
+  const live = googleTilesStore.groundPreviewShow
+    && googleTilesStore.status === 'ready'
+    && googleTilesStore.group && data?.heightMap
+    && googleTilesStore.ground.source === 'tiles';
+  if (!live) { previewGround.value = null; return; }
+  try {
+    const g = googleTilesStore.ground;
+    const res = extractTileGround(googleTilesStore.group, data, {
+      filterId: g.filterId,
+      filterParams: { ...g.filterParams },
+      postId: g.postOn ? g.postId : null,
+      postParams: { ...g.postParams },
+      maxSeg: 192,
+    });
+    previewGround.value = { heightMap: res.heightMap, minHeight: res.minHeight, maxHeight: res.maxHeight };
+  } catch (e) {
+    console.warn('[preview .ter] ground extraction failed:', e);
+    previewGround.value = null;
+  }
+}
+function scheduleGround() { clearTimeout(_groundTimer); _groundTimer = setTimeout(recomputePreviewGround, 200); }
+watch(
+  () => [googleTilesStore.groundPreviewShow, googleTilesStore.status, props.terrainData],
+  scheduleGround,
+  { immediate: true },
+);
+watch(() => googleTilesStore.ground, scheduleGround, { deep: true });
+onUnmounted(() => clearTimeout(_groundTimer));
+
 const mergedTerrainData = computed(() => {
+  const pg = previewGround.value;
+  if (pg) return { ...props.terrainData, heightMap: pg.heightMap, minHeight: pg.minHeight, maxHeight: pg.maxHeight };
   return props.terrainData;
 });
 
