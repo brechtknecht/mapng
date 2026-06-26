@@ -328,6 +328,49 @@ export function liftDownSpikes(src, nx, nz, w, dropU) {
 }
 
 /**
+ * Separable Gaussian blur over the height grid — the 2D-graphics smoothing
+ * primitive, for evening out residual little spikes/steps in an extracted
+ * ground. `radius` is the kernel half-width in NODES (σ = radius/2); `passes`
+ * repeats the blur (stacking passes widens the effective smoothing). Borders are
+ * index-clamped. `radius<=0` is a no-op. Returns a new array (src untouched).
+ */
+export function gaussianBlur(src, nx, nz, radius, passes = 1) {
+  if (radius <= 0 || passes <= 0) return Float32Array.from(src);
+  const sigma = Math.max(radius / 2, 0.5);
+  const kernel = new Float32Array(radius * 2 + 1);
+  let ksum = 0;
+  for (let r = -radius; r <= radius; r++) {
+    const w = Math.exp(-(r * r) / (2 * sigma * sigma));
+    kernel[r + radius] = w;
+    ksum += w;
+  }
+  for (let i = 0; i < kernel.length; i++) kernel[i] /= ksum;
+
+  let cur = Float32Array.from(src);
+  for (let p = 0; p < passes; p++) {
+    const tmp = new Float32Array(cur.length); // horizontal pass
+    for (let zi = 0; zi < nz; zi++) {
+      const row = zi * nx;
+      for (let xi = 0; xi < nx; xi++) {
+        let acc = 0;
+        for (let r = -radius; r <= radius; r++) acc += kernel[r + radius] * cur[row + clampIdx(xi + r, nx)];
+        tmp[row + xi] = acc;
+      }
+    }
+    const out = new Float32Array(cur.length); // vertical pass
+    for (let zi = 0; zi < nz; zi++) {
+      for (let xi = 0; xi < nx; xi++) {
+        let acc = 0;
+        for (let r = -radius; r <= radius; r++) acc += kernel[r + radius] * tmp[clampIdx(zi + r, nz) * nx + xi];
+        out[zi * nx + xi] = acc;
+      }
+    }
+    cur = out;
+  }
+  return cur;
+}
+
+/**
  * Mean signed offset of a height array vs the DEM, in metres (+ above DEM).
  * The DEM is anchored to the tile street at the AOI centre, so for the raw/min
  * pane this reads ≈ how far the tile street sits above/below the DEM on average

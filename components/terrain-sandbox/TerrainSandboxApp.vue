@@ -56,6 +56,7 @@
           <button class="px-2 py-1 rounded" :class="flyMode ? 'bg-teal-600 text-white' : 'bg-white/10 hover:bg-white/20'" @click="toggleFly">fly: {{ flyMode ? 'on' : 'off' }}</button>
         </div>
 
+
         <!-- Actions -->
         <div class="flex items-center gap-2 ml-auto text-xs">
           <label class="flex items-center gap-1.5 text-[11px]"><input v-model="forceRebake" type="checkbox" /> <span>force rebake</span></label>
@@ -96,6 +97,36 @@
               <span v-if="p.delta != null" :class="Math.abs(p.delta) > 3 ? 'text-amber-400' : 'text-zinc-500'">· Δdem {{ p.delta > 0 ? '+' : '' }}{{ p.delta }}m</span>
             </div>
           </div>
+
+          <!-- Post FX panel — occupies the empty last grid cell -->
+          <div class="relative">
+            <div class="absolute inset-2 rounded-lg bg-zinc-900/92 border border-emerald-500/30 p-3 space-y-2 text-[11px] pointer-events-auto overflow-y-auto shadow-xl">
+              <div class="flex items-center justify-between">
+                <span class="font-semibold text-emerald-300">Post FX</span>
+                <label class="flex items-center gap-1.5"><input v-model="postOn" type="checkbox" /> <span>enabled</span></label>
+              </div>
+              <label class="block">
+                <span class="text-zinc-400">effect</span>
+                <select :value="selectedPostId" class="mt-0.5 w-full bg-zinc-800 rounded px-1.5 py-1" @change="selectPostEffect($event.target.value)">
+                  <option v-for="pp in POSTPROCESSORS" :key="pp.meta.id" :value="pp.meta.id">{{ pp.meta.label }}</option>
+                </select>
+              </label>
+              <label v-for="d in selectedPost.meta.params" :key="d.key" class="block" :class="{ 'opacity-40 pointer-events-none': !postOn }">
+                <span class="flex justify-between text-zinc-400">
+                  <span>{{ d.label }}</span><span class="font-mono text-zinc-300">{{ postParams[d.key] }}</span>
+                </span>
+                <input
+                  v-model.number="postParams[d.key]" type="range" :min="d.min" :max="d.max" :step="d.step"
+                  class="w-full accent-emerald-500" @input="recomputeAll"
+                />
+              </label>
+              <p class="text-zinc-500 leading-tight">
+                <span class="text-zinc-400">Bilateral</span> smooths the road but keeps building/curb edges sharp (less bleed);
+                <span class="text-zinc-400">Gaussian</span> blurs everything.
+              </p>
+            </div>
+          </div>
+
           <!-- vertical grid separators -->
           <div
             v-for="c in grid.cols - 1" :key="'v' + c"
@@ -166,6 +197,7 @@ import {
 } from './terrainSandbox.js';
 import { buildMeshFromHeights, reliefMeters, meanOffsetVsDem } from './groundRaster.js';
 import { FILTERS, defaultParams } from './filters/index.js';
+import { POSTPROCESSORS, postProcessorById } from './postprocess/index.js';
 import { loadSatelliteTexture } from './textureLoader.js';
 
 const apiKey = getTilesApiKey();
@@ -174,9 +206,24 @@ const apiKey = getTilesApiKey();
 // Two built-in baselines + the pluggable filters. Pane index → render layer
 // (i+1); layer 0 is the shared tiles. Each pane owns a reactive params object.
 const COLORS = {
-  dem: 0x8a7f6f, raw: 0xef4444, pmf: 0x4fd1c5, demAnchor: 0xa78bfa, csf: 0xf59e0b,
+  dem: 0x8a7f6f, raw: 0xef4444, pmf: 0x4fd1c5, demAnchor: 0xa78bfa, csf: 0xf59e0b, postproc: 0x34d399,
 };
 const cssColor = (hex) => `#${hex.toString(16).padStart(6, '0')}`;
+
+// GLOBAL post-process FX: one configurable effect applied to EVERY pane's ground
+// (applied last, after each pane's filter). Configured in the "Post FX" panel
+// that occupies the empty last grid cell.
+const postOn = ref(false);
+const selectedPostId = ref(POSTPROCESSORS[0].meta.id); // bilateral by default
+const selectedPost = computed(() => postProcessorById(selectedPostId.value));
+const postParams = reactive(defaultParams(POSTPROCESSORS[0]));
+
+function selectPostEffect(id) {
+  selectedPostId.value = id;
+  for (const k of Object.keys(postParams)) delete postParams[k];
+  Object.assign(postParams, defaultParams(postProcessorById(id)));
+  if (postOn.value) recomputeAll();
+}
 
 const panes = reactive([
   { id: 'dem', label: 'DEM (baseline)', kind: 'builtin', color: COLORS.dem, relief: null, delta: null },
@@ -256,7 +303,9 @@ function computeHeights(pane) {
 }
 
 function buildPaneGroup(pane, layer) {
-  const heights = computeHeights(pane);
+  let heights = computeHeights(pane);
+  // Global post-process FX — applied to every pane's ground uniformly.
+  if (postOn.value) heights = selectedPost.value.apply(heights, S.field, { ...postParams });
   const mesh = buildMeshFromHeights(S.field, heights, {
     texture: terrainTexture.value === 'solid' ? null : S.texture,
     color: pane.color,
@@ -299,6 +348,12 @@ function recompute(id) {
   const group = buildPaneGroup(pane, layer);
   S.groups[id] = group;
   scene.add(group);
+}
+
+// Rebuild every pane's ground — used when a GLOBAL control (post-process) changes.
+function recomputeAll() {
+  if (!S.field) return;
+  for (const p of panes) recompute(p.id);
 }
 
 function buildAllPanes() {
@@ -530,6 +585,8 @@ onBeforeUnmount(() => {
 
 watch([showTiles, showGround], applyVisibility);
 watch(tilesWire, applyTilesWireframe);
+watch(postOn, recomputeAll);
+watch(postParams, () => { if (postOn.value) recomputeAll(); }, { deep: true });
 watch([groundWire, groundOpacity], applyGroundMaterial);
 watch(terrainTexture, onTextureChange);
 </script>
