@@ -39,6 +39,7 @@
               :quality="meshQuality"
               :texture-type="textureType"
               :wireframe="showWireframe"
+              :transparent="terrainTransparent"
             />
 
             <MapngFlag3D
@@ -314,6 +315,14 @@
             <span class="text-xs text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white"
               >{{ t('preview.wireframeMode') }}</span
             >
+          </label>
+
+          <label class="flex items-center gap-2 cursor-pointer group/check" title="Drop the terrain texture and render it see-through to check .ter ↔ tile alignment">
+            <div class="relative">
+              <input type="checkbox" v-model="terrainTransparent" class="peer sr-only" />
+              <div class="w-9 h-5 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-[#FF6600]/20 rounded-full peer peer-checked:after:translate-x-full rtl:peer-checked:after:-translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-[#FF6600]"></div>
+            </div>
+            <span class="text-xs text-gray-700 dark:text-gray-300 group-hover/check:text-gray-900 dark:group-hover/check:text-white">terrain transparent (no texture)</span>
           </label>
 
           <div class="space-y-2">
@@ -874,6 +883,7 @@ const sunPosition = ref("Mid Morning");
 const textureType = ref("hybrid");
 const surroundingTextureType = ref("none");
 const showWireframe = ref(false);
+const terrainTransparent = ref(false);
 const showSurroundings = ref(false);
 const showSceneSettings = ref(false);
 const isSurroundingsLoading = ref(false);
