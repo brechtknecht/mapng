@@ -28,6 +28,8 @@ import { EXCLUDE_HIGHWAY, HALF_WIDTH_M } from './groundMask.js';
 
 const HALF = SCENE_SIZE / 2;
 
+const smoothstep = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
+
 // 1D median (radius 1) — kills single-sample needles without touching grades.
 const median3 = (h) => {
   if (h.length < 3) return h.slice();
@@ -242,4 +244,96 @@ export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smooth
       maxGradePct: Math.round(maxGradePct * 10) / 10,
     },
   };
+};
+
+/**
+ * Carve the road profiles into the extracted ground (Phase 2). Per-cell logic
+ * cannot distinguish a real underpass from sub-street junk — the pit-lift
+ * defense fills both — but the PROFILE knows the road descends there. Every
+ * resolved, non-structure road stamps its corridor (halfWidthM + feather) onto
+ * the ground grid, blending the cell toward the profile height; the .ter then
+ * follows the road down into underpasses (and up onto embankments) while the
+ * pit defenses keep working off-road. throughStructure roads (bridges/tunnels)
+ * never carve, so at a crossing the LOWER road always wins the .ter — the deck
+ * above stays visual (collision meshes for decks are a separate feature).
+ *
+ * Mutates ground.heightMap in place and marks fully-carved cells covered, so
+ * the terSnap pass trusts the carved floor and pulls the underpass road mesh
+ * onto it (closing the visual gap too).
+ *
+ * @param {ReturnType<typeof buildRoadProfiles>} profiles
+ * @param {object} data    chunk TerrainData (grid frame)
+ * @param {object} ground  { heightMap (abs m), coveredMask } — data grid, mutated
+ * @param {object} [opts]
+ * @param {number} [opts.featherM=6]    blend band beyond the carriageway (m)
+ * @param {number} [opts.maxCarveM=10]  per-cell shift clamp (safety)
+ * @returns {{ carvedCells:number, maxShiftM:number, minH:number, maxH:number }}
+ */
+export const carveRoadProfiles = (profiles, data, ground, { featherM = 6, maxCarveM = 10 } = {}) => {
+  const empty = { carvedCells: 0, maxShiftM: 0, minH: Infinity, maxH: -Infinity };
+  if (!profiles?.roads?.length || !ground?.heightMap) return empty;
+  const upm = computeUnitsPerMeter(data);
+  const W = data.width, H = data.height;
+  const hm = ground.heightMap, cm = ground.coveredMask ?? null;
+
+  // Per-cell best (weight, target height) across all roads — max weight wins, so
+  // junction cells take whichever road claims them hardest (heights agree there).
+  const wBest = new Float32Array(W * H);
+  const hBest = new Float32Array(W * H);
+  const featherScene = featherM * upm;
+  const toCol = (x) => ((x + HALF) / SCENE_SIZE) * (W - 1);
+  const toRow = (z) => ((z + HALF) / SCENE_SIZE) * (H - 1);
+
+  for (const r of profiles.roads) {
+    if (!r.resolved || r.throughStructure) continue;
+    const halfW = r.halfWidthM * upm;
+    const reach = halfW + featherScene;
+    const pts = r.pts;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1], b = pts[i];
+      const c0 = Math.max(0, Math.floor(toCol(Math.min(a.x, b.x) - reach)));
+      const c1 = Math.min(W - 1, Math.ceil(toCol(Math.max(a.x, b.x) + reach)));
+      const r0 = Math.max(0, Math.floor(toRow(Math.min(a.z, b.z) - reach)));
+      const r1 = Math.min(H - 1, Math.ceil(toRow(Math.max(a.z, b.z) + reach)));
+      const dx = b.x - a.x, dz = b.z - a.z;
+      const len2 = dx * dx + dz * dz;
+      for (let row = r0; row <= r1; row++) {
+        const pz = (row / (H - 1)) * SCENE_SIZE - HALF;
+        for (let col = c0; col <= c1; col++) {
+          const px = (col / (W - 1)) * SCENE_SIZE - HALF;
+          let t = len2 > 0 ? ((px - a.x) * dx + (pz - a.z) * dz) / len2 : 0;
+          t = t < 0 ? 0 : t > 1 ? 1 : t;
+          const d = Math.hypot(px - (a.x + t * dx), pz - (a.z + t * dz));
+          if (d >= reach) continue;
+          const w = d <= halfW ? 1 : smoothstep((reach - d) / featherScene);
+          const idx = row * W + col;
+          if (w > wBest[idx]) {
+            wBest[idx] = w;
+            hBest[idx] = a.h + (b.h - a.h) * t; // profile samples ~stepM apart
+          }
+        }
+      }
+    }
+  }
+
+  let carvedCells = 0, maxShiftM = 0, minH = Infinity, maxH = -Infinity;
+  for (let idx = 0; idx < wBest.length; idx++) {
+    const w = wBest[idx];
+    if (w <= 0) continue;
+    let delta = (hBest[idx] - hm[idx]) * w;
+    if (delta > maxCarveM) delta = maxCarveM;
+    else if (delta < -maxCarveM) delta = -maxCarveM;
+    if (delta !== 0) {
+      hm[idx] += delta;
+      const a = Math.abs(delta);
+      if (a > maxShiftM) maxShiftM = a;
+    }
+    if (hm[idx] < minH) minH = hm[idx];
+    if (hm[idx] > maxH) maxH = hm[idx];
+    carvedCells++;
+    // Fully inside the carriageway ⇒ the profile IS the floor here — trusted,
+    // so the terSnap pass may pull the road mesh onto it (underpass included).
+    if (cm && w >= 0.9) cm[idx] = 1;
+  }
+  return { carvedCells, maxShiftM: +maxShiftM.toFixed(2), minH, maxH };
 };

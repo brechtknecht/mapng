@@ -69,6 +69,7 @@ export function getGroundStrategy() {
     ...(Number.isFinite(cfg.aboveBandM) ? { aboveBandM: cfg.aboveBandM } : {}),
     ...(Number.isFinite(cfg.minNormalY) ? { minNormalY: cfg.minNormalY } : {}),
     ...(typeof cfg.snapRoads === 'boolean' ? { snapRoads: cfg.snapRoads } : {}),
+    ...(typeof cfg.carveRoads === 'boolean' ? { carveRoads: cfg.carveRoads } : {}),
   };
 }
 
@@ -98,6 +99,11 @@ export const DEFAULT_GROUND_STRATEGY = {
   // road stops wobbling around the smooth .ter it drives on. Consumed by
   // googleBakeWorker.applyTerGroundSnap, not by the extraction itself.
   snapRoads: true,
+  // Worker-side .ter pass (routes): carve the 1D road elevation profiles into
+  // the extracted ground so the .ter follows roads into underpasses / onto
+  // embankments (roadProfiles.carveRoadProfiles). Bridges/tunnels never carve —
+  // the lower road wins the .ter at crossings.
+  carveRoads: true,
 };
 
 /**

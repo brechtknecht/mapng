@@ -74,7 +74,7 @@ import {
 import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
 import { extractTileGroundFromSoup } from '@mapng/bake/ground/extractTileGround';
 import { buildGroundMask } from '@mapng/bake/groundMask';
-import { buildRoadProfiles } from '@mapng/bake/roadProfiles';
+import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
@@ -336,10 +336,12 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
   } catch (e) {
     console.warn('[bakeWorker] tile-ground extraction failed (route .ter will use the DEM):', e?.stack ?? e);
   }
-  // Road elevation profiles (Phase 1: DIAGNOSTIC ONLY, no geometry change) —
-  // 1D profiles along the OSM centrelines from the extracted ground, untrusted
-  // spans (tunnels, under-bridge holes, band-gated underpasses) interpolated
-  // ALONG the road. Stashed on the session for the profile-based snap phase.
+  // Road elevation profiles: 1D profiles along the OSM centrelines from the
+  // extracted ground, untrusted spans (tunnels, under-bridge holes, band-gated
+  // underpasses) interpolated ALONG the road — then CARVED into the ground so
+  // the .ter follows the road down into underpasses (per-cell pit defenses
+  // cannot tell those from junk dips; the road can). Runs BEFORE terSnap, which
+  // therefore snaps the road mesh onto the carved floor.
   session.roadProfiles = null;
   if (session.extractedGround) {
     try {
@@ -352,11 +354,23 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
           `${st.trustedPct}% samples trusted, largest bridged gap ${st.maxUntrustedGapM}m, ` +
           `max grade ${st.maxGradePct}%`,
         );
+        if (groundStrategy?.carveRoads ?? true) {
+          const g = session.extractedGround;
+          const cs = carveRoadProfiles(prof, session.data, g);
+          if (cs.carvedCells > 0) {
+            g.minHeight = Math.min(g.minHeight, cs.minH);
+            g.maxHeight = Math.max(g.maxHeight, cs.maxH);
+            console.info(
+              `[bakeWorker] [roadProfiles] carved ${cs.carvedCells} cells into the .ter ` +
+              `(max shift ${cs.maxShiftM}m)`,
+            );
+          }
+        }
       } else {
         console.info('[bakeWorker] [roadProfiles] no drivable roads in this AOI');
       }
     } catch (e) {
-      console.warn('[bakeWorker] road-profile build failed (diagnostic only):', e?.stack ?? e);
+      console.warn('[bakeWorker] road-profile build/carve failed (ground stays as extracted):', e?.stack ?? e);
     }
   }
 };

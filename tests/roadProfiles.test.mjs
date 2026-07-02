@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRoadProfiles } from '@mapng/bake/roadProfiles';
+import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
 
 // 200 m AOI, 200×200 grid ⇒ 1 m/px, unitsPerMeter = 0.5 (mirrors groundMask.test).
 const N = 200;
@@ -96,6 +96,55 @@ test('bridge/tunnel ways are kept as throughStructure profiles, unresolved witho
   assert.ok(tunnel.throughStructure && !tunnel.resolved, 'tunnel: structure, no trusted anchors');
   assert.ok(!plain.throughStructure && plain.resolved, 'plain road resolves normally');
   assert.equal(prof.stats.resolved, 1);
+});
+
+// ── carve ────────────────────────────────────────────────────────────────────
+// A hand-built profile along z=0 (scene x −40..40 = 160 m), constant height.
+const profileAt = (h, flags = {}) => ({
+  roads: [{
+    resolved: true, throughStructure: false, halfWidthM: 4, ...flags,
+    pts: [{ x: -40, z: 0, s: 0, h }, { x: 40, z: 0, s: 160, h }],
+  }],
+});
+const cellIdx = (sx, sz) => {
+  const col = Math.round(((sx + 50) / 100) * (N - 1));
+  const row = Math.round(((sz + 50) / 100) * (N - 1));
+  return row * N + col;
+};
+
+test('carve pulls the corridor onto the profile (underpass restored), off-road untouched', () => {
+  // The pit-lift/band-gate failure mode: real road at 40, but the extracted
+  // ground filled the dip at 45. The profile knows better — carve restores it.
+  const g = groundStub(() => 45);
+  g.coveredMask.fill(0); // even a fully-untrusted floor gets the carved corridor
+  const st = carveRoadProfiles(profileAt(40), DATA, g);
+
+  assert.ok(st.carvedCells > 0, 'cells were carved');
+  assert.ok(Math.abs(g.heightMap[cellIdx(0, 0)] - 40) < 0.1,
+    `centreline at profile height, got ${g.heightMap[cellIdx(0, 0)]}`);
+  assert.equal(g.heightMap[cellIdx(0, 15)], 45, 'off-road (30m out) untouched');
+  const feather = g.heightMap[cellIdx(0, 3.5)]; // ~7m out: inside the blend band
+  assert.ok(feather > 40.5 && feather < 44.5, `feather blends, got ${feather}`);
+  assert.equal(g.coveredMask[cellIdx(0, 0)], 1, 'carriageway cells become trusted for the snap');
+  assert.equal(g.coveredMask[cellIdx(0, 15)], 0, 'off-road trust untouched');
+});
+
+test('bridges/tunnels and unresolved roads never carve', () => {
+  const g1 = groundStub(() => 45);
+  const s1 = carveRoadProfiles(profileAt(40, { throughStructure: true }), DATA, g1);
+  assert.equal(s1.carvedCells, 0);
+  assert.equal(g1.heightMap[cellIdx(0, 0)], 45);
+
+  const g2 = groundStub(() => 45);
+  const s2 = carveRoadProfiles(profileAt(40, { resolved: false }), DATA, g2);
+  assert.equal(s2.carvedCells, 0);
+});
+
+test('carve shift is clamped to maxCarveM', () => {
+  const g = groundStub(() => 60); // 20m above the profile — clearly bogus
+  carveRoadProfiles(profileAt(40), DATA, g, { maxCarveM: 10 });
+  assert.ok(Math.abs(g.heightMap[cellIdx(0, 0)] - 50) < 0.1,
+    `shift capped at 10m, got ${g.heightMap[cellIdx(0, 0)]}`);
 });
 
 test('non-drivable ways and empty input yield no profiles', () => {

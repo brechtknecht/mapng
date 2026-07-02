@@ -207,6 +207,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
       postParams: defaultParamsFor(metaById(GROUND_POST, DEFAULT_GROUND_STRATEGY.postId)),
       minNormalY: DEFAULT_GROUND_STRATEGY.minNormalY,
       snapRoads: DEFAULT_GROUND_STRATEGY.snapRoads,
+      carveRoads: DEFAULT_GROUND_STRATEGY.carveRoads,
     };
     try {
       const raw = localStorage.getItem(GROUND_LS);
@@ -239,6 +240,8 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   function setGroundMinNormalY(v) { ground.minNormalY = Number(v); persistGround(); }
   // Worker-side road snap onto the extracted .ter ground (route bakes).
   function setGroundSnapRoads(v) { ground.snapRoads = !!v; persistGround(); }
+  // Worker-side profile carve into the .ter (underpasses/embankments).
+  function setGroundCarveRoads(v) { ground.carveRoads = !!v; persistGround(); }
 
   return {
     status, error, show, showCameras, progress, group, apiKey, quality, zOffset,
@@ -248,6 +251,6 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     // drivable-ground strategy (Scene-settings menu)
     ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow,
     setGroundSource, setGroundFilter, setGroundFilterParam,
-    setGroundPostOn, setGroundPostEffect, setGroundPostParam, setGroundMinNormalY, setGroundSnapRoads,
+    setGroundPostOn, setGroundPostEffect, setGroundPostParam, setGroundMinNormalY, setGroundSnapRoads, setGroundCarveRoads,
   };
 });

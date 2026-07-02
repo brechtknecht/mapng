@@ -67,6 +67,16 @@
         <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Snap the tile mesh's road vertices onto the extracted .ter ground during the route bake — removes the photogrammetry wobble on the road surface. Changing this re-bakes the tiles.">flatten roads onto .ter (bake)</span>
       </label>
 
+      <!-- worker-side profile carve: the .ter follows OSM road profiles into
+           underpasses / onto embankments (route bakes only — re-bakes). -->
+      <label class="flex items-center gap-2 cursor-pointer pt-1">
+        <div class="relative">
+          <input type="checkbox" :checked="store.ground.carveRoads" @change="store.setGroundCarveRoads($event.target.checked)" class="peer sr-only" />
+          <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#FF6600] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+        </div>
+        <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Carve 1D road elevation profiles into the .ter during the route bake: the driving surface follows roads down into underpasses and up onto embankments. Bridges never carve — the lower road wins. Changing this re-bakes the tiles.">carve road profiles into .ter (bake)</span>
+      </label>
+
       <!-- post-process smoothing -->
       <label class="flex items-center gap-2 cursor-pointer pt-1">
         <div class="relative">
