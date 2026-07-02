@@ -210,8 +210,36 @@ export async function exportGoogleTilesViaSidecar(data, options, spec) {
   const { forceRebake: _ignored, onProgress, ...bakeOptions } = resolveBakeOptions(options);
   const key = bakeCacheKey(data, bakeOptions);
   await ensureSidecarSession(data, bakeOptions, key, onProgress);
-  return exportAssemblyViaSidecar(key, spec, onProgress);
+  const exported = await exportAssemblyViaSidecar(key, spec, onProgress);
+  // Route mode: the worker ships the chunk's bare-earth ground (base64) in the
+  // export message — decode it to typed arrays so the route compositor can blit
+  // it into the combined .ter (compositeRouteGround).
+  if (exported?.ground) exported.ground = decodeChunkGround(exported.ground);
+  return exported;
 }
+
+const fromBase64Bytes = (b64) => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+};
+
+/** Decode the worker's base64 ground payload into a heightMap (Float32) + coverage (Uint8). */
+const decodeChunkGround = (g) => {
+  const bytes = fromBase64Bytes(g.heightMap);
+  const aligned = new ArrayBuffer(bytes.byteLength); // pooled atob slices aren't 4-byte aligned
+  new Uint8Array(aligned).set(bytes);
+  return {
+    heightMap: new Float32Array(aligned),
+    coverage: fromBase64Bytes(g.coverage),
+    width: g.width,
+    height: g.height,
+    minHeight: g.minHeight,
+    maxHeight: g.maxHeight,
+    coverageRatio: g.coverageRatio,
+  };
+};
 
 /**
  * End the resident sidecar bake session for THIS data+options, freeing its

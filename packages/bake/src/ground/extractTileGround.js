@@ -15,6 +15,7 @@
 //
 // Pure / DOM-free: traverses the THREE.Group geometry only (no renderer), so it
 // runs in the browser export AND a headless Node worker.
+import * as THREE from 'three';
 import { computeUnitsPerMeter } from '../scene/sceneFrame.js';
 import { buildTileHeightField, buildMeshFromHeights } from './heightField.js';
 import { FILTERS } from './filters/index.js';
@@ -64,6 +65,10 @@ export function getGroundStrategy() {
     filterParams: cfg.filterParams || {},
     postId: cfg.postOn === false ? null : (cfg.postId || DEFAULT_GROUND_STRATEGY.postId),
     postParams: cfg.postParams || {},
+    ...(Number.isFinite(cfg.belowBandM) ? { belowBandM: cfg.belowBandM } : {}),
+    ...(Number.isFinite(cfg.aboveBandM) ? { aboveBandM: cfg.aboveBandM } : {}),
+    ...(Number.isFinite(cfg.minNormalY) ? { minNormalY: cfg.minNormalY } : {}),
+    ...(typeof cfg.snapRoads === 'boolean' ? { snapRoads: cfg.snapRoads } : {}),
   };
 }
 
@@ -83,6 +88,16 @@ export const DEFAULT_GROUND_STRATEGY = {
   postParams: {},
   belowBandM: 3,
   aboveBandM: 5,
+  // Rasteriser gate: skip triangles steeper than |normal.y| = 0.5 (≈60°).
+  // Facade skirts / LOD-seam walls write their below-street bottoms into the
+  // per-cell min and NOTHING downstream lifts the ground back up — this gate
+  // is what keeps the .ter at road level next to buildings.
+  minNormalY: 0.5,
+  // Worker-side visual pass (routes): after extraction, snap the tile mesh's
+  // OSM-masked road verts onto the extracted ground (+2 cm) so the photogrammetry
+  // road stops wobbling around the smooth .ter it drives on. Consumed by
+  // googleBakeWorker.applyTerGroundSnap, not by the extraction itself.
+  snapRoads: true,
 };
 
 /**
@@ -108,6 +123,7 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
     maxSeg,
     belowBandM: opt.belowBandM,
     aboveBandM: opt.aboveBandM,
+    minNormalY: opt.minNormalY,
   });
 
   const filter = filterById(opt.filterId);
@@ -156,6 +172,23 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
   }
   for (let i = 0; i < field.covered.length; i++) covered += field.covered[i];
 
+  // Per-cell coverage (1 where a tile rasterised onto the cell, else 0), aligned
+  // to the width×height heightMap. The route compositor uses it to feather the
+  // tile ground into the DEM at the corridor edge (compositeRouteGround).
+  let coveredMask;
+  if (nx === width && nz === height) {
+    coveredMask = field.covered; // 1:1 grid — already aligned, north-origin
+  } else {
+    coveredMask = new Uint8Array(width * height);
+    for (let row = 0; row < height; row++) {
+      const z = Math.round((row / Math.max(1, height - 1)) * (nz - 1));
+      for (let col = 0; col < width; col++) {
+        const x = Math.round((col / Math.max(1, width - 1)) * (nx - 1));
+        coveredMask[row * width + col] = field.covered[z * nx + x];
+      }
+    }
+  }
+
   if (lo === Infinity) { lo = minHeight; hi = minHeight; }
   return {
     heightMap: out,
@@ -164,7 +197,43 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
     minHeight: lo,
     maxHeight: hi,
     coverage: +(covered / field.covered.length).toFixed(3),
+    coveredMask,
   };
+}
+
+/**
+ * Worker-side entry point: extract the ground from a TRANSFORMED tile soup (the
+ * Node bake's per-mesh record buffers) instead of a live THREE.Group. Each soup
+ * entry is { positions:Float32Array, index:TypedArray|number[]|null } in the
+ * createTileMeshTransformer output frame — X/Z in scene units, Y in METRES above
+ * the .ter datum — which is exactly the LOCAL frame buildTileHeightField reads.
+ * So we wrap the buffers in an identity-framed group (no ancestor transforms to
+ * strip) and run the same extraction the browser export uses.
+ *
+ * The route bakes every chunk with one route-wide groundOffsetM, so each chunk's
+ * extracted ground comes out in the same absolute frame (extractedAbs =
+ * sharedGroundOffset + cart.height — the chunk minHeight cancels) and the grounds
+ * composite directly (see routeTerrainComposite.compositeRouteGround).
+ *
+ * @param {Array<{positions:Float32Array,index:?(Uint16Array|Uint32Array|number[])}>} soup
+ * @param {object} terrain   TerrainData (heightMap, width, height, minHeight, bounds)
+ * @param {object} [options] ground strategy overrides (same as extractTileGround)
+ * @returns {ReturnType<typeof extractTileGround>}
+ */
+export function extractTileGroundFromSoup(soup, terrain, options = {}) {
+  const group = new THREE.Group();
+  for (const m of soup || []) {
+    if (!m?.positions?.length) continue;
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(m.positions, 3));
+    if (m.index) {
+      const idx = (m.index instanceof Uint16Array || m.index instanceof Uint32Array)
+        ? m.index : new Uint32Array(m.index);
+      geom.setIndex(new THREE.BufferAttribute(idx, 1));
+    }
+    group.add(new THREE.Mesh(geom));
+  }
+  return extractTileGround(group, terrain, options);
 }
 
 /**
@@ -187,6 +256,7 @@ export function buildGroundMesh(tilesGroup, terrain, options = {}, meshOpts = {}
     maxSeg: options.maxSeg ?? 192,
     belowBandM: opt.belowBandM,
     aboveBandM: opt.aboveBandM,
+    minNormalY: opt.minNormalY,
   });
 
   let heights = filterById(opt.filterId).apply(field, { ...opt.filterParams });

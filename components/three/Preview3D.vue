@@ -584,6 +584,18 @@
                 <span class="text-[10px] text-gray-400 dark:text-gray-500 w-8 text-right tabular-nums">{{ googleTilesStore.ground.filterParams[d.key] }}</span>
               </div>
 
+              <!-- rasteriser steep-triangle gate (facade skirts / LOD-seam walls) -->
+              <div class="flex items-center gap-2">
+                <label class="text-[10px] text-gray-500 dark:text-gray-400 truncate w-16" title="Skip triangles steeper than this |normal.y| (0 = off)">steep cut</label>
+                <input
+                  type="range" min="0" max="0.95" step="0.05"
+                  :value="googleTilesStore.ground.minNormalY"
+                  @input="googleTilesStore.setGroundMinNormalY($event.target.valueAsNumber)"
+                  class="flex-1 accent-[#FF6600]"
+                />
+                <span class="text-[10px] text-gray-400 dark:text-gray-500 w-8 text-right tabular-nums">{{ googleTilesStore.ground.minNormalY }}</span>
+              </div>
+
               <!-- post-process smoothing -->
               <label class="flex items-center gap-2 cursor-pointer pt-1">
                 <div class="relative">
@@ -931,6 +943,7 @@ function recomputePreviewGround() {
       filterParams: { ...g.filterParams },
       postId: g.postOn ? g.postId : null,
       postParams: { ...g.postParams },
+      ...(Number.isFinite(g.minNormalY) ? { minNormalY: g.minNormalY } : {}),
       maxSeg: 192,
     });
     previewGround.value = { heightMap: res.heightMap, minHeight: res.minHeight, maxHeight: res.maxHeight };

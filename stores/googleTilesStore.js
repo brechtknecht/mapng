@@ -205,6 +205,8 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
       postOn: true,
       postId: DEFAULT_GROUND_STRATEGY.postId,
       postParams: defaultParamsFor(metaById(GROUND_POST, DEFAULT_GROUND_STRATEGY.postId)),
+      minNormalY: DEFAULT_GROUND_STRATEGY.minNormalY,
+      snapRoads: DEFAULT_GROUND_STRATEGY.snapRoads,
     };
     try {
       const raw = localStorage.getItem(GROUND_LS);
@@ -233,6 +235,10 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     persistGround();
   }
   function setGroundPostParam(key, v) { ground.postParams[key] = Number(v); persistGround(); }
+  // Rasteriser steep-triangle gate (heightField minNormalY): 0 disables.
+  function setGroundMinNormalY(v) { ground.minNormalY = Number(v); persistGround(); }
+  // Worker-side road snap onto the extracted .ter ground (route bakes).
+  function setGroundSnapRoads(v) { ground.snapRoads = !!v; persistGround(); }
 
   return {
     status, error, show, showCameras, progress, group, apiKey, quality, zOffset,
@@ -242,6 +248,6 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     // drivable-ground strategy (Scene-settings menu)
     ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow,
     setGroundSource, setGroundFilter, setGroundFilterParam,
-    setGroundPostOn, setGroundPostEffect, setGroundPostParam,
+    setGroundPostOn, setGroundPostEffect, setGroundPostParam, setGroundMinNormalY, setGroundSnapRoads,
   };
 });

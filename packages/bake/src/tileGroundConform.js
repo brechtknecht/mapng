@@ -18,7 +18,7 @@
 // the browser bake and headless worker call the identical function. Mirrors the
 // weldSeams return shape so the orchestrators write positions back the same way.
 
-import { sampleHeightAtScene, computeUnitsPerMeter } from './googleBakeCore.js';
+import { sampleHeightAtScene, computeUnitsPerMeter, SCENE_SIZE } from './googleBakeCore.js';
 import { createScalarFieldGrid } from './scalarFieldGrid.js';
 
 /**
@@ -56,8 +56,28 @@ import { createScalarFieldGrid } from './scalarFieldGrid.js';
  *   than this far off the DEM is NOT snapped. A real road floats a few metres at
  *   most; a vertex tens of metres up is a flat roof / overpass / tree merely
  *   overlapping a road pixel, and snapping it would tear a thin vertical spike.
- *   Also: a vertex shared with any non-horizontal tri (a facade/curb) is never
- *   snapped, so the snap can't pull a wall vertex down off its wall.
+ *   Tapered (not a hard cliff — see snapTaperM) so a vertex just over the ceiling
+ *   doesn't spike against an in-ceiling neighbour.
+ * @param {number} [opts.snapTaperM=1.5]       width (metres) over which the snap
+ *   weight fades to 0 as a vertex's float approaches maxSnapM. Removes the hard
+ *   on/off boundary that left a vertex at 5.1 m unsnapped beside a 4.9 m neighbour.
+ * @param {number} [opts.wallNormalY=0.34]     WALL-protection threshold, SEPARATE
+ *   from groundNormalThreshold. A vertex is excluded from the snap only when it is
+ *   shared with a genuinely STEEP face (|ny|/|n| < this ≈ tilt > ~70°: a facade or
+ *   curb riser). Using the 0.85 ground threshold here instead flagged every gentle
+ *   road micro-relief tri (crown, manholes, paint, debris) as "wall", so on a
+ *   DENSE mesh scattered road verts were left unsnapped among snapped neighbours —
+ *   the interleaving that corrugated/tore the road. Genuine walls/curbs are still
+ *   protected; only the spurious mid-tilt exclusions are dropped.
+ * @param {number} [opts.wallMinSpanM=1.5]     a steep face counts as a WALL only
+ *   when its own vertical extent reaches this (metres). Road-noise micro-facets
+ *   are steep but span centimetres — without this gate they flagged the bumps'
+ *   own verts as walls, exempting the road's bumps from the snap.
+ * @param {Uint8Array|null} [opts.floorCoveredMask=null]  per-cell trust mask for
+ *   the floor, on the SAME grid as data.heightMap (1 = the floor at this cell was
+ *   genuinely derived from the tiles). Where any bilinear neighbour is 0 the snap
+ *   is skipped entirely: there the floor is a fallback (DEM) that never saw the
+ *   road — snapping to it drags underpasses UP and viaducts DOWN by metres.
  * @returns {{ positions:Array<Float32Array|null>, vertsMoved:number,
  *   meshesMoved:number, cellsFilled:number, residualBefore:number,
  *   residualAfter:number }}
@@ -72,6 +92,10 @@ export const conformTilesToFloor = (meshes, data, {
   groundMask = null,
   roadEpsM = 0.02,
   maxSnapM = 5,
+  snapTaperM = 1.5,
+  wallNormalY = 0.34,
+  wallMinSpanM = 1.5,
+  floorCoveredMask = null,
   diagnostics = false,
 } = {}) => {
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
@@ -89,15 +113,15 @@ export const conformTilesToFloor = (meshes, data, {
   // the band — a road floating beyond groundDistanceM is exactly the floater we
   // want to snap, yet its tris never enter the delta field. Marked here, used in
   // Pass 2. (Null/skipped entirely when no mask, keeping the fast path intact.)
-  // Two per-vertex flags for the snap (mask only):
-  //  horizCand — vertex is touched by a near-horizontal tri (road-surface candidate)
-  //  nonHoriz  — vertex is touched by ANY non-horizontal tri (a facade/curb/wall)
-  // We snap only horizCand && !nonHoriz, so a vertex shared with a vertical face is
-  // never pulled to the floor — that pull is what tore thin vertical spikes off
-  // walls in the corridor bake (low oblique cameras capture facades over roads).
-  const horizCandFlags = groundMask
-    ? meshes.map((m) => (m.positions ? new Uint8Array(m.positions.length / 3) : null))
-    : null;
+  // Per-vertex WALL flag for the snap (mask only): set when a vertex is touched by
+  // a genuinely STEEP face (wallNormalY ≈ tilt > 70°: a facade or curb riser).
+  // Pass 2 snaps EVERY masked vertex EXCEPT these onto the DEM — we trust the
+  // (smooth) road mask to define what's road, NOT the local tri orientation.
+  // Re-gating by local flatness (the old `horizCand`) left the photogrammetry
+  // bumps — which are by definition NOT horizontal — unsnapped, so the road stayed
+  // bumpy even though the DEM is smooth. Snapping by mask membership flattens them;
+  // only true walls/curb risers are protected so the snap can't pull a facade
+  // vertex off its wall.
   const nonHorizFlags = groundMask
     ? meshes.map((m) => (m.positions ? new Uint8Array(m.positions.length / 3) : null))
     : null;
@@ -131,20 +155,26 @@ export const conformTilesToFloor = (meshes, data, {
       const ny = e1z * e2x - e1x * e2z;
       const nz = e1x * e2y - e1y * e2x;
       const nlen = Math.sqrt(nx * nx + ny * ny + nz * nz);
-      const isHoriz = nlen > 1e-12 && Math.abs(ny) / nlen > groundNormalThreshold;
+      const ncos = nlen > 1e-12 ? Math.abs(ny) / nlen : 0; // 1 = flat, 0 = vertical
+      const isHoriz = ncos > groundNormalThreshold;
+      // STEEP face = an actual wall. Two conditions, both required:
+      //  - steeper than wallNormalY (~70°) — NOT the loose ground threshold (see
+      //    the param doc: gentle mid-tilt road relief must keep snapping);
+      //  - vertical extent ≥ wallMinSpanM. A noisy photogrammetry road is FULL of
+      //    steep micro-facets (a 30 cm bump over a 15 cm run is already 63°) —
+      //    without the span gate those facets flagged the bumps' own verts as
+      //    "wall", excluding from the snap exactly the verts that make the road
+      //    bumpy (measured: ~half of all carriageway verts). A real facade spans
+      //    metres; a bump facet spans centimetres — the span separates them.
+      const ySpanM = Math.max(y0, y1, y2) - Math.min(y0, y1, y2);
+      const isWall = nlen > 1e-12 && ncos < wallNormalY && ySpanM >= wallMinSpanM;
 
-      // Snap gates (mask only): mark horizontal road candidates, AND separately
-      // mark every vertex that touches a non-horizontal tri so Pass 2 can exclude
-      // facade/curb-shared vertices. Band-independent — a floating road tri is out
-      // of band but still a candidate.
-      if (groundMask) {
-        if (isHoriz) {
-          const hc = horizCandFlags[mi];
-          if (hc) { hc[i0] = 1; hc[i1] = 1; hc[i2] = 1; }
-        } else {
-          const nh = nonHorizFlags[mi];
-          if (nh) { nh[i0] = 1; nh[i1] = 1; nh[i2] = 1; }
-        }
+      // Snap gate (mask only): mark every vertex touched by a genuinely STEEP face
+      // (wall / curb riser) so Pass 2 protects it. Everything else inside the mask
+      // is snapped — the mask defines road, not the local normal. Band-independent.
+      if (groundMask && isWall) {
+        const nh = nonHorizFlags[mi];
+        if (nh) { nh[i0] = 1; nh[i1] = 1; nh[i2] = 1; }
       }
 
       // Delta-field gate: ground sits in a BAND around the terrain —
@@ -184,12 +214,31 @@ export const conformTilesToFloor = (meshes, data, {
   // DEM directly: w=1 seats it on the floor (no ±band ceiling → floaters come
   // down, wiggle flattens), w feathers to 0 across the road edge so adjacent
   // off-road verts stay put and the mesh does not tear.
+  // Floor-trust lookup (same scene→pixel mapping as sampleHeightAtScene, all four
+  // bilinear neighbours must be covered). 1 when no mask was provided.
+  const floorTrusted = (x, z) => {
+    if (!floorCoveredMask) return 1;
+    const half = SCENE_SIZE / 2;
+    const u = Math.max(0, Math.min(1, (x + half) / SCENE_SIZE));
+    const v = Math.max(0, Math.min(1, (z + half) / SCENE_SIZE));
+    const lx = u * (data.width - 1);
+    const lz = v * (data.height - 1);
+    const x0 = Math.floor(lx), x1 = Math.min(x0 + 1, data.width - 1);
+    const z0 = Math.floor(lz), z1 = Math.min(z0 + 1, data.height - 1);
+    const cm = floorCoveredMask, w = data.width;
+    return (cm[z0 * w + x0] && cm[z0 * w + x1] && cm[z1 * w + x0] && cm[z1 * w + x1]) ? 1 : 0;
+  };
+
   let vertsMoved = 0, meshesMoved = 0, vertsSnapped = 0, maxFloatFixedM = 0;
   let postResidualSum = 0, postResidualCount = 0;
+  // Core-carriageway flatness audit (mask w ≥ 0.9): how far the FINAL surface
+  // deviates from the floor over the road proper — including the verts the snap
+  // deliberately skipped (wall-shared, over-ceiling), because those are what the
+  // eye still sees as bumps on the road. Answers "is the visible road flat now".
+  let roadVertsCore = 0, roadDevSum = 0, roadDevMax = 0, roadWallExcluded = 0, roadGateExcluded = 0, roadOverheadCount = 0;
   const positions = meshes.map((m, mi) => {
     const p = m.positions;
     if (!p) return null;
-    const hc = horizCandFlags ? horizCandFlags[mi] : null;
     const nh = nonHorizFlags ? nonHorizFlags[mi] : null;
     const out = new Float32Array(p.length);
     out.set(p);
@@ -202,21 +251,49 @@ export const conformTilesToFloor = (meshes, data, {
       let newY = p[i + 1] - d;
 
       const vi = i / 3;
-      // Snap only a horizontal road candidate that is NOT shared with a vertical
-      // face (no spike) AND sits within maxSnapM of the DEM (not a roof/overpass).
-      if (groundMask && hc && hc[vi] && !nh[vi]) {
+      // Snap every MASKED vertex that is NOT a wall/curb-riser vertex (nh) and sits
+      // within maxSnapM of the DEM (so a roof/overpass merely overlapping a road
+      // pixel is left alone). The mask weight w restricts this to the road footprint.
+      if (groundMask && nh) {
+        const trusted = floorTrusted(x, z);
+        const m = trusted ? groundMask.sample(x, z) : 0;
         const floatBefore = Math.abs(p[i + 1] - terr);
-        const w = floatBefore <= maxSnapM ? groundMask.sample(x, z) : 0;
-        if (w > 0) {
-          const ySnap = terr + roadEpsM;
-          newY = newY * (1 - w) + ySnap * w;
-          if (w > 0.5) {
-            vertsSnapped++;
-            // float the smooth field could NOT correct (beyond its band) but the
-            // snap did — the headline number for the floater fix.
-            if (floatBefore >= groundDistanceM && floatBefore > maxFloatFixedM) {
-              maxFloatFixedM = floatBefore;
+        // Tapered ceiling instead of a hard cutoff: full snap up to
+        // (maxSnapM − snapTaperM), fading to 0 at maxSnapM.
+        const snapGate = floatBefore <= maxSnapM - snapTaperM
+          ? 1
+          : floatBefore >= maxSnapM
+            ? 0
+            : (maxSnapM - floatBefore) / snapTaperM;
+        if (!nh[vi]) {
+          const w = m * snapGate;
+          if (w > 0) {
+            const ySnap = terr + roadEpsM;
+            newY = newY * (1 - w) + ySnap * w;
+            if (w > 0.5) {
+              vertsSnapped++;
+              // float the smooth field could NOT correct (beyond its band) but the
+              // snap did — the headline number for the floater fix.
+              if (floatBefore >= groundDistanceM && floatBefore > maxFloatFixedM) {
+                maxFloatFixedM = floatBefore;
+              }
             }
+          }
+        }
+        // Flatness audit over the road proper (metrics only, no movement).
+        // Restricted to SURFACE verts (float < maxSnapM): trees/facade overhangs
+        // whose XZ lands on a road pixel would otherwise dominate the mean with
+        // multi-metre "deviations" that are not road surface at all.
+        if (m >= 0.9) {
+          if (floatBefore < maxSnapM) {
+            roadVertsCore++;
+            const dev = Math.abs(newY - (terr + roadEpsM));
+            roadDevSum += dev;
+            if (dev > roadDevMax) roadDevMax = dev;
+            if (nh[vi]) roadWallExcluded++;
+            else if (snapGate <= 0) roadGateExcluded++;
+          } else {
+            roadOverheadCount++;
           }
         }
       }
@@ -254,6 +331,14 @@ export const conformTilesToFloor = (meshes, data, {
     meshesMoved,
     vertsSnapped,
     maxFloatFixedM,
+    // Carriageway flatness audit (mask w ≥ 0.9, float < maxSnapM): FINAL
+    // |y − (floor+eps)| over the road surface incl. deliberately-unsnapped verts.
+    roadVertsCore,
+    roadDevMeanM: roadVertsCore ? roadDevSum / roadVertsCore : 0,
+    roadDevMaxM: roadDevMax,
+    roadWallExcluded,
+    roadGateExcluded,
+    roadOverheadCount,
     cellsFilled: field.filledCount,
     residualBefore: groundSamples ? residualAbsSum / groundSamples : 0,
     residualAfter: postResidualCount ? postResidualSum / postResidualCount : 0,

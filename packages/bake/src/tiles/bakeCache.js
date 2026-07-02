@@ -16,20 +16,31 @@
 // v7: route mode conforms each chunk against its slice of the COMBINED terrain
 //     (the driven surface) instead of its own DEM — fixes chunks floating at
 //     seams where per-chunk DEMs disagree. Geometry depends on combined now.
-export const BAKE_FORMAT_VERSION = 12;
+// v13: road-mask snap (tileGroundConform) decouples wall protection from the
+//      ground threshold (steep-face-only) + tapers the maxSnapM ceiling.
+// v14: road-mask snap now snaps EVERY masked vertex onto the DEM except true
+//      walls (dropped the near-horizontal candidate gate that left the road's
+//      photogrammetry bumps unsnapped) — flattens the road surface to the DEM.
+// v15: ALL geometry post-passes disabled by default (weld/conform/road-mask/
+//      ground-strip) — output is now raw transformed tiles while the
+//      post-processing strategy is reworked. Passes remain opt-in (flags/options).
+export const BAKE_FORMAT_VERSION = 15;
+
+// FNV-1a 32-bit over a string — the cache key's compact fingerprint primitive.
+const fnv1a = (s, h = 2166136261) => {
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return h;
+};
 
 // Cheap order-sensitive hash of a route segment (rounded coords) — keeps the
 // cache key short while still splitting different routes/widths over the same
 // bounds into distinct entries.
 const hashSegment = (segment) => {
-  let h = 2166136261; // FNV-1a 32-bit
-  for (const p of segment) {
-    const s = `${p.lat.toFixed(6)},${p.lng.toFixed(6)};`;
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-  }
+  let h = 2166136261;
+  for (const p of segment) h = fnv1a(`${p.lat.toFixed(6)},${p.lng.toFixed(6)};`, h);
   return (h >>> 0).toString(36);
 };
 
@@ -45,6 +56,16 @@ export const bakeCacheKey = (
     corridorSegment = null,
     corridorHalfWidthM = 0,
     sharedGroundOffsetM = null,
+    // Per-bake assembly-pass overrides (sandbox / debug). Left undefined in
+    // production, so the key below is byte-for-byte unchanged there.
+    weld,
+    conform,
+    roadmask,
+    // Route .ter mode: when the worker snaps road verts onto the EXTRACTED tile
+    // ground (applyTerGroundSnap), the baked geometry depends on the whole ground
+    // strategy — so it must key apart. Undefined/off leaves the key unchanged.
+    extractGround,
+    groundStrategy,
   } = {},
 ) => {
   const b = data.bounds;
@@ -64,9 +85,26 @@ export const bakeCacheKey = (
   const anchor = Number.isFinite(sharedGroundOffsetM)
     ? `|gz=${Number(sharedGroundOffsetM).toFixed(2)}`
     : '';
+  // Only an explicitly-disabled pass appends to the key — undefined (production)
+  // leaves the key unchanged, so existing caches/sessions still match.
+  const passes =
+    (weld === false ? '|nw' : '') +
+    (conform === false ? '|nc' : '') +
+    (roadmask === false ? '|nr' : '');
+  // Ter-ground snap fingerprint — only when the snap will actually run, so all
+  // pre-existing keys (no extraction, or snap disabled) stay byte-for-byte.
+  // The literal carries the snap-algo revision: bump it (tsnap3 → tsnap4 …) when
+  // conformTilesToFloor's snap behaviour changes, so only snapped bakes re-bake
+  // (a full BAKE_FORMAT_VERSION bump would trash every unsnapped bake too).
+  // tsnap2: wall protection gated on triangle Y-span (road micro-facets snap).
+  // tsnap3: snap gated on the extraction coveredMask (no snap onto DEM-fallback
+  //         floor: underpasses/viaducts) + 2 m ceiling for the tile floor.
+  const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
+    ? `|tsnap3=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
     `|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}` +
-    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}${corridor}${anchor}`
+    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}${corridor}${anchor}${passes}${terSnap}`
   );
 };

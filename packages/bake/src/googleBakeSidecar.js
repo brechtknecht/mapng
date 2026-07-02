@@ -53,6 +53,11 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
     apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
     cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
     corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
+    // Per-bake assembly-pass overrides (sandbox / debug). undefined → worker env default.
+    weld, conform, roadmask,
+    // Route mode: extract the bare-earth tile ground for the chunk's .ter, with
+    // the strategy the browser resolved (getGroundStrategy). undefined → off.
+    extractGround, groundStrategy,
   } = options;
   const heightMap = data.heightMap instanceof Float32Array
     ? data.heightMap
@@ -91,6 +96,8 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
       apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
       cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
       corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
+      weld, conform, roadmask,
+      extractGround, groundStrategy,
     },
   };
 };

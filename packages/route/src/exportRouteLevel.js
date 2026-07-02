@@ -25,7 +25,8 @@ import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSessi
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
-import { buildCombinedRouteTerrain, sampleCombinedHeightMap } from './routeTerrainComposite.js';
+import { buildCombinedRouteTerrain, sampleCombinedHeightMap, compositeRouteGround } from './routeTerrainComposite.js';
+import { getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/extractTileGround';
 import { createRouteProgress } from './routeProgress.js';
 
 const DEG = Math.PI / 180;
@@ -130,9 +131,9 @@ async function convertGlbToDae(glbPath) {
 // re-zips — no terrain re-fetch, no tile re-bake/assemble/convert. Server temp
 // paths can age out (idle session reap), so it's a best-effort within-session
 // cache; a fresh route/settings combo rebuilds it.
-let _routeAsm = null; // { key, combined, combinedCenter, frame, pieces, previewChunks }
+let _routeAsm = null; // { key, combined, combinedGround, combinedCenter, frame, pieces, previewChunks }
 
-const asmKey = (chunks, tierId, chunkSizeM, elevationSource, gpxzApiKey, quality, baseTexture) =>
+const asmKey = (chunks, tierId, chunkSizeM, elevationSource, gpxzApiKey, quality, baseTexture, groundFp) =>
   JSON.stringify({
     // Bake geometry version — without this, the in-memory _routeAsm (and the
     // fast "reuse" path) serve stale per-chunk geometry across conform/weld/strip
@@ -143,6 +144,8 @@ const asmKey = (chunks, tierId, chunkSizeM, elevationSource, gpxzApiKey, quality
       Number(c.bounds.east).toFixed(6), Number(c.bounds.west).toFixed(6),
     ]),
     tierId, chunkSizeM, elevationSource, gpxzApiKey: gpxzApiKey ? 'set' : '', quality, baseTexture,
+    // .ter ground strategy: a strategy change must rebuild the composited ground.
+    groundFp,
   });
 
 export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
@@ -177,7 +180,14 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
   // geometry), so changing it never invalidates the cached assembly.
   const zOffsetM = Number.isFinite(opts.zOffsetM) ? opts.zOffsetM : getGoogleTilesZOffset();
 
-  const key = asmKey(chunks, tierId, chunkSizeM, elevationSource, gpxzApiKey, tier.googleQuality, baseTexture);
+  // Tile-extracted bare-earth ground for the route .ter ('dem' ⇒ skip, drive the DEM).
+  const preferTiles = getPreferredTerGround() === 'tiles';
+  const groundStrategy = preferTiles ? getGroundStrategy() : null;
+
+  const key = asmKey(
+    chunks, tierId, chunkSizeM, elevationSource, gpxzApiKey, tier.googleQuality, baseTexture,
+    preferTiles ? JSON.stringify(groundStrategy) : 'dem',
+  );
   let asm = _routeAsm && _routeAsm.key === key ? _routeAsm : null;
 
   if (!asm) {
@@ -266,6 +276,8 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     //    Indexed (not push) because the bake pool finishes chunks out of order.
     const pieces = new Array(total);
     const previewBlobs = new Array(total).fill(null);
+    // Per-chunk tile-extracted ground (abs metres, shared anchor); nulls ⇒ DEM.
+    const chunkGrounds = new Array(total).fill(null);
     // Small per-chunk values computeRouteFrame needs at the end. Captured here
     // so each chunk's HEAVY terrainData (heightmap + texture canvases, tens of
     // MB) can be released the moment its assembly finishes, instead of pinning
@@ -305,6 +317,9 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           // Chunk 0 bakes with its natural anchor and reports it back; chunks
           // 1..N seat on that same value so the rail stays continuous.
           ...(assemblyAnchor != null ? { sharedGroundOffsetM: assemblyAnchor } : {}),
+          // Extract this chunk's bare-earth ground for the .ter (shared anchor ⇒
+          // all chunks' grounds in one absolute frame → composite directly).
+          ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
           onProgress: (p) => progress.setPhase(i, 'bake', `tiles ${i + 1}/${total}: ${p.visible ?? 0} loaded`),
         },
         // Unique material prefix per chunk so BeamNG's global material resolution
@@ -314,6 +329,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       if (i === 0 && Number.isFinite(exported?.groundOffsetM)) {
         sharedGroundOffsetM = exported.groundOffsetM;
         console.info(`[routeLevel] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (from chunk 0)`);
+      }
+      // Pair the chunk's ground with its bounds (terrains[i] alive here). Absent
+      // ⇒ this corridor falls back to the DEM in the composite.
+      if (preferTiles && exported?.ground) {
+        chunkGrounds[i] = { ...exported.ground, bounds: terrains[i].bounds };
       }
       progress.setPhase(i, 'bake', `converting tiles ${i + 1}/${total} to DAE`);
       const dae = await convertGlbToDae(exported.glbPath);
@@ -353,6 +373,10 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         // Same shared anchor as the .dae so the preview is WYSIWYG and chunks
         // line up. Chunk 0's preview reuses the value chunk 0's .dae produced.
         ...(sharedGroundOffsetM != null ? { googleGroundOffsetM: sharedGroundOffsetM } : {}),
+        // Same extraction+snap options as the .dae bake above — they're part of
+        // the bake key (tsnap), so omitting them would re-bake the chunk
+        // unsnapped and the preview would no longer show the exported geometry.
+        ...(preferTiles ? { googleExtractGround: true, googleGroundStrategy: groundStrategy } : {}),
         corridorMask: { segment: chunks[i].segment, halfWidthM: tier.halfWidthM },
       });
       progress.setPhase(i, 'done', 'complete');
@@ -382,6 +406,9 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         corridorSegment: chunks[i].segment,
         corridorHalfWidthM: tier.halfWidthM,
         ...(anchor != null ? { sharedGroundOffsetM: anchor } : {}),
+        // Part of the bake key (tsnap) — without it the end targets a key no
+        // session holds and the multi-GB worker stays resident.
+        ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
       }, { keepFiles: true }).catch(() => {});
       endSession(assemblyAnchor);
       if (previewAnchor !== assemblyAnchor) endSession(previewAnchor);
@@ -404,14 +431,35 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     };
     await Promise.all(Array.from({ length: limit }, assembleWorker));
 
+    // Composite the per-chunk tile grounds into ONE route .ter (bare-earth along
+    // the corridor, DEM off-corridor, feathered between). Cached on asm.
+    let combinedGround = null;
+    if (preferTiles) {
+      const grounds = chunkGrounds.filter(Boolean);
+      if (grounds.length) {
+        const cg = compositeRouteGround(grounds, combined, { featherM: 15 });
+        combinedGround = { heightMap: cg.heightMap, groundMax: cg.groundMax };
+        console.info(
+          `[routeLevel] route .ter ground: ${(cg.coverage * 100).toFixed(0)}% of the grid from tiles, ` +
+          `${cg.groundMin.toFixed(1)}–${cg.groundMax.toFixed(1)}m (${grounds.length}/${total} chunks)`,
+        );
+      } else {
+        console.warn('[routeLevel] tile ground requested but no chunk grounds returned — route .ter uses the DEM');
+      }
+    }
+
     const frame = computeRouteFrame(frameInputs, chunkSizeM);
     const previewChunks = chunks.map((c, i) => ({
       index: i,
       blob: previewBlobs[i],
       placement: frame.placements[i],
+      // For the route preview's LIVE ground extraction: chunk bounds (→ upm) +
+      // minHeight datum (captured before terrains[i] is released).
+      bounds: chunks[i].bounds,
+      minHeight: frameInputs[i]?.minHeight ?? 0,
     }));
 
-    asm = { key, combined, combinedCenter, frame, pieces, previewChunks };
+    asm = { key, combined, combinedGround, combinedCenter, frame, pieces, previewChunks };
     _routeAsm = asm;
   } else {
     for (let i = 0; i < total; i++) progress.setPhase(i, 'done');
@@ -426,7 +474,15 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     ...p,
     position: [p.east, p.north, Math.round((p.baseUp + zOffsetM + TILE_RENDER_BIAS_M) * 100) / 100],
   }));
-  const res = await exportBeamNGLevel(asm.combined, chunks[0].center, {
+  // Drive on the tile-extracted ground when present (keep combined.minHeight datum).
+  const driveTerrain = asm.combinedGround
+    ? {
+      ...asm.combined,
+      heightMap: asm.combinedGround.heightMap,
+      maxHeight: Math.max(asm.combined.maxHeight, asm.combinedGround.groundMax),
+    }
+    : asm.combined;
+  const res = await exportBeamNGLevel(driveTerrain, chunks[0].center, {
     googleTilePlacements: placedPieces,
     levelName: levelName || `mapng_route_${date}_${total}chunks`,
     baseTexture: 'osm', // the composited satellite/OSM aerial set on combined.osmTextureCanvas

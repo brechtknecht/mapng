@@ -101,6 +101,16 @@
       </div>
     </template>
 
+    <!-- Drivable-ground strategy controls — steer the .ter bare-earth strategy
+         live in the route preview (same store the export reads). -->
+    <div
+      v-if="!loading && !loadError && store.apiKey"
+      class="absolute top-4 left-4 z-20 w-60 max-h-[80%] overflow-auto rounded-lg bg-white/90 dark:bg-gray-900/85 backdrop-blur shadow-xl border border-gray-200 dark:border-gray-700 p-3"
+    >
+      <GroundStrategyControls />
+      <p class="text-[10px] text-gray-400 dark:text-gray-500 leading-tight mt-2">Live preview of the exported .ter driving surface.</p>
+    </div>
+
     <!-- Loading overlay -->
     <div v-if="loading" class="absolute inset-0 z-10 flex items-center justify-center bg-black/60 backdrop-blur-sm pointer-events-none">
       <div class="text-center text-white">
@@ -121,9 +131,13 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { Loader2, Plane } from 'lucide-vue-next';
 import CSMLight from './CSMLight.vue';
 import FlyControls3D from './FlyControls3D.vue';
+import GroundStrategyControls from './GroundStrategyControls.vue';
 import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
+import { buildGroundMesh } from '@mapng/bake/ground/extractTileGround';
+import { useGoogleTilesStore } from '../../stores/googleTilesStore.js';
 
 const { t } = useI18n({ useScope: 'global' });
+const store = useGoogleTilesStore();
 
 const props = defineProps({
   chunks: { type: Array, default: () => [] }, // [{ index, blob, placement }]
@@ -189,6 +203,67 @@ const applyTileZOffset = () => {
   }
 };
 
+// --- Live drivable-ground (.ter) preview --------------------------------------
+// Re-extract each chunk's bare-earth ground from its RESIDENT Google tiles (the
+// GoogleTiles3D wrapper inside the loaded GLB) and show it in place of the DEM
+// terrain mesh, so the preview floor IS the exported .ter and tracks the tiles
+// (the geoid drift that made the DEM floor diverge from the tiles disappears).
+// extractTileGround's groupInv strips the wrapper's upm scale + z-lift, so this is
+// the SAME engine the single-tile preview uses; the result (scene units) drops
+// straight into c.object alongside the original terrain mesh. Bound to the shared
+// googleTilesStore.ground strategy, so the controls re-extract live.
+const GROUND_NAME = '__ter_ground';
+const GROUND_MAXSEG = 128; // coarse live grid for snappy re-extraction
+
+const disposeMesh = (m) => {
+  if (!m) return;
+  m.geometry?.dispose?.();
+  const mats = Array.isArray(m.material) ? m.material : m.material ? [m.material] : [];
+  for (const mat of mats) mat?.dispose?.(); // keep the SHARED terrain texture alive
+};
+
+const groundStrategyOpts = () => {
+  const g = store.ground;
+  return {
+    filterId: g.filterId,
+    filterParams: { ...g.filterParams },
+    postId: g.postOn ? g.postId : null,
+    postParams: { ...g.postParams },
+    ...(Number.isFinite(g.minNormalY) ? { minNormalY: g.minNormalY } : {}),
+    maxSeg: GROUND_MAXSEG,
+  };
+};
+
+const extractChunkGround = (c) => {
+  if (c.groundMesh) { c.object.remove(c.groundMesh); disposeMesh(c.groundMesh); c.groundMesh = null; }
+  if (store.ground.source !== 'tiles') { if (c.terrainNode) c.terrainNode.visible = true; return; }
+  if (!c.tilesNode || !c.bounds) return;
+  if (!c._stub) {
+    // Flat DEM stub at the chunk datum: the live extraction only needs bounds
+    // (→ unitsPerMeter) + a datum; the filters work on the tile min-surface. The
+    // EXPORT uses the real per-chunk DEM (worker-side) for band gating.
+    const N = GROUND_MAXSEG + 1;
+    c._stub = { bounds: c.bounds, width: N, height: N, minHeight: c.minHeight, heightMap: new Float32Array(N * N).fill(c.minHeight) };
+  }
+  const mat = Array.isArray(c.terrainNode?.material) ? c.terrainNode.material[0] : c.terrainNode?.material;
+  const mesh = buildGroundMesh(c.tilesNode, c._stub, groundStrategyOpts(), { texture: mat?.map || null, color: 0x9aa0a6 });
+  mesh.name = GROUND_NAME;
+  c.object.add(mesh);
+  c.groundMesh = mesh;
+  if (c.terrainNode) c.terrainNode.visible = false; // ground replaces the DEM floor
+};
+
+const applyGround = () => {
+  for (const c of loaded.value) {
+    try { extractChunkGround(c); }
+    catch (e) { console.warn(`[RoutePreview] ground extract failed for chunk ${c.index}:`, e); }
+  }
+};
+
+let _groundTimer = null;
+const scheduleGround = () => { clearTimeout(_groundTimer); _groundTimer = setTimeout(applyGround, 220); };
+watch(() => store.ground, scheduleGround, { deep: true });
+
 const loadAll = async () => {
   loading.value = true;
   loadError.value = '';
@@ -199,10 +274,15 @@ const loadAll = async () => {
       const buf = await c.blob.arrayBuffer();
       const object = await parseChunk(buf);
       const tilesNode = object.getObjectByName('GoogleTiles3D') || null;
-      out.push({ index: c.index, object, placement: c.placement, tilesNode });
+      const terrainNode = object.getObjectByName('center_terrain') || null;
+      out.push({
+        index: c.index, object, placement: c.placement, tilesNode, terrainNode,
+        bounds: c.bounds || null, minHeight: Number(c.minHeight) || 0, groundMesh: null, _stub: null,
+      });
       loaded.value = [...out]; // progressive reveal
     }
     applyTileZOffset();
+    applyGround();
   } catch (err) {
     console.error('RoutePreview load failed', err);
     loadError.value = err?.message || String(err);
@@ -226,6 +306,7 @@ watch(
 watch(() => props.zOffsetM, applyTileZOffset);
 
 onUnmounted(() => {
+  clearTimeout(_groundTimer);
   loaded.value.forEach((c) => disposeObject(c.object));
   loaded.value = [];
 });

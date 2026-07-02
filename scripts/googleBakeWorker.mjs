@@ -72,6 +72,7 @@ import {
   SCENE_SIZE,
 } from '@mapng/bake/googleBakeCore';
 import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
+import { extractTileGroundFromSoup } from '@mapng/bake/ground/extractTileGround';
 import { buildGroundMask } from '@mapng/bake/groundMask';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
@@ -94,6 +95,20 @@ const decodeFloat32 = (base64) => {
   new Uint8Array(aligned).set(buf);
   return new Float32Array(aligned);
 };
+
+const encodeBytes = (arr) => Buffer.from(arr.buffer, arr.byteOffset, arr.byteLength).toString('base64');
+
+// Serialise an extractTileGround result for the `exported` message — the route
+// orchestrator decodes it and composites the per-chunk grounds into the .ter.
+const encodeGround = (g) => ({
+  heightMap: encodeBytes(g.heightMap), // Float32, width×height, ABSOLUTE metres
+  coverage: encodeBytes(g.coveredMask), // Uint8, 1 where a tile covered the cell
+  width: g.width,
+  height: g.height,
+  minHeight: g.minHeight,
+  maxHeight: g.maxHeight,
+  coverageRatio: g.coverage,
+});
 
 const writeAll = (stream, buf) => new Promise((resolve, reject) => {
   stream.write(buf, (err) => (err ? reject(err) : resolve()));
@@ -131,14 +146,17 @@ const REFINE_MAX_WAIT_MS = Number(process.env.MAPNG_REFINE_MAX_WAIT_MS) || 18000
 // applyWeld) — which removes the LOD-transition tile-edge walls at the source
 // instead of guessing them away. The old heuristic strip stays available as a
 // belt-and-suspenders fallback but is OFF by default:
-//   MAPNG_WELD_SEAMS=0     disable the weld (debug / A-B the carve alone)
 //   MAPNG_STRIP_RISERS=1   re-enable the old magic-threshold deletion
-const WELD_SEAMS = process.env.MAPNG_WELD_SEAMS !== '0';
+// The geometry post-passes below are DISABLED by default while the
+// post-processing strategy is reworked (they damaged the mesh more than they
+// helped — see docs/google-tiles-mesh-assembly-problem-statement.md). Opt back in:
+//   MAPNG_WELD_SEAMS=1        re-enable the seam weld
+//   MAPNG_CONFORM_TILES=1     re-enable the delta-field floor conform
+//   MAPNG_CONFORM_ROADMASK=1  re-enable the semantic road/area mask snap
+const WELD_SEAMS = process.env.MAPNG_WELD_SEAMS === '1';
 const STRIP_RISERS = process.env.MAPNG_STRIP_RISERS === '1';
-//   MAPNG_CONFORM_TILES=0  disable the delta-field floor conform
-const CONFORM_TILES = process.env.MAPNG_CONFORM_TILES !== '0';
-//   MAPNG_CONFORM_ROADMASK=0  disable the semantic road/area mask snap (groundMask)
-const CONFORM_ROADMASK = process.env.MAPNG_CONFORM_ROADMASK !== '0';
+const CONFORM_TILES = process.env.MAPNG_CONFORM_TILES === '1';
+const CONFORM_ROADMASK = process.env.MAPNG_CONFORM_ROADMASK === '1';
 // Weld tolerances (all metres) — tune without code edits, restart to apply.
 //   BAND      vertical reach onto the target ground (raise to close taller seams)
 //   COHERE    a cell welds only if its ground spans ≤ this (real steps survive)
@@ -198,7 +216,8 @@ const applyRiserStrip = (session) => {
  * finer tile reverts the affected coarse vertices to their base height.
  */
 const applyWeld = (session) => {
-  if (!WELD_SEAMS) return;
+  // Per-bake override (sandbox / debug) wins over the env default.
+  if (!(session.options?.weld ?? WELD_SEAMS)) return;
   const upm = computeUnitsPerMeter(session.data);
   const recs = [];
   const soup = [];
@@ -242,7 +261,8 @@ const applyWeld = (session) => {
  * recomputed fresh from the welded output, so it stays correct across refines.
  */
 const applyConform = (session) => {
-  if (!CONFORM_TILES) return;
+  // Per-bake override (sandbox / debug) wins over the env default.
+  if (!(session.options?.conform ?? CONFORM_TILES)) return;
   const recs = [];
   const soup = [];
   for (const entry of session.outputs.values()) {
@@ -261,7 +281,8 @@ const applyConform = (session) => {
   // non-road quality), in which case the delta field runs alone (prior behaviour).
   const osmFeatures = session.data.osmFeatures;
   const osmCount = Array.isArray(osmFeatures) ? osmFeatures.length : 0;
-  const groundMask = CONFORM_ROADMASK ? buildGroundMask(osmFeatures, session.data) : null;
+  const roadmask = session.options?.roadmask ?? CONFORM_ROADMASK;
+  const groundMask = roadmask ? buildGroundMask(osmFeatures, session.data) : null;
   const r = conformTilesToFloor(soup, session.data, { groundMask });
   for (let i = 0; i < recs.length; i++) {
     if (r.positions[i]) recs[i].positions = r.positions[i];
@@ -271,8 +292,103 @@ const applyConform = (session) => {
     `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m` +
     (groundMask
       ? `, snapped ${r.vertsSnapped} ground verts (max float fixed ${r.maxFloatFixedM.toFixed(1)}m)`
-      : ` (mask off/none — osm features received=${osmCount}, roadmask=${CONFORM_ROADMASK})`) +
+      : ` (mask off/none — osm features received=${osmCount}, roadmask=${roadmask})`) +
     ` in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
+};
+
+/**
+ * Road-mask snap onto the EXTRACTED tile ground (.ter driving surface). Runs
+ * AFTER extraction (which defines the floor) and BEFORE the ground strip.
+ *
+ * The legacy conform pass (applyConform) targets the DEM — the wrong shape, which
+ * is why it is off by default. This one targets the surface the chunk's .ter will
+ * actually ship (session.extractedGround), so it can only pull the visual road
+ * mesh TOWARD the driving surface: the delta field is near-zero by construction
+ * (the floor came from these very tiles) and mostly carries buildings along with
+ * the local correction, while the OSM road mask snaps road verts flat onto the
+ * floor (+roadEpsM) — killing the photogrammetry wobble that makes the road look
+ * uneven against the smooth .ter. Gated by groundStrategy.snapRoads (default on
+ * whenever extraction runs); the bake cache key fingerprints the strategy so
+ * toggling/tuning it re-bakes (bakeCache `tsnap`).
+ */
+/**
+ * (Re-)extract the bare-earth tile ground into session.extractedGround. Reads the
+ * CURRENT record positions (post weld/conform), so a refine that changes geometry
+ * refreshes the ground the sidecar ships for the .ter. No-op when extraction is
+ * off; failure degrades to the DEM (extractedGround stays null).
+ */
+const extractSessionGround = (session, extractGround, groundStrategy) => {
+  session.extractedGround = null;
+  if (!extractGround) return;
+  try {
+    const soup = [];
+    for (const entry of session.outputs.values()) {
+      for (const r of entry.records) soup.push({ positions: r.positions, index: r.index });
+    }
+    const g = extractTileGroundFromSoup(soup, session.data, groundStrategy || {});
+    session.extractedGround = g;
+    console.info(
+      `[bakeWorker] tile ground: ${(g.coverage * 100).toFixed(0)}% coverage, ` +
+      `range ${g.minHeight.toFixed(1)}–${g.maxHeight.toFixed(1)}m (${g.width}×${g.height})`,
+    );
+  } catch (e) {
+    console.warn('[bakeWorker] tile-ground extraction failed (route .ter will use the DEM):', e?.stack ?? e);
+  }
+};
+
+const applyTerGroundSnap = (session, groundStrategy) => {
+  const g = session.extractedGround;
+  if (!g || (groundStrategy?.snapRoads ?? true) === false) return;
+  const osmFeatures = session.data.osmFeatures;
+  const groundMask = buildGroundMask(osmFeatures, session.data);
+  if (!groundMask) {
+    console.info('[bakeWorker] [terSnap] no OSM road/area features in this AOI — snap skipped');
+    return;
+  }
+  const recs = [];
+  const soup = [];
+  for (const entry of session.outputs.values()) {
+    for (const r of entry.records) {
+      const idx = r.baseIndex ?? r.index;
+      if (!idx) continue;
+      recs.push(r);
+      soup.push({ positions: r.positions, index: idx });
+    }
+  }
+  if (soup.length === 0) return;
+  const t0 = performance.now();
+  // The extracted ground is a drop-in for data.heightMap (same grid, absolute
+  // metres, ORIGINAL minHeight datum) — swap it in as the conform floor.
+  const floor = { ...session.data, heightMap: g.heightMap };
+  const r = conformTilesToFloor(soup, floor, {
+    groundMask,
+    // Trust the floor only where extraction derived it FROM the tiles. Where it
+    // fell back to the DEM (underpasses >3 m below the DEM are band-gated,
+    // coverage holes under bridges), snapping would drag the real road metres
+    // toward a surface that never saw it.
+    floorCoveredMask: g.coveredMask ?? null,
+    // Tight ceiling for the tile-derived floor: the road IS the floor's source,
+    // so a multi-metre float means a DIFFERENT surface (viaduct, bridge deck,
+    // ramp over ground) — not a floater to fix. The legacy 5 m ceiling was for
+    // the DEM-target conform and pulled elevated roads down to the ground.
+    maxSnapM: 2,
+    snapTaperM: 1,
+  });
+  for (let i = 0; i < recs.length; i++) {
+    if (r.positions[i]) recs[i].positions = r.positions[i];
+  }
+  console.info(
+    `[bakeWorker] [terSnap] snapped ${r.vertsSnapped} road verts onto the extracted ground ` +
+    `(max float fixed ${r.maxFloatFixedM.toFixed(1)}m), moved ${r.vertsMoved} verts across ` +
+    `${r.meshesMoved}/${recs.length} meshes, residual ${r.residualBefore.toFixed(2)}m → ` +
+    `${r.residualAfter.toFixed(2)}m in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
+  console.info(
+    `[bakeWorker] [terSnap] carriageway flatness: ${r.roadVertsCore} road-surface verts, ` +
+    `final deviation mean ${r.roadDevMeanM.toFixed(2)}m / max ${r.roadDevMaxM.toFixed(2)}m ` +
+    `(unsnapped on-surface: ${r.roadWallExcluded} wall-shared, ${r.roadGateExcluded} taper-gated; ` +
+    `${r.roadOverheadCount} overhead verts ignored)`,
   );
 };
 
@@ -709,7 +825,9 @@ async function startBake(data, options, outPath) {
   const {
     apiKey,
     errorTarget = 5,
-    stripGround = true,
+    // Default OFF (post-processing disabled pending rework); the resolved option
+    // from buildJobBody normally carries the real value.
+    stripGround = false,
     groundNormalThreshold = 0.85,
     groundDistanceM = 2.5,
     cameraSweep = true,
@@ -724,6 +842,11 @@ async function startBake(data, options, outPath) {
     // Route mode: one route-wide vertical anchor (metres) shared by every chunk
     // so adjacent chunks don't float at their shared seam. null → per-chunk.
     sharedGroundOffsetM = null,
+    // Route mode: also extract the bare-earth tile ground for this chunk's .ter
+    // (browser sets it from getGroundStrategy so the route .ter matches the
+    // single-tile export). null strategy → extractTileGround defaults.
+    extractGround = false,
+    groundStrategy = null,
   } = options;
 
   if (!apiKey) throw new Error('bake worker: missing apiKey');
@@ -864,6 +987,14 @@ async function startBake(data, options, outPath) {
   }
   applyWeld(session);        // close seams while the street ground still exists
   applyConform(session);     // seat the welded mesh onto the .ter floor (delta field)
+
+  // Extract the bare-earth ground HERE — after weld+conform (best surface), but
+  // BEFORE the ground strip removes the road triangles the extraction needs. The
+  // result is z-offset-independent, so it's cached on the session and reused
+  // across re-exports (the route re-exports only to tweak the tile z-offset).
+  extractSessionGround(session, extractGround, groundStrategy);
+  applyTerGroundSnap(session, groundStrategy); // flatten road visuals onto the extracted .ter ground
+
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
 
@@ -995,6 +1126,10 @@ async function refine(session, revision, stationSpec) {
   const diff = rebuildOutputs(session);
   applyWeld(session);        // close seams while the street ground still exists
   applyConform(session);     // seat the welded mesh onto the .ter floor (delta field)
+  // Same tail as runBake: the refine changed geometry, so the extracted ground
+  // (shipped for the .ter) and the road snap onto it must be recomputed.
+  extractSessionGround(session, session.options?.extractGround, session.options?.groundStrategy);
+  applyTerGroundSnap(session, session.options?.groundStrategy);
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
   const resultPath = `${session.outBase}.rev${revision}`;
@@ -1070,6 +1205,9 @@ async function exportAssembly(session, revision, spec) {
     // The effective vertical anchor this bake used — chunk 0 of a route reports
     // it back so every later chunk (and the preview) seats on the same datum.
     groundOffsetM: session.transformMesh?.groundOffsetM,
+    // Route mode: the bare-earth tile ground for this chunk's .ter (z-offset-
+    // independent, extracted once in startBake). Absent for single-tile bakes.
+    ...(session.extractedGround ? { ground: encodeGround(session.extractedGround) } : {}),
   });
 }
 

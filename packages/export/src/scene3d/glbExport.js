@@ -28,6 +28,12 @@ export const exportToGLB = async (data, options = {}) => {
     corridorMask, // optional route mode: { segment: [{lat,lng}], halfWidthM } — clip Google tiles to the buffer
     googleZOffsetM, // optional override for the tiles' vertical offset (metres); omit → the global slider value
     googleGroundOffsetM, // route mode: one route-wide vertical anchor (metres) shared by every chunk so seams stay continuous
+    // Route .ter-from-tiles mode: MUST match the export's bake options — the
+    // strategy is part of the bake key (tsnap) since the worker snaps road verts
+    // onto the extracted ground. Omitting these here would silently re-bake the
+    // chunk under a different key (unsnapped) — see the stripGround note below.
+    googleExtractGround,
+    googleGroundStrategy,
   } = options;
   const googleZOff = typeof googleZOffsetM === 'number' ? googleZOffsetM : getGoogleTilesZOffset();
   const resolvedIncludeCenterTile = typeof includeCenterTile === 'boolean'
@@ -69,6 +75,9 @@ export const exportToGLB = async (data, options = {}) => {
           // Route mode: seat this chunk on the shared route-wide vertical anchor
           // so the preview matches the .dae and adjacent chunks don't float.
           ...(Number.isFinite(googleGroundOffsetM) ? { sharedGroundOffsetM: googleGroundOffsetM } : {}),
+          // Route .ter-from-tiles mode: same extraction+snap as the export bake,
+          // so this resolves to the SAME key and reuses that bake (no re-bake).
+          ...(googleExtractGround ? { extractGround: true, groundStrategy: googleGroundStrategy } : {}),
           onProgress: (p) => {
             onProgress?.(`Google tiles: ${p.visible} loaded, ${p.downloading + p.parsing} in flight`);
             // Structured sweep progress (station/stations, tile counts) for a

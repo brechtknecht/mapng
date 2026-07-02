@@ -18,6 +18,7 @@ import { fetchTerrainData } from '@mapng/terrain/terrain';
 import { exportToGLB } from '@mapng/export/export3d';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from '@mapng/bake/google3dTiles';
+import { getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/extractTileGround';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
 import { createRouteProgress } from './routeProgress.js';
@@ -124,6 +125,11 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // One route-wide Google vertical anchor, captured from chunk 0 (baked first)
   // and reused by every later chunk so the stitched chunks don't float apart.
   let sharedGroundOffsetM = null;
+  // .ter-from-tiles mode: bake with the SAME extraction+snap options the level
+  // export uses — they're part of the bake key (tsnap), so this keeps the route
+  // bake and a later export on ONE shared bake instead of two divergent ones.
+  const preferTiles = getPreferredTerGround() === 'tiles';
+  const groundStrategy = preferTiles ? getGroundStrategy() : null;
   let nextIdx = 0;
   const claim = () => (nextIdx < total ? nextIdx++ : -1);
   // Keep terrain fetches primed `limit` chunks ahead of the claim cursor so the
@@ -163,6 +169,7 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       // (baked first) and shared by all others — otherwise each chunk re-seats
       // Google's ground on its own centre's DEM and neighbours float at seams.
       ...(anchorAtBake != null ? { googleGroundOffsetM: anchorAtBake } : {}),
+      ...(preferTiles ? { googleExtractGround: true, googleGroundStrategy: groundStrategy } : {}),
       onGroundOffset: (off) => { if (i === 0 && Number.isFinite(off)) sharedGroundOffsetM = off; },
       onMaskStats: (s) => { maskStats = s; },
       onBakeStats: (s) => { if (s) bakeStats = s; },
@@ -183,6 +190,7 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       corridorSegment: chunk.segment,
       corridorHalfWidthM: tier.halfWidthM,
       ...(anchorAtBake != null ? { sharedGroundOffsetM: anchorAtBake } : {}),
+      ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
     }).catch(() => {});
 
     results[i] = {

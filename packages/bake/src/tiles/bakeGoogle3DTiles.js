@@ -59,7 +59,10 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     // earlier baseline of 8, sharpening mesh + textures without exploding
     // the browser memory budget.
     errorTarget = 5,
-    stripGround = true,
+    // Default OFF — see bakeFlags.js note (post-processing disabled pending rework).
+    // The resolved option (resolveBakeOptions → getPreferredStripGround) normally
+    // sets this; the default here only applies to direct callers.
+    stripGround = false,
     groundNormalThreshold = 0.85,
     // Near-flat tris are only stripped when they also sit within this many
     // metres of the mapng terrain — streets go, roofs stay.
@@ -96,6 +99,11 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     // Route mode: one route-wide vertical anchor (metres) shared by every chunk
     // so adjacent chunks stay co-continuous at their seams. null → per-chunk.
     sharedGroundOffsetM = null,
+    // Per-bake assembly-pass overrides (sandbox / debug). undefined → fall back
+    // to the persisted localStorage flags (production behaviour unchanged).
+    weld,
+    conform,
+    roadmask,
     onProgress,
   } = options;
 
@@ -365,7 +373,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // Seam weld — close the LOD-transition tile-edge walls by snapping coarse
   // vertices onto the finer ground. The SAME shared pass the headless worker
   // runs, so the in-tab fallback and the export match. Default on.
-  if (weldSeamsEnabled()) {
+  if (weld ?? weldSeamsEnabled()) {
     const soup = out.children.map((m) => ({
       positions: m.geometry.attributes.position.array,
       index: m.geometry.index?.array,
@@ -386,7 +394,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
   // Delta-field conform — AFTER the weld (consistent ground), BEFORE the ground
   // strip (needs the ground tris present to measure the residual). Seats the
   // whole mesh onto the .ter floor; buildings keep their height above ground.
-  if (conformTilesEnabled()) {
+  if (conform ?? conformTilesEnabled()) {
     const soup = out.children.map((m) => ({
       positions: m.geometry.attributes.position.array,
       index: m.geometry.index?.array,
@@ -395,7 +403,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     // flat ground onto the DEM, flattening photogrammetry wiggle and seating
     // floaters the ±band can't reach. Null (delta field only) when disabled or
     // when this AOI carries no OSM roads.
-    const groundMask = conformRoadmaskEnabled()
+    const groundMask = (roadmask ?? conformRoadmaskEnabled())
       ? buildGroundMask(data.osmFeatures, data)
       : null;
     const r = conformTilesToFloor(soup, data, { groundMask });

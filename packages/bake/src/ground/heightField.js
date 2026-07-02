@@ -28,7 +28,7 @@ export { SCENE_SIZE };
  * @property {number} cellSizeM        node spacing in metres (for window sizing)
  * @property {Float32Array} minH       dense per-cell MIN of the rasterised tile surface (DSM bottom), scene units (Infinity if no tile covers the cell)
  * @property {Float32Array} loH        confident-street subset: minH where it sits in the DEM band, else Infinity
- * @property {Uint8Array}   covered    1 where any tile triangle rasterised onto the node
+ * @property {Uint8Array}   covered    1 where a near-horizontal, in-band tile triangle rasterised onto the node
  * @property {Float32Array} demH       DEM surface per node, scene units
  * @property {Float32Array} seed       ready-to-filter base: the dense min surface where covered (incl. building bumps for the filters to strip), else demH
  */
@@ -43,10 +43,13 @@ export const nodeIndex = (field, xi, zi) => zi * field.nx + xi;
  * @param {object} terrain           TerrainData (heightMap, width, height, minHeight)
  * @param {number} unitsPerMeter     computeUnitsPerMeter(terrain)
  * @param {object} [opts]
- * @param {number} [opts.maxSeg]     grid resolution cap (default 192)
+ * @param {number} [opts.maxSeg]      grid resolution cap (default 192)
+ * @param {number} [opts.belowBandM]  reject surfaces more than this below the DEM (m)
+ * @param {number} [opts.aboveBandM]  loH street-band ceiling above the DEM (m)
+ * @param {number} [opts.minNormalY]  reject triangles steeper than this |normal.y| (0 disables)
  * @returns {HeightField}
  */
-export function buildTileHeightField(tilesGroup, terrain, unitsPerMeter, { maxSeg = 192, belowBandM = 3, aboveBandM = 5 } = {}) {
+export function buildTileHeightField(tilesGroup, terrain, unitsPerMeter, { maxSeg = 192, belowBandM = 3, aboveBandM = 5, minNormalY = 0.5 } = {}) {
   const half = SCENE_SIZE / 2;
   const segX = Math.max(1, Math.min((terrain.width || 256) - 1, maxSeg));
   const segZ = Math.max(1, Math.min((terrain.height || 256) - 1, maxSeg));
@@ -69,17 +72,33 @@ export function buildTileHeightField(tilesGroup, terrain, unitsPerMeter, { maxSe
   const belowBandU = belowBandM * unitsPerMeter;
   const aboveBandU = aboveBandM * unitsPerMeter;
 
-  // 2. RASTERISE EVERY triangle into a dense per-cell MIN height (the DSM bottom).
+  // 2. RASTERISE the near-horizontal triangles into a dense per-cell MIN height
+  //    (the DSM bottom).
   //
   // Sampling vertices is wrong for the .ter: flat roads/plazas mesh into sparse
   // vertices, so vertex binning covered only ~5 % of cells. And band-gating the
   // triangles against the coarse 30 m DEM rejected the big flat road triangles
-  // (one corner drifts out of band), giving ~18 %. So we rasterise the SURFACE of
-  // ALL triangles and keep the per-cell MINIMUM — the lowest surface seen from
+  // (one corner drifts out of band), giving ~18 %. So we rasterise the SURFACE
+  // of triangles and keep the per-cell MINIMUM — the lowest surface seen from
   // above. That's the road wherever a road triangle covers the cell, and a
   // building roof/underside only where a building is the sole cover. Buildings
   // are NOT gated out here — the bare-earth FILTERS (PMF/CSF) strip those bumps
   // from the data itself, with no reliance on the DEM datum.
+  //
+  // Two gates keep DOWNWARD junk out of the min, because nothing downstream can
+  // lift the surface back to the road (median/liftDownSpikes miss shallow or
+  // wide lows, PMF only ever cuts down, and the bilateral averages a ≲1 m-low
+  // patch INTO the road):
+  //   - NORMAL gate: skip near-vertical triangles (|ny| < minNormalY). Facade
+  //     skirts and LOD-seam walls lean a few degrees off vertical, so they
+  //     survive the degenerate-denom check and smear their below-street bottoms
+  //     across their footprint cells. Roads are near-horizontal (a 15 % grade
+  //     has ny ≈ 0.99), so minNormalY = 0.5 (≈60°) can't touch them.
+  //   - DEM-band gate, PER SAMPLE at the cell (not per triangle-corner, which
+  //     was the coverage killer above): a surface more than belowBandM below
+  //     the DEM at that cell is not drivable ground (basements, sunken
+  //     reconstruction junk) and must not seed the min. Above-band surfaces
+  //     stay — the filters strip those.
   const ground = new Float32Array(n).fill(Infinity);
   tilesGroup.updateMatrixWorld(true);
   const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
@@ -109,6 +128,17 @@ export function buildTileHeightField(tilesGroup, terrain, unitsPerMeter, { maxSe
       c.set(pos.getX(i2), pos.getY(i2), pos.getZ(i2)).applyMatrix4(localMat);
       a.y *= unitsPerMeter; b.y *= unitsPerMeter; c.y *= unitsPerMeter; // metres → scene units
 
+      // Normal gate (all axes now in scene units, so the angle is metric).
+      if (minNormalY > 0) {
+        const ux = b.x - a.x, uy = b.y - a.y, uz = b.z - a.z;
+        const vx = c.x - a.x, vy = c.y - a.y, vz = c.z - a.z;
+        const nX = uy * vz - uz * vy;
+        const nY = uz * vx - ux * vz;
+        const nZ = ux * vy - uy * vx;
+        const len2 = nX * nX + nY * nY + nZ * nZ;
+        if (len2 < 1e-18 || (nY * nY) < minNormalY * minNormalY * len2) continue;
+      }
+
       // Grid coordinates (node units): x,z ∈ [-half,half] → [0,segX]/[0,segZ].
       const Ax = (a.x + half) / SCENE_SIZE * segX, Az = (a.z + half) / SCENE_SIZE * segZ;
       const Bx = (b.x + half) / SCENE_SIZE * segX, Bz = (b.z + half) / SCENE_SIZE * segZ;
@@ -133,6 +163,7 @@ export function buildTileHeightField(tilesGroup, terrain, unitsPerMeter, { maxSe
           if (wa < -1e-4 || wb < -1e-4 || wc < -1e-4) continue; // cell centre outside tri
           const y = wa * a.y + wb * b.y + wc * c.y;
           const idx = zi * nx + xi;
+          if (y < demH[idx] - belowBandU) continue; // sub-band junk, not drivable ground
           if (y < ground[idx]) ground[idx] = y; // min projection from above
         }
       }

@@ -3,31 +3,36 @@
 // Moved verbatim from google3dTiles.js. Centralised so the preview, the cache
 // key, the Node worker and the in-browser fallback agree on the same choices.
 
-// Seam handling for the in-tab fallback bake (prod / sidecar unreachable). The
-// DEFAULT is the root-cause seam weld (weldSeams); the old magic-threshold
-// strip is OFF by default, behind a kill switch for parity with the worker.
-//   localStorage mapng_weld_seams='0'   disable the weld
+// Seam handling for the in-tab fallback bake (prod / sidecar unreachable).
+// As of v15 the weld (and all geometry post-passes) are OFF by default while the
+// post-processing strategy is reworked — see the note on the flag fns below.
+//   localStorage mapng_weld_seams='1'   re-enable the weld
 //   localStorage mapng_strip_risers='1' re-enable the old heuristic deletion
 // NOTE: lateral footprint carving lives in the Node worker (it needs the live
 // tile tree); the in-tab path runs the weld only, so it leans on weldSeams to
 // close seams. On the dev server every bake routes through the worker anyway.
+// NOTE: the geometry post-passes (weld / conform / road-mask / ground-strip) are
+// DISABLED by default while the post-processing strategy is reworked — they each
+// damaged the mesh more than they helped (cracks/lift/spikes, worst toward AOI
+// edges; raw tiles are cleanest). See docs/google-tiles-mesh-assembly-problem-statement.md.
+// Each remains opt-in via its localStorage flag (set to '1'/'true') and the
+// per-bake option overrides + /quality-sandbox toggles.
 export const weldSeamsEnabled = () => {
-  try { return localStorage.getItem('mapng_weld_seams') !== '0'; } catch (_) { return true; }
+  try { return localStorage.getItem('mapng_weld_seams') === '1'; } catch (_) { return false; }
 };
 export const riserStripEnabled = () => {
   try { return localStorage.getItem('mapng_strip_risers') === '1'; } catch (_) { return false; }
 };
 // Delta-field conform — seat the tiles onto the .ter floor (tileGroundConform.js).
-// Default ON; localStorage mapng_conform_tiles='0' disables it.
+// Default OFF (see note above); localStorage mapng_conform_tiles='1' re-enables it.
 export const conformTilesEnabled = () => {
-  try { return localStorage.getItem('mapng_conform_tiles') !== '0'; } catch (_) { return true; }
+  try { return localStorage.getItem('mapng_conform_tiles') === '1'; } catch (_) { return false; }
 };
 
 // Sub-flag for the semantic road-mask SNAP layered on the delta-field conform
-// (groundMask.js): full-res flatten of road wiggle + pull-down of floaters the
-// ±band leaves behind. Default ON; mapng_conform_roadmask='0' → delta field only.
+// (groundMask.js). Default OFF (see note above); mapng_conform_roadmask='1' re-enables.
 export const conformRoadmaskEnabled = () => {
-  try { return localStorage.getItem('mapng_conform_roadmask') !== '0'; } catch (_) { return true; }
+  try { return localStorage.getItem('mapng_conform_roadmask') === '1'; } catch (_) { return false; }
 };
 
 /**
@@ -52,10 +57,12 @@ export function getPreferredBakeQuality() {
  * preview and exports agree on the same cache key.
  */
 export function getPreferredStripGround() {
+  // Default OFF while the post-processing strategy is reworked — raw Google tiles
+  // (ground kept) for now. Re-enable with localStorage mapng_google_bake_stripground='true'.
   try {
-    return localStorage.getItem('mapng_google_bake_stripground') !== 'false';
+    return localStorage.getItem('mapng_google_bake_stripground') === 'true';
   } catch (_) {
-    return true;
+    return false;
   }
 }
 

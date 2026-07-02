@@ -101,7 +101,10 @@ test('road mask pulls down floaters beyond the ±band the delta field ignores', 
   const verts = [], index = [];
   let v = 0;
   for (let cx = -45; cx <= 45; cx += 6) {
-    verts.push(...horizTri(cx, 0, 5)); // +5 m, well beyond groundDistanceM = 2.5
+    // +3 m: beyond groundDistanceM = 2.5 (invisible to the delta field) but inside
+    // the FULL-snap zone (≤ maxSnapM − snapTaperM = 3.5 — the ceiling tapers, so a
+    // floater at maxSnapM itself is deliberately left alone; see test below).
+    verts.push(...horizTri(cx, 0, 3));
     index.push(v, v + 1, v + 2); v += 3;
   }
   const mk = () => [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
@@ -114,8 +117,66 @@ test('road mask pulls down floaters beyond the ±band the delta field ignores', 
   // With the mask they snap straight onto the DEM.
   const r = conformTilesToFloor(mk(), DATA, { groundMask: stripMask(3) });
   assert.ok(r.vertsSnapped > 0, 'floaters were snapped');
-  assert.ok(r.maxFloatFixedM > 4.5, `reports the ~5 m float it fixed, got ${r.maxFloatFixedM}`);
+  assert.ok(r.maxFloatFixedM > 2.5, `reports the ~3 m float it fixed, got ${r.maxFloatFixedM}`);
   assert.ok(Math.abs(r.positions[0][1] - 0.02) < 0.05, `floater seated on floor, got ${r.positions[0][1]}`);
+});
+
+test('snap ceiling tapers: a floater at maxSnapM is left alone (roof/overpass guard)', () => {
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 6) {
+    verts.push(...horizTri(cx, 0, 5)); // exactly maxSnapM → gate weight 0
+    index.push(v, v + 1, v + 2); v += 3;
+  }
+  const soup = [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
+  const r = conformTilesToFloor(soup, DATA, { groundMask: stripMask(3) });
+  assert.equal(r.vertsSnapped, 0, 'at-ceiling floater must not snap');
+  assert.equal(r.vertsMoved, 0, 'nothing moved');
+  assert.equal(r.positions[0], null, 'untouched mesh reports null positions (no rewrite)');
+});
+
+test('snap targets the heightMap it is given, not the datum (extracted-ground floor swap)', () => {
+  // The route worker swaps the EXTRACTED tile ground in as the conform floor:
+  // {...data, heightMap: extractedGround} with the ORIGINAL minHeight datum.
+  // Floor at 2 m absolute over datum 0 — a wiggling road around it must seat on
+  // floor + roadEpsM, NOT on the datum.
+  const data = { ...DATA, heightMap: new Float32Array([2, 2, 2, 2]) };
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 3) {
+    verts.push(...horizTri(cx, 0, 2 + 0.8 * Math.sin(cx * 0.5)));
+    index.push(v, v + 1, v + 2); v += 3;
+  }
+  const soup = [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
+  const r = conformTilesToFloor(soup, data, { groundMask: stripMask(3) });
+
+  assert.ok(r.vertsSnapped > 0, 'road verts were snapped');
+  const out = r.positions[0];
+  for (let i = 1; i < out.length; i += 3) {
+    assert.ok(Math.abs(out[i] - 2.02) < 0.05, `vertex seated on the 2 m floor, got ${out[i]}`);
+  }
+});
+
+test('floorCoveredMask: no snap where the floor is fallback (underpass guard)', () => {
+  // Same wiggling road as the flatten test, but the floor is marked untrusted
+  // (DEM-fallback) everywhere — the snap must leave the road alone rather than
+  // drag it onto a surface that never saw it (underpasses, viaducts).
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 3) {
+    verts.push(...horizTri(cx, 0, 0.8 * Math.sin(cx * 0.5)));
+    index.push(v, v + 1, v + 2); v += 3;
+  }
+  const mk = () => [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
+
+  const covered = new Uint8Array(DATA.width * DATA.height); // all 0 = untrusted
+  const r = conformTilesToFloor(mk(), DATA, { groundMask: stripMask(3), floorCoveredMask: covered });
+  assert.equal(r.vertsSnapped, 0, 'untrusted floor must not attract any snap');
+
+  covered.fill(1); // all trusted → behaves like the plain masked conform
+  const r2 = conformTilesToFloor(mk(), DATA, { groundMask: stripMask(3), floorCoveredMask: covered });
+  assert.ok(r2.vertsSnapped > 0, 'fully trusted floor snaps as before');
+  assert.ok(r2.residualAfter < 0.1, `wiggle flattened on trusted floor, got ${r2.residualAfter}`);
 });
 
 test('mask leaves off-road geometry byte-identical to the no-mask conform', () => {
@@ -146,4 +207,31 @@ test('mask does not snap non-horizontal verts over a road (walls / curb risers)'
   const r = conformTilesToFloor(soup, DATA, { groundMask: stripMask(3) });
   assert.equal(r.vertsSnapped, 0, 'vertical face is not a snap candidate');
   assert.equal(r.vertsMoved, 0, 'nothing moved');
+});
+
+test('short steep road-seam skirts snap flat; only TALL steep faces are wall-protected', () => {
+  // Google road meshes carry short vertical seams/skirts that dip below the
+  // visible road (LOD seals), plus steep micro-facets on every bump. Those are
+  // steep but SHORT (Y-span < wallMinSpanM), so they must NOT self-protect as
+  // "walls" — their verts snap onto the floor and the seam collapses flat.
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 6) { // road blanket at +0.5 (in band)
+    verts.push(...horizTri(cx, 0, 0.5));
+    index.push(v, v + 1, v + 2); v += 3;
+  }
+  // A short skirt inside the mask: near-vertical tri from road level down to
+  // −0.7 m (span 1.2 m < wallMinSpanM 1.5) — the sub-road seal signature.
+  const skirtStart = v;
+  verts.push(0, 0.5, 0, 0, -0.7, 0, 0.4, -0.7, 0.1);
+  index.push(v, v + 1, v + 2); v += 3;
+
+  const soup = [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
+  const r = conformTilesToFloor(soup, DATA, { groundMask: stripMask(3) });
+
+  const out = r.positions[0];
+  for (let k = 0; k < 3; k++) {
+    const y = out[(skirtStart + k) * 3 + 1];
+    assert.ok(Math.abs(y - 0.02) < 0.1, `skirt vert ${k} pulled onto the floor, got ${y}`);
+  }
 });
