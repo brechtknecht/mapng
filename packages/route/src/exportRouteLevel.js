@@ -317,8 +317,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           // Chunk 0 bakes with its natural anchor and reports it back; chunks
           // 1..N seat on that same value so the rail stays continuous.
           ...(assemblyAnchor != null ? { sharedGroundOffsetM: assemblyAnchor } : {}),
-          // Extract this chunk's bare-earth ground for the .ter (shared anchor ⇒
-          // all chunks' grounds in one absolute frame → composite directly).
+          // Extract the chunk's .ter ground (shared anchor ⇒ one absolute frame).
           ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
           onProgress: (p) => progress.setPhase(i, 'bake', `tiles ${i + 1}/${total}: ${p.visible ?? 0} loaded`),
         },
@@ -361,7 +360,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       };
 
       // z-offset-free preview GLB (googleZOffsetM:0) — RoutePreview applies the
-      // live z-offset to the tiles. Reuses the SAME cached bake (no re-bake).
+      // live z-offset itself. Reuses the SAME cached bake (no re-bake):
       progress.setPhase(i, 'encode', `encoding preview ${i + 1}/${total}`);
       previewBlobs[i] = await exportToGLB(bakeTerrain, {
         returnBlob: true,
@@ -370,12 +369,9 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         googleQuality: tier.googleQuality,
         centerTextureType: 'osm',
         googleZOffsetM: 0,
-        // Same shared anchor as the .dae so the preview is WYSIWYG and chunks
-        // line up. Chunk 0's preview reuses the value chunk 0's .dae produced.
+        // Same shared anchor as the .dae so the preview is WYSIWYG at seams.
         ...(sharedGroundOffsetM != null ? { googleGroundOffsetM: sharedGroundOffsetM } : {}),
-        // Same extraction+snap options as the .dae bake above — they're part of
-        // the bake key (tsnap), so omitting them would re-bake the chunk
-        // unsnapped and the preview would no longer show the exported geometry.
+        // Must match the .dae bake — part of the bake key (tsnap).
         ...(preferTiles ? { googleExtractGround: true, googleGroundStrategy: groundStrategy } : {}),
         corridorMask: { segment: chunks[i].segment, halfWidthM: tier.halfWidthM },
       });
@@ -394,20 +390,17 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       const keyData = { bounds: terrains[i].bounds, width: terrains[i].width, height: terrains[i].height };
       terrains[i] = null;
 
-      // Free the resident sidecar worker(s) for this chunk to reclaim RAM — the
-      // bake is now on disk + in IndexedDB. keepFiles:true is ESSENTIAL: the
-      // final zip (step 4) reads this chunk's server-side GLB/DAE/PNGs, and fast
-      // re-export reuses them, so we keep the workDir while dropping the process.
-      // Chunk 0 bakes under TWO keys (natural for the .dae, anchored for the
-      // preview); chunks 1..N share one. Fire-and-forget; never block the pipe.
+      // Free the chunk's resident sidecar worker(s) (bake is on disk+IndexedDB).
+      // keepFiles:true is ESSENTIAL — the final zip + fast re-export read this
+      // chunk's server-side GLB/DAE/PNGs. Chunk 0 bakes under TWO keys (natural
+      // .dae + anchored preview); 1..N share one. Fire-and-forget.
       const previewAnchor = sharedGroundOffsetM;
       const endSession = (anchor) => endGoogleTilesSession(keyData, {
         quality: tier.googleQuality,
         corridorSegment: chunks[i].segment,
         corridorHalfWidthM: tier.halfWidthM,
         ...(anchor != null ? { sharedGroundOffsetM: anchor } : {}),
-        // Part of the bake key (tsnap) — without it the end targets a key no
-        // session holds and the multi-GB worker stays resident.
+        // Part of the bake key (tsnap) — a mismatched end leaks the worker.
         ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
       }, { keepFiles: true }).catch(() => {});
       endSession(assemblyAnchor);

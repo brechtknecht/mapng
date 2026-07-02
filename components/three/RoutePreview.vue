@@ -51,6 +51,14 @@
         :enable-damping="true"
         :damping-factor="0.05"
       />
+      <!-- Drag rectangles on the map → tile-vs-.ter gap reports (copyable). -->
+      <AreaInspector
+        ref="inspector"
+        :chunks="loaded"
+        :active="inspectMode && !flyMode"
+        :z-offset-m="zOffsetM"
+        @areas-changed="inspectAreas = $event"
+      />
       <FlyControls3D
         v-if="flyMode"
         :fov="flyFov"
@@ -71,6 +79,50 @@
         <Plane :size="14" />
         {{ flyMode ? t('route.flyExit') : t('route.fly') }}
       </button>
+
+      <!-- Area inspect: drag rectangles over problem spots, copy the gap report. -->
+      <button
+        v-if="!flyMode"
+        @click="inspectMode = !inspectMode"
+        :class="[
+          'absolute bottom-4 right-28 z-20 flex items-center gap-1.5 px-3 py-2 text-xs font-bold rounded-lg shadow-xl backdrop-blur transition-colors',
+          inspectMode ? 'bg-[#FF6600]/90 hover:bg-[#e05c00] text-white' : 'bg-gray-900/80 hover:bg-black text-white',
+        ]"
+        title="Drag rectangles on the map to measure the tile-vs-.ter gap there"
+      >
+        <Crosshair :size="14" />
+        {{ inspectMode ? 'Inspecting — drag a box' : 'Inspect' }}
+      </button>
+
+      <!-- Inspected areas panel -->
+      <div
+        v-if="inspectAreas.length"
+        class="absolute bottom-16 right-4 z-20 w-72 max-h-[50%] overflow-auto rounded-lg bg-gray-900/85 backdrop-blur shadow-xl border border-gray-700 p-3 text-white"
+      >
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-bold">Inspected areas</span>
+          <div class="flex gap-1.5">
+            <button
+              @click="copyInspectReport"
+              class="px-2 py-1 text-[10px] font-bold rounded bg-[#FF6600] hover:bg-[#e05c00] transition-colors"
+            >{{ inspectCopied ? 'Copied ✓' : 'Copy report' }}</button>
+            <button
+              @click="inspector?.clear()"
+              class="px-2 py-1 text-[10px] font-medium rounded bg-gray-700 hover:bg-gray-600 transition-colors"
+            >Clear</button>
+          </div>
+        </div>
+        <div v-for="a in inspectAreas" :key="a.id" class="flex items-center gap-2 py-1 border-t border-gray-800 text-[10px]">
+          <span class="w-2 h-2 rounded-sm shrink-0" :style="{ background: a.colorHex }" />
+          <span class="font-medium">{{ a.label }}</span>
+          <span class="text-gray-400">{{ a.sizeM.w }}×{{ a.sizeM.d }}m</span>
+          <span v-if="a.gapM" class="tabular-nums" :class="Math.abs(a.gapM.p50) > 0.5 ? 'text-orange-400' : 'text-green-400'">
+            gap p50 {{ a.gapM.p50 }}m / max {{ a.gapM.max }}m
+          </span>
+          <span v-else class="text-gray-500">no hits</span>
+          <button @click="inspector?.removeArea(a.id)" class="ml-auto text-gray-500 hover:text-white">×</button>
+        </div>
+      </div>
 
       <div
         v-if="flyMode"
@@ -128,10 +180,11 @@ import * as THREE from 'three';
 import { TresCanvas } from '@tresjs/core';
 import { OrbitControls, Environment } from '@tresjs/cientos';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-import { Loader2, Plane } from 'lucide-vue-next';
+import { Loader2, Plane, Crosshair } from 'lucide-vue-next';
 import CSMLight from './CSMLight.vue';
 import FlyControls3D from './FlyControls3D.vue';
 import GroundStrategyControls from './GroundStrategyControls.vue';
+import AreaInspector from './AreaInspector.vue';
 import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 import { buildGroundMesh } from '@mapng/bake/ground/extractTileGround';
 import { useGoogleTilesStore } from '../../stores/googleTilesStore.js';
@@ -155,6 +208,32 @@ const loadError = ref('');
 const flyMode = ref(false);
 const flyLocked = ref(false);
 const flyFov = ref(70);
+
+// Area inspect: drag rectangles → per-area tile-vs-.ter gap reports.
+const inspectMode = ref(false);
+const inspector = ref(null);
+const inspectAreas = ref([]);
+const inspectCopied = ref(false);
+const copyInspectReport = async () => {
+  const report = {
+    type: 'mapng-area-report',
+    version: 1,
+    when: new Date().toISOString(),
+    // Everything a debugging session needs to reproduce the setup.
+    groundStrategy: JSON.parse(JSON.stringify(store.ground)),
+    zOffsetM: props.zOffsetM,
+    renderBiasM: TILE_RENDER_BIAS_M,
+    note: 'gapM = tile surface − extracted .ter floor − intended lift; 0 = perfect, >0 tiles float, <0 tiles sink. grid rows run north→south, cols west→east, null = no tile/ground hit.',
+    areas: inspectAreas.value.map(({ _overlay, ...a }) => a),
+  };
+  try {
+    await navigator.clipboard.writeText(JSON.stringify(report, null, 1));
+    inspectCopied.value = true;
+    setTimeout(() => { inspectCopied.value = false; }, 1500);
+  } catch (e) {
+    console.warn('[RoutePreview] clipboard write failed:', e);
+  }
+};
 
 // Center the route at the origin so the camera/controls frame it.
 const rootOffset = computed(() => {
