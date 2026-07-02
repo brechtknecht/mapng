@@ -181,16 +181,29 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
   // Per-cell coverage (1 where a tile rasterised onto the cell, else 0), aligned
   // to the width×height heightMap. The route compositor uses it to feather the
   // tile ground into the DEM at the corridor edge (compositeRouteGround).
+  //
+  // rawMinHeightMap: the UNfiltered per-cell min (abs metres) where covered,
+  // the filtered value elsewhere. The road-profile builder samples THIS — the
+  // bare-earth filters legitimately fill narrow dips (pit-lift can't tell an
+  // underpass from junk), but the raw min still descends into a real underpass,
+  // and the profile's 1D smoothing along the road tames the min's noise.
   let coveredMask;
+  const rawMinHeightMap = new Float32Array(out.length);
   if (nx === width && nz === height) {
     coveredMask = field.covered; // 1:1 grid — already aligned, north-origin
+    for (let i = 0; i < out.length; i++) {
+      rawMinHeightMap[i] = coveredMask[i] ? toMeters(field.minH[i]) : out[i];
+    }
   } else {
     coveredMask = new Uint8Array(width * height);
     for (let row = 0; row < height; row++) {
       const z = Math.round((row / Math.max(1, height - 1)) * (nz - 1));
       for (let col = 0; col < width; col++) {
         const x = Math.round((col / Math.max(1, width - 1)) * (nx - 1));
-        coveredMask[row * width + col] = field.covered[z * nx + x];
+        const idx = row * width + col;
+        const covered = field.covered[z * nx + x];
+        coveredMask[idx] = covered;
+        rawMinHeightMap[idx] = covered ? toMeters(field.minH[z * nx + x]) : out[idx];
       }
     }
   }
@@ -204,6 +217,7 @@ export function extractTileGround(tilesGroup, terrain, options = {}) {
     maxHeight: hi,
     coverage: +(covered / field.covered.length).toFixed(3),
     coveredMask,
+    rawMinHeightMap,
   };
 }
 

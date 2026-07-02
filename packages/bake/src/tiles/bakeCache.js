@@ -99,8 +99,10 @@ export const bakeCacheKey = (
   // tsnap2: wall protection gated on triangle Y-span (road micro-facets snap).
   // tsnap3: snap gated on the extraction coveredMask (no snap onto DEM-fallback
   //         floor: underpasses/viaducts) + 2 m ceiling for the tile floor.
+  // tsnap4: road profiles sample the RAW per-cell min (filters fill underpass
+  //         dips inside covered cells) — carve output changes for same strategy.
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap3=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap4=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +

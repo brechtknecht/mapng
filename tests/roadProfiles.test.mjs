@@ -24,19 +24,22 @@ const roadFeature = (tags) => ({
 });
 
 // Extracted-ground stub: heightMap from a per-column height fn, full coverage
-// unless a column range is punched out.
-const groundStub = (colH, uncoveredCols = null) => {
+// unless a column range is punched out. Optional rawColH fills rawMinHeightMap
+// (the unfiltered per-cell min the profiles prefer).
+const groundStub = (colH, uncoveredCols = null, rawColH = null) => {
   const heightMap = new Float32Array(N * N);
   const coveredMask = new Uint8Array(N * N).fill(1);
+  const rawMinHeightMap = rawColH ? new Float32Array(N * N) : null;
   for (let row = 0; row < N; row++) {
     for (let col = 0; col < N; col++) {
       heightMap[row * N + col] = colH(col);
+      if (rawMinHeightMap) rawMinHeightMap[row * N + col] = rawColH(col);
       if (uncoveredCols && col >= uncoveredCols[0] && col <= uncoveredCols[1]) {
         coveredMask[row * N + col] = 0;
       }
     }
   }
-  return { heightMap, coveredMask };
+  return rawMinHeightMap ? { heightMap, coveredMask, rawMinHeightMap } : { heightMap, coveredMask };
 };
 
 test('flat trusted road → flat resolved profile in absolute metres', () => {
@@ -96,6 +99,27 @@ test('bridge/tunnel ways are kept as throughStructure profiles, unresolved witho
   assert.ok(tunnel.throughStructure && !tunnel.resolved, 'tunnel: structure, no trusted anchors');
   assert.ok(!plain.throughStructure && plain.resolved, 'plain road resolves normally');
   assert.equal(prof.stats.resolved, 1);
+});
+
+test('profile reads the RAW min, not the pit-filled filtered ground (covered underpass)', () => {
+  // The Area-1 failure mode: the pit-lift fills the underpass dip INSIDE
+  // covered cells — filtered ground flat at 45, but the raw per-cell min still
+  // descends to 40. The profile must follow the raw dip; carving it then
+  // restores the underpass the filters erased.
+  const dip = (col) => {
+    if (col < 70 || col > 130) return 45;
+    const t = 1 - Math.abs(col - 100) / 30; // V down to 40 at col 100
+    return 45 - 5 * t;
+  };
+  const g = groundStub(() => 45, null, dip);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
+  const r = prof.roads[0];
+  const mid = r.pts.reduce((best, p) => (Math.abs(p.s - r.lengthM / 2) < Math.abs(best.s - r.lengthM / 2) ? p : best));
+  assert.ok(mid.h < 42.5, `profile descends into the raw dip, got ${mid.h.toFixed(2)} at mid`);
+
+  carveRoadProfiles(prof, DATA, g);
+  const centre = g.heightMap[cellIdx(0, 0)];
+  assert.ok(centre < 42.5, `carve restores the dip in the filtered ground, got ${centre.toFixed(2)}`);
 });
 
 // ── carve ────────────────────────────────────────────────────────────────────

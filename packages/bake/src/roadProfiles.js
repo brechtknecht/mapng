@@ -99,8 +99,13 @@ export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smooth
     };
   };
 
-  // Extracted ground as the height source (drop-in heightMap, original datum).
-  const floor = { ...data, heightMap: ground.heightMap };
+  // Height source: prefer the RAW per-cell min over the filtered ground. The
+  // bare-earth filters fill narrow dips by design (pit-lift cannot tell a real
+  // underpass from junk) while the cells stay covered — sampling the filtered
+  // ground there would faithfully reproduce the wrong surface. The raw min
+  // still descends into the underpass; its noise is tamed by the 1D smoothing
+  // along the road below (which is exactly what per-cell filters can't do).
+  const floor = { ...data, heightMap: ground.rawMinHeightMap ?? ground.heightMap };
   const cm = ground.coveredMask ?? null;
   const trustedAt = (x, z) => {
     // Outside the AOI footprint the sampler edge-clamps — never trust that.
