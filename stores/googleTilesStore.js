@@ -201,10 +201,17 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     const base = {
       source: 'tiles',
       filterId: DEFAULT_GROUND_STRATEGY.filterId,
-      filterParams: defaultParamsFor(metaById(GROUND_FILTERS, DEFAULT_GROUND_STRATEGY.filterId)),
+      // Module meta defaults, overridden by the field-validated strategy params.
+      filterParams: {
+        ...defaultParamsFor(metaById(GROUND_FILTERS, DEFAULT_GROUND_STRATEGY.filterId)),
+        ...DEFAULT_GROUND_STRATEGY.filterParams,
+      },
       postOn: true,
       postId: DEFAULT_GROUND_STRATEGY.postId,
-      postParams: defaultParamsFor(metaById(GROUND_POST, DEFAULT_GROUND_STRATEGY.postId)),
+      postParams: {
+        ...defaultParamsFor(metaById(GROUND_POST, DEFAULT_GROUND_STRATEGY.postId)),
+        ...DEFAULT_GROUND_STRATEGY.postParams,
+      },
       minNormalY: DEFAULT_GROUND_STRATEGY.minNormalY,
       snapRoads: DEFAULT_GROUND_STRATEGY.snapRoads,
       carveRoads: DEFAULT_GROUND_STRATEGY.carveRoads,

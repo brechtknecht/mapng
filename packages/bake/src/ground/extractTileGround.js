@@ -78,22 +78,24 @@ const filterById = (id) =>
   FILTERS.find((f) => f.meta.id === 'csf') ||
   FILTERS[0];
 
-// The default ground strategy chosen in the sandbox: PMF (progressive
-// morphological filter) for building removal + bilateral smoothing to even the
-// road without bleeding buildings into it. Per-filter / per-effect params
-// default to each module's own meta defaults when left empty.
+// The default ground strategy — the field-validated combo from the 2026-07
+// route debugging sessions (area-inspector verified: p50 ≈ 0 on flat streets):
+// CSF cloth + strong despike/pit-lift, wide edge-preserving bilateral, and an
+// aggressive steep-cut. Tuned on urban routes; on steep NATURAL terrain
+// minNormalY 0.9 (≈26°) may punch DEM-fallback holes into hillsides — lower
+// the "steep cut" slider there.
 export const DEFAULT_GROUND_STRATEGY = {
-  filterId: 'pmf',
-  filterParams: {},
+  filterId: 'csf',
+  filterParams: { preMedian: 6, pitWidthM: 16, pitDropM: 2, iterations: 200, rigidness: 1, stepM: 0.5, postSmooth: 1 },
   postId: 'bilateral',
-  postParams: {},
+  postParams: { radiusM: 14, edgeM: 2.3, passes: 1, strength: 1 },
   belowBandM: 3,
   aboveBandM: 5,
-  // Rasteriser gate: skip triangles steeper than |normal.y| = 0.5 (≈60°).
+  // Rasteriser gate: skip triangles steeper than this |normal.y| (0.9 ≈ 26°).
   // Facade skirts / LOD-seam walls write their below-street bottoms into the
   // per-cell min and NOTHING downstream lifts the ground back up — this gate
   // is what keeps the .ter at road level next to buildings.
-  minNormalY: 0.5,
+  minNormalY: 0.9,
   // Worker-side visual pass (routes): after extraction, snap the tile mesh's
   // OSM-masked road verts onto the extracted ground (+2 cm) so the photogrammetry
   // road stops wobbling around the smooth .ter it drives on. Consumed by

@@ -332,11 +332,14 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
  * @param {object} data    chunk TerrainData (grid frame)
  * @param {object} ground  { heightMap (abs m), coveredMask } — data grid, mutated
  * @param {object} [opts]
- * @param {number} [opts.featherM=6]    blend band beyond the carriageway (m)
+ * @param {number} [opts.featherM=3]    blend band beyond the carriageway (m).
+ *   MUST match groundMask's featherM: the terSnap releases the tile mesh over
+ *   the mask feather, so if the floor keeps transitioning further out, the two
+ *   disagree in the overhang band and the street edges read as bent lips.
  * @param {number} [opts.maxCarveM=10]  per-cell shift clamp (safety)
  * @returns {{ carvedCells:number, maxShiftM:number, minH:number, maxH:number }}
  */
-export const carveRoadProfiles = (profiles, data, ground, { featherM = 6, maxCarveM = 10 } = {}) => {
+export const carveRoadProfiles = (profiles, data, ground, { featherM = 3, maxCarveM = 10 } = {}) => {
   const empty = { carvedCells: 0, maxShiftM: 0, minH: Infinity, maxH: -Infinity };
   if (!profiles?.roads?.length || !ground?.heightMap) return empty;
   const upm = computeUnitsPerMeter(data);

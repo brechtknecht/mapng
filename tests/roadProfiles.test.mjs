@@ -168,7 +168,7 @@ test('carve pulls the corridor onto the profile (underpass restored), off-road u
   assert.ok(Math.abs(g.heightMap[cellIdx(0, 0)] - 40) < 0.1,
     `centreline at profile height, got ${g.heightMap[cellIdx(0, 0)]}`);
   assert.equal(g.heightMap[cellIdx(0, 15)], 45, 'off-road (30m out) untouched');
-  const feather = g.heightMap[cellIdx(0, 3.5)]; // ~7m out: inside the blend band
+  const feather = g.heightMap[cellIdx(0, 2.75)]; // ~5.5m out: inside the 4..7m blend band
   assert.ok(feather > 40.5 && feather < 44.5, `feather blends, got ${feather}`);
   assert.equal(g.coveredMask[cellIdx(0, 0)], 1, 'carriageway cells become trusted for the snap');
   assert.equal(g.coveredMask[cellIdx(0, 15)], 0, 'off-road trust untouched');
