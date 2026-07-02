@@ -186,7 +186,10 @@ import FlyControls3D from './FlyControls3D.vue';
 import GroundStrategyControls from './GroundStrategyControls.vue';
 import AreaInspector from './AreaInspector.vue';
 import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
-import { buildGroundMesh } from '@mapng/bake/ground/extractTileGround';
+import { extractTileGround } from '@mapng/bake/ground/extractTileGround';
+import { buildMeshFromHeights } from '@mapng/bake/ground/heightField';
+import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
+import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { useGoogleTilesStore } from '../../stores/googleTilesStore.js';
 
 const { t } = useI18n({ useScope: 'global' });
@@ -325,7 +328,24 @@ const extractChunkGround = (c) => {
     c._stub = { bounds: c.bounds, width: N, height: N, minHeight: c.minHeight, heightMap: new Float32Array(N * N).fill(c.minHeight) };
   }
   const mat = Array.isArray(c.terrainNode?.material) ? c.terrainNode.material[0] : c.terrainNode?.material;
-  const mesh = buildGroundMesh(c.tilesNode, c._stub, groundStrategyOpts(), { texture: mat?.map || null, color: 0x9aa0a6 });
+  // Full extraction (not just the mesh): the heightMap + rawMin + coveredMask
+  // feed the SAME profile carve the export worker runs, so the preview floor —
+  // and everything the AreaInspector measures — includes carved underpasses.
+  const g = extractTileGround(c.tilesNode, c._stub, groundStrategyOpts());
+  if (store.ground.carveRoads !== false && Array.isArray(c.osmRoads) && c.osmRoads.length) {
+    const prof = buildRoadProfiles(c.osmRoads, c._stub, g);
+    if (prof) {
+      const cs = carveRoadProfiles(prof, c._stub, g);
+      if (cs.carvedCells > 0) {
+        console.info(`[RoutePreview] chunk ${c.index}: carved ${cs.carvedCells} cells (max shift ${cs.maxShiftM}m)`);
+      }
+    }
+  }
+  const upm = computeUnitsPerMeter(c._stub) || 1;
+  const heights = new Float32Array(g.heightMap.length);
+  for (let i = 0; i < heights.length; i++) heights[i] = (g.heightMap[i] - c.minHeight) * upm;
+  const field = { nx: g.width, nz: g.height, segX: g.width - 1, segZ: g.height - 1 };
+  const mesh = buildMeshFromHeights(field, heights, { texture: mat?.map || null, color: 0x9aa0a6 });
   mesh.name = GROUND_NAME;
   c.object.add(mesh);
   c.groundMesh = mesh;
@@ -356,7 +376,8 @@ const loadAll = async () => {
       const terrainNode = object.getObjectByName('center_terrain') || null;
       out.push({
         index: c.index, object, placement: c.placement, tilesNode, terrainNode,
-        bounds: c.bounds || null, minHeight: Number(c.minHeight) || 0, groundMesh: null, _stub: null,
+        bounds: c.bounds || null, minHeight: Number(c.minHeight) || 0,
+        osmRoads: c.osmRoads || [], groundMesh: null, _stub: null,
       });
       loaded.value = [...out]; // progressive reveal
     }

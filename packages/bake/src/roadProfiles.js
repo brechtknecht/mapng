@@ -30,6 +30,12 @@ const HALF = SCENE_SIZE / 2;
 
 const smoothstep = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
 
+// The minimal road subset a preview needs to build profiles later (geometry +
+// tags only, no texture/area payloads) — small enough to pin per chunk.
+export const pickProfileRoads = (features) => (Array.isArray(features) ? features : [])
+  .filter((f) => f?.type === 'road' && Array.isArray(f.geometry) && f.geometry.length >= 2)
+  .map((f) => ({ type: 'road', geometry: f.geometry, tags: f.tags }));
+
 // 1D median (radius 1) — kills single-sample needles without touching grades.
 const median3 = (h) => {
   if (h.length < 3) return h.slice();

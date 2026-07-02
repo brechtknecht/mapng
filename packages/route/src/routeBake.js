@@ -19,6 +19,7 @@ import { exportToGLB } from '@mapng/export/export3d';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from '@mapng/bake/google3dTiles';
 import { getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/extractTileGround';
+import { pickProfileRoads } from '@mapng/bake/roadProfiles';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
 import { createRouteProgress } from './routeProgress.js';
@@ -122,6 +123,7 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // Results land here keyed by index, then get assembled in route order below —
   // the manifest/zip/preview must stay ordered regardless of completion order.
   const results = new Array(total);
+  const chunkRoads = new Array(total); // per-chunk OSM roads for the preview carve
   // One route-wide Google vertical anchor, captured from chunk 0 (baked first)
   // and reused by every later chunk so the stitched chunks don't float apart.
   let sharedGroundOffsetM = null;
@@ -192,6 +194,10 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       ...(anchorAtBake != null ? { sharedGroundOffsetM: anchorAtBake } : {}),
       ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
     }).catch(() => {});
+
+    // Roads for the preview's live profile carve — kept OUT of the manifest
+    // (osmRoads would bloat the archived manifest.json), carried separately.
+    chunkRoads[i] = pickProfileRoads(terrainData.osmFeatures);
 
     results[i] = {
       folder,
@@ -301,6 +307,11 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
     index: i,
     blob: chunkBlobs[i],
     placement: c.placement,
+    // Live ground extraction + profile carve in RoutePreview (same fields the
+    // level-export flow ships): frame + datum + the chunk's OSM roads.
+    bounds: c.bounds,
+    minHeight: c.minHeight,
+    osmRoads: chunkRoads[i] ?? [],
   }));
 
   // Stream the archive to disk via the dev sidecar when available — never

@@ -27,6 +27,7 @@ import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
 import { buildCombinedRouteTerrain, sampleCombinedHeightMap, compositeRouteGround } from './routeTerrainComposite.js';
 import { getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/extractTileGround';
+import { pickProfileRoads } from '@mapng/bake/roadProfiles';
 import { createRouteProgress } from './routeProgress.js';
 
 const DEG = Math.PI / 180;
@@ -205,9 +206,8 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // The chunks are independent fetches that get composited afterwards, so we
     // run several at once instead of strictly back-to-back — this overlaps each
     // chunk's OSM Overpass round-trip + tile downloads + off-thread resample.
-    // GPXZ/USGS keep a low cap: each already fans out its own internal requests
-    // (and GPXZ is rate-limited), so too many parallel chunks would just trip
-    // throttling. The global-tile path is network-bound, so a few more help.
+    // GPXZ/USGS keep a low cap (each fans out internally, GPXZ is rate-limited);
+    // the global-tile path is network-bound, so a few more help.
     //
     // Texture work is scoped to the ONE base texture the composite will use:
     // a satellite floor needs no OSM at all, so we skip the per-chunk Overpass
@@ -216,12 +216,9 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // texture. (The composite's cross-texture fallback is lost in trade, but a
     // wholesale satellite miss is rare and the off-corridor filler covers gaps.)
     const tex = String(baseTexture || 'satellite').toLowerCase();
-    // Always fetch OSM FEATURES — the conform road mask (groundMask) snaps the
-    // Google street onto the DEM and needs the road geometry regardless of the
-    // chosen base texture. Without this a satellite route fetched no OSM, so the
-    // mask was off and streets stayed bumpy (single-tile worked because it pulls
-    // OSM independently). Texture-ASSET generation stays gated by `tex` below, so
-    // a satellite route still gets NO OSM texture — just the features for the mask.
+    // Always fetch OSM FEATURES — the road mask/profiles need the geometry
+    // regardless of the chosen base texture (a satellite route used to skip OSM
+    // and lose the mask). Texture-ASSET generation stays gated by `tex` below.
     const includeOSM = true;
     const genOpts = {
       generateOSMTextureAsset: tex === 'osm',
@@ -384,6 +381,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         center: chunks[i].center,
         unitsPerMeter: computeUnitsPerMeter(terrains[i]),
         minHeight: terrains[i].minHeight,
+        osmRoads: pickProfileRoads(terrains[i].osmFeatures),
       };
       // bakeCacheKey only reads bounds/width/height — a tiny stub matches the
       // bake's key exactly without pinning the multi-MB terrainData.
@@ -446,10 +444,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       index: i,
       blob: previewBlobs[i],
       placement: frame.placements[i],
-      // For the route preview's LIVE ground extraction: chunk bounds (→ upm) +
-      // minHeight datum (captured before terrains[i] is released).
+      // For the route preview's LIVE ground extraction + profile carve: bounds
+      // (→ upm), datum, and the chunk's OSM roads (captured pre-release).
       bounds: chunks[i].bounds,
       minHeight: frameInputs[i]?.minHeight ?? 0,
+      osmRoads: frameInputs[i]?.osmRoads ?? [],
     }));
 
     asm = { key, combined, combinedGround, combinedCenter, frame, pieces, previewChunks };
