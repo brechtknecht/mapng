@@ -101,8 +101,10 @@ export const bakeCacheKey = (
   //         floor: underpasses/viaducts) + 2 m ceiling for the tile floor.
   // tsnap4: road profiles sample the RAW per-cell min (filters fill underpass
   //         dips inside covered cells) — carve output changes for same strategy.
+  // tsnap5: profile robustness — cross-road median taps, sliding-median outlier
+  //         rejection, physical grade clamp (bridge-abutment junk bent profiles).
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap4=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap5=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +

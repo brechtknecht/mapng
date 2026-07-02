@@ -122,6 +122,27 @@ test('profile reads the RAW min, not the pit-filled filtered ground (covered und
   assert.ok(centre < 42.5, `carve restores the dip in the filtered ground, got ${centre.toFixed(2)}`);
 });
 
+test('structure-bottom junk in the raw min is rejected, not followed (bridge abutment)', () => {
+  // A 10m-deep junk trench (wall bottoms) crossing the road over ~3 columns —
+  // survives cross-median taps (same columns), must die to outlier rejection.
+  const junk = (col) => (col >= 99 && col <= 101 ? 30 : 40);
+  const g = groundStub(() => 40, null, junk);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
+  const r = prof.roads[0];
+  for (const p of r.pts) {
+    assert.ok(p.h > 38.5, `profile never follows the junk trench (s=${p.s.toFixed(0)}), got ${p.h.toFixed(2)}`);
+  }
+});
+
+test('profile grades are clamped to a physical ceiling', () => {
+  // A 12m raw step (two structure levels misread as one road) — after the
+  // limiter no grade may exceed ~maxGradePct.
+  const step = (col) => (col < 100 ? 40 : 52);
+  const g = groundStub(() => 40, null, step);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
+  assert.ok(prof.stats.maxGradePct <= 26, `grade capped at ~25%, got ${prof.stats.maxGradePct}%`);
+});
+
 // ── carve ────────────────────────────────────────────────────────────────────
 // A hand-built profile along z=0 (scene x −40..40 = 160 m), constant height.
 const profileAt = (h, flags = {}) => ({

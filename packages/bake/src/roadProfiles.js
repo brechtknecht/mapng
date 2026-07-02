@@ -78,8 +78,13 @@ const gauss1d = (h, radius) => {
  * @param {object} ground      extracted ground { heightMap (abs m, data grid),
  *                             coveredMask (Uint8Array, data grid) }
  * @param {object} [opts]
- * @param {number} [opts.stepM=5]     arc-length sample spacing (metres)
- * @param {number} [opts.smoothM=15]  gaussian window along the road (metres)
+ * @param {number} [opts.stepM=5]       arc-length sample spacing (metres)
+ * @param {number} [opts.smoothM=15]    gaussian window along the road (metres)
+ * @param {number} [opts.outlierM=2.5]  a sample deviating more than this from
+ *   its sliding-median neighbourhood is junk (wall bottoms, skirts) — it turns
+ *   untrusted and is interpolated along the road like any other gap
+ * @param {number} [opts.maxGradePct=25]  physical road-grade ceiling; a
+ *   forward/backward slope limiter caps whatever junk survives smoothing
  * @returns {null | {
  *   roads: Array<{
  *     highway: string, halfWidthM: number, throughStructure: boolean,
@@ -90,7 +95,9 @@ const gauss1d = (h, radius) => {
  *            maxUntrustedGapM:number, maxGradePct:number },
  * }}
  */
-export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smoothM = 15 } = {}) => {
+export const buildRoadProfiles = (osmFeatures, data, ground, {
+  stepM = 5, smoothM = 15, outlierM = 2.5, maxGradePct = 25,
+} = {}) => {
   if (!Array.isArray(osmFeatures) || osmFeatures.length === 0) return null;
   if (!data?.bounds || !data.width || !data.height) return null;
   if (!ground?.heightMap) return null;
@@ -131,7 +138,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smooth
 
   const stepScene = stepM * upm;
   const roads = [];
-  let totalSamples = 0, totalTrusted = 0, maxUntrustedGapM = 0, maxGradePct = 0;
+  let totalSamples = 0, totalTrusted = 0, maxUntrustedGapM = 0, aggMaxGradePct = 0;
 
   for (const f of osmFeatures) {
     if (!f || f.type !== 'road' || !Array.isArray(f.geometry) || f.geometry.length < 2) continue;
@@ -174,12 +181,42 @@ export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smooth
     if (pts.length === 0 || pts[pts.length - 1].s < s - 1e-6) pts.push({ x: last.x, z: last.z, s });
     if (pts.length < 2) continue;
 
-    // Read the extracted ground + trust along the line.
+    // Read the extracted ground + trust along the line. CROSS-ROAD MEDIAN of 3
+    // taps (centreline ± 40% of the half-width): a single centreline tap on the
+    // raw min is fragile — one junk cell (wall bottom, skirt) poisons it.
+    const halfWscene = (HALF_WIDTH_M[t.highway] ?? HALF_WIDTH_M.default) * 0.4 * upm;
     const raw = new Float64Array(pts.length);
     const trusted = new Uint8Array(pts.length);
     for (let i = 0; i < pts.length; i++) {
-      raw[i] = sampleHeightAtScene(floor, pts[i].x, pts[i].z);
-      trusted[i] = (!throughStructure && trustedAt(pts[i].x, pts[i].z)) ? 1 : 0;
+      const p = pts[i];
+      const q = pts[Math.min(i + 1, pts.length - 1)], o = pts[Math.max(i - 1, 0)];
+      const dl = Math.hypot(q.x - o.x, q.z - o.z) || 1;
+      const nx_ = -(q.z - o.z) / dl, nz_ = (q.x - o.x) / dl; // unit perpendicular
+      const a = sampleHeightAtScene(floor, p.x, p.z);
+      const b = sampleHeightAtScene(floor, p.x + nx_ * halfWscene, p.z + nz_ * halfWscene);
+      const c = sampleHeightAtScene(floor, p.x - nx_ * halfWscene, p.z - nz_ * halfWscene);
+      raw[i] = Math.max(Math.min(a, b), Math.min(Math.max(a, b), c)); // median3
+      trusted[i] = (!throughStructure && trustedAt(p.x, p.z)) ? 1 : 0;
+    }
+
+    // Outlier rejection: junk that survives the cross-median (abutment walls,
+    // multi-cell skirts) still jumps against the road's local trend. Compare
+    // each trusted sample to the median of its ±windowR neighbourhood; a
+    // deviation beyond outlierM demotes it to untrusted → interpolated along
+    // the road like any other gap.
+    if (pts.length >= 5) {
+      const windowR = 4; // ±4 samples ≈ ±20m at the default step
+      const win = [];
+      for (let i = 0; i < pts.length; i++) {
+        if (!trusted[i]) continue;
+        win.length = 0;
+        for (let j = Math.max(0, i - windowR); j <= Math.min(pts.length - 1, i + windowR); j++) {
+          if (trusted[j]) win.push(raw[j]);
+        }
+        if (win.length < 3) continue;
+        win.sort((x, y) => x - y);
+        if (Math.abs(raw[i] - win[win.length >> 1]) > outlierM) trusted[i] = 0;
+      }
     }
 
     const trustedCount = trusted.reduce((acc, v) => acc + v, 0);
@@ -213,6 +250,25 @@ export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smooth
     const radius = Math.max(1, Math.round(smoothM / stepM));
     const smooth = resolved ? gauss1d(median3(Array.from(filled)), radius) : filled;
 
+    // Physical grade ceiling — whatever junk survives median + gaussian cannot
+    // exceed what a road can actually do. Symmetric forward/backward slope
+    // limiting (averaged, so neither direction biases the result).
+    if (resolved && pts.length >= 2) {
+      const maxG = maxGradePct / 100;
+      const fwd = Float64Array.from(smooth), bwd = Float64Array.from(smooth);
+      for (let i = 1; i < pts.length; i++) {
+        const lim = maxG * Math.max(0.01, pts[i].s - pts[i - 1].s);
+        if (fwd[i] > fwd[i - 1] + lim) fwd[i] = fwd[i - 1] + lim;
+        else if (fwd[i] < fwd[i - 1] - lim) fwd[i] = fwd[i - 1] - lim;
+      }
+      for (let i = pts.length - 2; i >= 0; i--) {
+        const lim = maxG * Math.max(0.01, pts[i + 1].s - pts[i].s);
+        if (bwd[i] > bwd[i + 1] + lim) bwd[i] = bwd[i + 1] + lim;
+        else if (bwd[i] < bwd[i + 1] - lim) bwd[i] = bwd[i + 1] - lim;
+      }
+      for (let i = 0; i < pts.length; i++) smooth[i] = (fwd[i] + bwd[i]) / 2;
+    }
+
     let roadMaxGrade = 0;
     for (let i = 1; i < pts.length; i++) {
       const ds = pts[i].s - pts[i - 1].s;
@@ -221,7 +277,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smooth
         if (g > roadMaxGrade) roadMaxGrade = g;
       }
     }
-    if (resolved && roadMaxGrade > maxGradePct) maxGradePct = roadMaxGrade;
+    if (resolved && roadMaxGrade > aggMaxGradePct) aggMaxGradePct = roadMaxGrade;
 
     for (let i = 0; i < pts.length; i++) {
       pts[i].h = smooth[i];
@@ -252,7 +308,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, { stepM = 5, smooth
       totalKm: Math.round(roads.reduce((acc, r) => acc + r.lengthM, 0) / 100) / 10,
       trustedPct: totalSamples ? Math.round((totalTrusted / totalSamples) * 100) : 0,
       maxUntrustedGapM: Math.round(maxUntrustedGapM),
-      maxGradePct: Math.round(maxGradePct * 10) / 10,
+      maxGradePct: Math.round(aggMaxGradePct * 10) / 10,
     },
   };
 };
