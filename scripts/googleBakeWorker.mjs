@@ -74,6 +74,7 @@ import {
 import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
 import { extractTileGroundFromSoup } from '@mapng/bake/ground/extractTileGround';
 import { buildGroundMask } from '@mapng/bake/groundMask';
+import { buildRoadProfiles } from '@mapng/bake/roadProfiles';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
@@ -334,6 +335,29 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
     );
   } catch (e) {
     console.warn('[bakeWorker] tile-ground extraction failed (route .ter will use the DEM):', e?.stack ?? e);
+  }
+  // Road elevation profiles (Phase 1: DIAGNOSTIC ONLY, no geometry change) —
+  // 1D profiles along the OSM centrelines from the extracted ground, untrusted
+  // spans (tunnels, under-bridge holes, band-gated underpasses) interpolated
+  // ALONG the road. Stashed on the session for the profile-based snap phase.
+  session.roadProfiles = null;
+  if (session.extractedGround) {
+    try {
+      const prof = buildRoadProfiles(session.data.osmFeatures, session.data, session.extractedGround);
+      session.roadProfiles = prof;
+      if (prof) {
+        const st = prof.stats;
+        console.info(
+          `[bakeWorker] [roadProfiles] ${st.roads} roads (${st.resolved} resolved) over ${st.totalKm}km: ` +
+          `${st.trustedPct}% samples trusted, largest bridged gap ${st.maxUntrustedGapM}m, ` +
+          `max grade ${st.maxGradePct}%`,
+        );
+      } else {
+        console.info('[bakeWorker] [roadProfiles] no drivable roads in this AOI');
+      }
+    } catch (e) {
+      console.warn('[bakeWorker] road-profile build failed (diagnostic only):', e?.stack ?? e);
+    }
   }
 };
 

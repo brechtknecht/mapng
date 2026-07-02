@@ -18,13 +18,15 @@ import { createMetricProjector } from '@mapng/geo';
 const HALF = SCENE_SIZE / 2;
 
 // Highway classes that are NOT drivable flat ground — never snap them.
-const EXCLUDE_HIGHWAY = new Set([
+// (Shared with roadProfiles.js so the profile builder and the mask agree on
+// what counts as a drivable road.)
+export const EXCLUDE_HIGHWAY = new Set([
   'footway', 'path', 'pedestrian', 'steps', 'cycleway', 'bridleway', 'corridor',
 ]);
 
 // Per-class carriageway HALF-width in metres (full road ≈ 2×). Replaces
 // generateRoadMaskBlob's fixed 8 px stamp so the mask tracks the real footprint.
-const HALF_WIDTH_M = {
+export const HALF_WIDTH_M = {
   motorway: 12, trunk: 10, primary: 8, secondary: 6, tertiary: 5,
   residential: 4, unclassified: 4, living_street: 4, service: 3,
   default: 4,
