@@ -330,11 +330,33 @@ export async function assembleGoogleTilesExport(records, {
     `${(glbBytes / 1024 ** 2).toFixed(0)} MB`,
   );
 
+  // Assembled-mesh AABB in FINAL metres (positions already ×s + zOffset). Lets
+  // the route export compare where the DAE geometry actually lands vs where it's
+  // placed ([east,north]) — a per-chunk horizontal offset/scale here (worker or
+  // Blender) is the .ter↔tiles shift the browser placement math can't see.
+  const mn = [Infinity, Infinity, Infinity];
+  const mx = [-Infinity, -Infinity, -Infinity];
+  for (const c of chunks) {
+    for (let d = 0; d < 3; d++) {
+      if (c.min[d] < mn[d]) mn[d] = c.min[d];
+      if (c.max[d] > mx[d]) mx[d] = c.max[d];
+    }
+  }
+  const meshBounds = Number.isFinite(mn[0])
+    ? {
+        min: mn,
+        max: mx,
+        center: [(mn[0] + mx[0]) / 2, (mn[1] + mx[1]) / 2, (mn[2] + mx[2]) / 2],
+        span: [mx[0] - mn[0], mx[1] - mn[1], mx[2] - mn[2]],
+      }
+    : null;
+
   return {
     glbPath,
     glbBytes,
     textures: textures.map(({ name, path: p, bytes }) => ({ name, path: p, bytes })),
     materialNames,
     meshCount: chunks.length,
+    meshBounds,
   };
 }

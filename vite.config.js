@@ -5,6 +5,7 @@ import { execSync } from 'child_process';
 import blenderDaePlugin from './scripts/viteBlenderDaePlugin.mjs';
 import googleBakePlugin from './scripts/viteGoogleBakePlugin.mjs';
 import zipExportPlugin from './scripts/viteZipExportPlugin.mjs';
+import turbologPlugin from './scripts/viteTurbologPlugin.mjs';
 
 const commitHash = (() => {
   try {
@@ -31,7 +32,10 @@ export default defineConfig({
     // to Node and DEFLATEs it natively to a temp file, so large maps no longer
     // hang the renderer at compression. Falls back to in-browser JSZip when
     // absent (prod builds).
-    zipExportPlugin()
+    zipExportPlugin(),
+    // /api/log: browser→turbolog bridge — the route export posts per-chunk
+    // placement diagnostics here; view via the turbolog TUI or MCP server.
+    turbologPlugin()
   ],
   optimizeDeps: {
     exclude: ['geotiff'],

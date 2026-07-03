@@ -25,7 +25,7 @@ import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSessi
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
-import { buildCombinedRouteTerrain, sampleCombinedHeightMap, compositeRouteGround } from './routeTerrainComposite.js';
+import { buildCombinedRouteTerrain, sampleCombinedHeightMap, compositeRouteGround, sampleHeightAt } from './routeTerrainComposite.js';
 import { getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/extractTileGround';
 import { pickProfileRoads } from '@mapng/bake/roadProfiles';
 import { createRouteProgress } from './routeProgress.js';
@@ -34,6 +34,18 @@ const DEG = Math.PI / 180;
 const M_PER_DEG_LAT = 111320;
 const pad2 = (n) => String(n).padStart(2, '0');
 const mPerDegLng = (lat) => M_PER_DEG_LAT * Math.cos(lat * DEG) || M_PER_DEG_LAT;
+
+// Fire-and-forget structured log to the turbolog dev bridge (viteTurbologPlugin).
+// No-op on failure and in prod builds (endpoint absent) — never blocks the export.
+const devLog = (stream, message, meta) => {
+  try {
+    fetch('/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stream, message, meta }),
+    }).catch(() => { /* dev-only, best effort */ });
+  } catch { /* no fetch / prod */ }
+};
 
 /** Resolve a chunk's texture source for `baseTexture` to a drawable image/canvas. */
 async function loadTextureSource(terrain, baseTexture) {
@@ -326,6 +338,24 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         sharedGroundOffsetM = exported.groundOffsetM;
         console.info(`[routeLevel] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (from chunk 0)`);
       }
+      // Assembled-mesh geometry probe (turbolog `dae-geometry`): where the WORKER
+      // GLB actually lands, in final metres, vs the chunk's expected extent. The
+      // DAE is placed at [east,north]≈mesh-centre, so mesh centre X/Z should be
+      // ≈0; a non-zero centre = a per-chunk offset the browser placement can't see.
+      const mb = exported?.meshBounds;
+      if (mb) {
+        devLog('dae-geometry', `chunk ${i} worker-GLB: centerXZ=[${mb.center[0].toFixed(2)}, ${mb.center[2].toFixed(2)}] spanXZ=[${mb.span[0].toFixed(1)}, ${mb.span[2].toFixed(1)}]`, {
+          chunk: i,
+          stage: 'worker-glb',
+          center: mb.center,
+          span: mb.span,
+          min: mb.min,
+          max: mb.max,
+          expectedHalfM: chunkSizeM / 2,
+          corridorHalfWidthM: tier.halfWidthM,
+        });
+      }
+
       // Pair the chunk's ground with its bounds (terrains[i] alive here). Absent
       // ⇒ this corridor falls back to the DEM in the composite.
       if (preferTiles && exported?.ground) {
@@ -434,12 +464,114 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           `[routeLevel] route .ter ground: ${(cg.coverage * 100).toFixed(0)}% of the grid from tiles, ` +
           `${cg.groundMin.toFixed(1)}–${cg.groundMax.toFixed(1)}m (${grounds.length}/${total} chunks)`,
         );
+
+        // ── Overlap-disagreement probe (turbolog `ground-overlap`) ────────────
+        // Where two chunks overlap, the .ter blends BOTH extracted grounds while
+        // the visible tiles are ONE chunk's mesh. If the two independent bakes
+        // disagree HORIZONTALLY, the drive surface sits between them and the road
+        // you see is offset from the road you drive — worst mid-route. For each
+        // overlapping pair we grid-sample the overlap and find the (dx,dz) shift
+        // of chunk B that best matches chunk A: a non-zero best shift = the
+        // horizontal misregistration; baseline vs best |Δh| = how much it costs.
+        for (let a = 0; a < grounds.length; a++) {
+          for (let b = a + 1; b < grounds.length; b++) {
+            const A = grounds[a], B = grounds[b];
+            const west = Math.max(A.bounds.west, B.bounds.west);
+            const east = Math.min(A.bounds.east, B.bounds.east);
+            const south = Math.max(A.bounds.south, B.bounds.south);
+            const north = Math.min(A.bounds.north, B.bounds.north);
+            if (east <= west || north <= south) continue; // no overlap
+            const latMid = (north + south) / 2;
+            const mLngA = mPerDegLng(latMid);
+            const NS = 24; // sample grid per axis
+            const pts = [];
+            for (let r = 0; r < NS; r++) {
+              const lat = north - (r / (NS - 1)) * (north - south);
+              for (let c = 0; c < NS; c++) {
+                const lng = west + (c / (NS - 1)) * (east - west);
+                pts.push([lat, lng, sampleHeightAt(A, lat, lng)]);
+              }
+            }
+            const meanAbsDh = (dxM, dzM) => {
+              const dLat = dzM / M_PER_DEG_LAT, dLng = dxM / mLngA;
+              let s = 0, n = 0;
+              for (const [lat, lng, hA] of pts) {
+                const hB = sampleHeightAt(B, lat + dLat, lng + dLng);
+                if (Number.isFinite(hA) && Number.isFinite(hB)) { s += Math.abs(hA - hB); n++; }
+              }
+              return n ? s / n : Infinity;
+            };
+            const baseline = meanAbsDh(0, 0);
+            let best = { dx: 0, dz: 0, v: baseline };
+            for (let dx = -5; dx <= 5; dx++) {
+              for (let dz = -5; dz <= 5; dz++) {
+                if (!dx && !dz) continue;
+                const v = meanAbsDh(dx, dz);
+                if (v < best.v) best = { dx, dz, v };
+              }
+            }
+            const overlapM = [(east - west) * mLngA, (north - south) * M_PER_DEG_LAT];
+            devLog('ground-overlap', `chunks ${a}↔${b}: baseline|Δh|=${baseline.toFixed(2)}m bestShift=[${best.dx},${best.dz}]m →|Δh|=${best.v.toFixed(2)}m`, {
+              pair: [a, b],
+              overlapSizeM: overlapM.map((x) => +x.toFixed(1)),
+              baselineMeanAbsDhM: +baseline.toFixed(3),
+              bestShiftM: { east: best.dx, north: best.dz },
+              bestMeanAbsDhM: +best.v.toFixed(3),
+              improvement: +(baseline - best.v).toFixed(3),
+            });
+          }
+        }
       } else {
         console.warn('[routeLevel] tile ground requested but no chunk grounds returned — route .ter uses the DEM');
       }
     }
 
     const frame = computeRouteFrame(frameInputs, chunkSizeM);
+
+    // ── Placement diagnostic (turbolog `route-placement` stream) ─────────────
+    // The preview places tiles via computeRouteFrame (anchor = chunk 0, per-chunk
+    // scale 1/upm) and is visually correct; the BeamNG export places them via
+    // pieces[i].east/north (anchor = combinedCenter) + the sidecar DAE (scale
+    // s = chunkSizeM/sceneSize). This logs BOTH per chunk so their divergence —
+    // the source of the .ter↔tiles shift seen in BeamNG — is directly readable.
+    const anchor0 = frame.anchor; // chunk 0 centre (preview origin)
+    devLog('route-placement', `route summary: ${total} chunks, chunkSizeM=${chunkSizeM}`, {
+      total,
+      chunkSizeM,
+      daeSceneSize: 100, // assembleGoogleTilesExport default → s = chunkSizeM/100
+      daeScale: chunkSizeM / 100,
+      combinedCenter,
+      previewAnchorChunk0: anchor0,
+      combinedBounds: combined.bounds,
+      combinedWidthPx: combined.width,
+      combinedMetersPerPixel: combined.metersPerPixel,
+      combinedMinHeight: combined.minHeight,
+      terGroundActive: !!combinedGround,
+    });
+    for (let i = 0; i < total; i++) {
+      const p = pieces[i];
+      const pl = frame.placements[i];
+      const fi = frameInputs[i];
+      if (!p || !pl) continue;
+      // Both placements expressed as BeamNG world [X=east, Z-> north] for a direct
+      // diff. Export uses combinedCenter origin; preview uses chunk-0 origin, so
+      // shift the preview into the combined frame before comparing.
+      const previewEastCombined = pl.translationM.x + (anchor0.lng - combinedCenter.lng) * mPerDegLng(combinedCenter.lat);
+      const previewNorthCombined = -pl.translationM.z + (anchor0.lat - combinedCenter.lat) * M_PER_DEG_LAT;
+      devLog('route-placement', `chunk ${i}: Δeast=${(p.east - previewEastCombined).toFixed(2)}m Δnorth=${(p.north - previewNorthCombined).toFixed(2)}m`, {
+        chunk: i,
+        chunkCenter: fi?.center,
+        unitsPerMeter: fi?.unitsPerMeter,
+        export: { east: p.east, north: p.north, baseUp: p.baseUp },
+        previewRaw: { x: pl.translationM.x, y: pl.translationM.y, z: pl.translationM.z, scale: pl.scale },
+        previewInCombinedFrame: { east: previewEastCombined, north: previewNorthCombined },
+        deltaM: {
+          east: p.east - previewEastCombined,
+          north: p.north - previewNorthCombined,
+        },
+      });
+    }
+
     const previewChunks = chunks.map((c, i) => ({
       index: i,
       blob: previewBlobs[i],
@@ -461,7 +593,9 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
   // 4) Place tiles (z-offset → TSStatic Z) and build the level. Spawn at the
   //    ROUTE START (chunk 0) so the player lands on the corridor.
   announce('Building BeamNG level');
-  const date = new Date().toISOString().slice(0, 10);
+  // Date AND time — every export gets a unique level name, so BeamNG can never
+  // serve a stale cached level for a re-export of the same route.
+  const date = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
   const placedPieces = asm.pieces.map((p) => ({
     ...p,
     position: [p.east, p.north, Math.round((p.baseUp + zOffsetM + TILE_RENDER_BIAS_M) * 100) / 100],

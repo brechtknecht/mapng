@@ -23,6 +23,7 @@
     "testlab:capture": "node tools/testlab/captureRealBake.mjs"
   },
   "dependencies": {
+    "@brechtknecht/turbolog": "^0.1.0",
     "@tresjs/cientos": "^4.3.1",
     "@tresjs/core": "^4.0.0",
     "@vue-leaflet/vue-leaflet": "^0.10.0",

@@ -4,6 +4,53 @@ import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
 import { tmpdir, homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { tlog } from './viteTurbologPlugin.mjs';
+
+// --- geometry probes (turbolog `dae-geometry`) --------------------------------
+// AABB of every POSITION accessor in a GLB (min/max come free in the JSON — no
+// vertex scan). glTF is Y-up: [x=east, y=up, z=south].
+const glbPositionBBox = (buf) => {
+  try {
+    if (buf.readUInt32LE(0) !== 0x46546c67) return null; // 'glTF'
+    const jsonLen = buf.readUInt32LE(12);
+    const json = JSON.parse(buf.toString('utf8', 20, 20 + jsonLen));
+    const posIdx = new Set();
+    for (const m of json.meshes ?? []) for (const p of m.primitives ?? []) {
+      if (Number.isInteger(p.attributes?.POSITION)) posIdx.add(p.attributes.POSITION);
+    }
+    const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    for (const i of posIdx) {
+      const a = json.accessors?.[i];
+      if (!a?.min || !a?.max) continue;
+      for (let d = 0; d < 3; d++) { if (a.min[d] < mn[d]) mn[d] = a.min[d]; if (a.max[d] > mx[d]) mx[d] = a.max[d]; }
+    }
+    return Number.isFinite(mn[0]) ? aabb(mn, mx) : null;
+  } catch { return null; }
+};
+
+// AABB over a COLLADA's position <float_array>s (Blender ids them "*-mesh-positions*").
+// The .dae is Z-up after export: [x=east, y=north, z=up].
+const daePositionBBox = (xml) => {
+  try {
+    const re = /<float_array[^>]*id="[^"]*positions[^"]*"[^>]*>([\s\S]*?)<\/float_array>/gi;
+    const mn = [Infinity, Infinity, Infinity], mx = [-Infinity, -Infinity, -Infinity];
+    let m, found = false;
+    while ((m = re.exec(xml))) {
+      const nums = m[1].trim().split(/\s+/);
+      for (let k = 0; k + 2 < nums.length; k += 3) {
+        found = true;
+        for (let d = 0; d < 3; d++) { const v = +nums[k + d]; if (v < mn[d]) mn[d] = v; if (v > mx[d]) mx[d] = v; }
+      }
+    }
+    return found ? aabb(mn, mx) : null;
+  } catch { return null; }
+};
+
+const aabb = (min, max) => ({
+  min, max,
+  center: [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2],
+  span: [max[0] - min[0], max[1] - min[1], max[2] - min[2]],
+});
 
 // Vite dev-server middleware: POST /api/convert-dae with a GLB body returns
 // the BeamNG-ready .dae, converted by headless Blender via
@@ -170,6 +217,20 @@ export default function blenderDaePlugin() {
               `[beamng-blender-dae] ${resolved} → ${(bytes / 1024 ** 2).toFixed(1)} MB DAE ` +
               `in ${((Date.now() - t0) / 1000).toFixed(1)}s (server-path mode)`,
             );
+            // Geometry probe: did Blender's Y-up→Z-up round-trip move/mirror the
+            // mesh? glTF [x,y=up,z=south] should map to .dae [x, y=north(−z), z=up].
+            // A wrong north sign shows as a mirrored Y span here — the horizontal,
+            // BeamNG-only shift the browser placement can't see.
+            try {
+              const glbBBox = glbPositionBBox(readFileSync(resolved));
+              const daeBBox = daePositionBBox(readFileSync(daePath, 'utf8'));
+              tlog('dae-geometry', `blender ${path.basename(path.dirname(resolved))}: glbCXZ=[${glbBBox?.center[0]?.toFixed(2)},${glbBBox?.center[2]?.toFixed(2)}] → daeCXY=[${daeBBox?.center[0]?.toFixed(2)},${daeBBox?.center[1]?.toFixed(2)}]`, {
+                stage: 'blender-dae',
+                glbPath: resolved,
+                glbBBox,   // glTF Y-up
+                daeBBox,   // COLLADA Z-up
+              });
+            } catch { /* diagnostic only */ }
             res.statusCode = 200;
             res.setHeader('Content-Type', 'application/json');
             res.end(JSON.stringify({ daePath, bytes }));

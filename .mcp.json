@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "turbolog": {
+      "command": "node_modules/.bin/turbolog-mcp",
+      "args": [],
+      "cwd": "/Users/f.tesche/Documents/dev/mapng"
+    }
+  }
+}

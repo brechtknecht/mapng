@@ -1289,9 +1289,19 @@ async function exportAssembly(session, revision, spec) {
   }
   const records = [];
   for (const entry of session.outputs.values()) records.push(...entry.records);
-  console.info(`[bakeWorker] export rev${revision}: assembling ${records.length} records (worldSize=${spec.worldSize}, zOffset=${spec.zOffsetM ?? 0}m)…`);
+  // Scene→metres scale from the AOI's REAL metric extent (SCENE_SIZE/upm), not
+  // the requested box size: a 512 "px" chunk actually spans 511.05 m (fencepost),
+  // so worldSize=512 stretched every mesh ~0.19% about its centre — zero at the
+  // chunk centre, growing outward, doubled at chunk seams. The preview always
+  // scaled by 1/upm, which is why it aligned and BeamNG didn't.
+  const upmExport = computeUnitsPerMeter(session.data);
+  const worldSizeM = upmExport > 0 ? SCENE_SIZE / upmExport : spec.worldSize;
+  console.info(
+    `[bakeWorker] export rev${revision}: assembling ${records.length} records ` +
+    `(extent=${worldSizeM.toFixed(2)}m, requested=${spec.worldSize}, zOffset=${spec.zOffsetM ?? 0}m)…`,
+  );
   const result = await assembleGoogleTilesExport(records, {
-    worldSize: spec.worldSize,
+    worldSize: worldSizeM,
     sceneSize: SCENE_SIZE,
     zOffsetM: Number.isFinite(spec.zOffsetM) ? spec.zOffsetM : 0,
     materialPrefix: typeof spec.materialPrefix === 'string' ? spec.materialPrefix : '',
@@ -1307,6 +1317,8 @@ async function exportAssembly(session, revision, spec) {
     textures: result.textures,
     materialNames: result.materialNames,
     meshes: result.meshCount,
+    meshBounds: result.meshBounds, // assembled-mesh AABB (final metres) — placement diagnostic
+
     // The effective vertical anchor this bake used — chunk 0 of a route reports
     // it back so every later chunk (and the preview) seats on the same datum.
     groundOffsetM: session.transformMesh?.groundOffsetM,
