@@ -105,8 +105,10 @@ export const bakeCacheKey = (
   //         rejection, physical grade clamp (bridge-abutment junk bent profiles).
   // tsnap6: carve feather aligned to the snap-mask feather (3m) — floor and tile
   //         mesh now transition together at street edges (no bent lips).
+  // tsnap7: samples under a bridge footprint are demoted (raw min reads the DECK
+  //         there) — the underpass bottom is interpolated between the ramps.
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap6=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap7=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +

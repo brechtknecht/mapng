@@ -77,6 +77,16 @@
         <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Carve 1D road elevation profiles into the .ter during the route bake: the driving surface follows roads down into underpasses and up onto embankments. Bridges never carve — the lower road wins. Changing this re-bakes the tiles.">carve road profiles into .ter (bake)</span>
       </label>
 
+      <!-- debug: road-profile wireframes (orange = road, cyan = bridge/tunnel,
+           red = unresolved). Display-only — never re-bakes. -->
+      <label class="flex items-center gap-2 cursor-pointer pt-1">
+        <div class="relative">
+          <input type="checkbox" :checked="store.groundProfilesShow" @change="store.groundProfilesShow = $event.target.checked" class="peer sr-only" />
+          <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#38bdf8] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+        </div>
+        <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Show each road's elevation profile as a wireframe line: orange = resolved road (carved), cyan = bridge/tunnel segment, red = unresolved. Display-only.">show profile wireframes (debug)</span>
+      </label>
+
       <!-- post-process smoothing -->
       <label class="flex items-center gap-2 cursor-pointer pt-1">
         <div class="relative">

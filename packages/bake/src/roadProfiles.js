@@ -136,6 +136,40 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
     return !!(cm[z0 * w + x0] && cm[z0 * w + x1] && cm[z1 * w + x0] && cm[z1 * w + x1]);
   };
 
+  // Pass 0: ELEVATED-structure footprints (bridge / layer>0 ways). Under a deck
+  // the true underpass road is band-gated out of the raw min, and the DECK
+  // (horizontal, in band) becomes the per-cell minimum — so a road sampled
+  // inside a bridge footprint is reading the deck, not itself. Demote those
+  // samples to untrusted; the gap-bridging then interpolates the underpass
+  // bottom between the trusted ramp ends. (Tunnels stay out: they lie BELOW
+  // and never pollute the min of the surface road above.)
+  const segDist2 = (px, pz, ax, az, bx, bz) => {
+    const dx = bx - ax, dz = bz - az;
+    const len2 = dx * dx + dz * dz;
+    let tt = len2 > 0 ? ((px - ax) * dx + (pz - az) * dz) / len2 : 0;
+    tt = tt < 0 ? 0 : tt > 1 ? 1 : tt;
+    return Math.hypot(px - (ax + tt * dx), pz - (az + tt * dz));
+  };
+  const structSegs = [];
+  for (const f of osmFeatures) {
+    if (!f || f.type !== 'road' || !Array.isArray(f.geometry) || f.geometry.length < 2) continue;
+    const t = f.tags || {};
+    const elevated = (t.bridge && t.bridge !== 'no') || (t.layer != null && Number(t.layer) > 0);
+    if (!elevated) continue;
+    // Deck footprint: class half-width + 2m margin (deck edges overhang a bit).
+    const r = ((HALF_WIDTH_M[t.highway] ?? HALF_WIDTH_M.default) + 2) * upm;
+    let prev = toScene(f.geometry[0].lat, f.geometry[0].lng);
+    for (let i = 1; i < f.geometry.length; i++) {
+      const cur = toScene(f.geometry[i].lat, f.geometry[i].lng);
+      structSegs.push({ ax: prev.x, az: prev.z, bx: cur.x, bz: cur.z, r });
+      prev = cur;
+    }
+  }
+  const underStructure = (x, z) => {
+    for (const s of structSegs) if (segDist2(x, z, s.ax, s.az, s.bx, s.bz) <= s.r) return true;
+    return false;
+  };
+
   const stepScene = stepM * upm;
   const roads = [];
   let totalSamples = 0, totalTrusted = 0, maxUntrustedGapM = 0, aggMaxGradePct = 0;
@@ -196,7 +230,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       const b = sampleHeightAtScene(floor, p.x + nx_ * halfWscene, p.z + nz_ * halfWscene);
       const c = sampleHeightAtScene(floor, p.x - nx_ * halfWscene, p.z - nz_ * halfWscene);
       raw[i] = Math.max(Math.min(a, b), Math.min(Math.max(a, b), c)); // median3
-      trusted[i] = (!throughStructure && trustedAt(p.x, p.z)) ? 1 : 0;
+      trusted[i] = (!throughStructure && !underStructure(p.x, p.z) && trustedAt(p.x, p.z)) ? 1 : 0;
     }
 
     // Outlier rejection: junk that survives the cross-median (abutment walls,

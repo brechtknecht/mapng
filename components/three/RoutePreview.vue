@@ -316,6 +316,36 @@ const groundStrategyOpts = () => {
   };
 };
 
+// Debug wireframe: one polyline per road profile, floating just above the
+// floor. Orange = resolved road (this is what gets carved), cyan = bridge/
+// tunnel segment (throughStructure — never carved, raw reference heights),
+// red = unresolved. depthTest off so lines read through tiles and decks.
+const disposeLines = (grp) => grp?.traverse?.((o) => { o.geometry?.dispose?.(); o.material?.dispose?.(); });
+const applyProfileLines = (c, prof) => {
+  if (c.profileLines) { c.object.remove(c.profileLines); disposeLines(c.profileLines); c.profileLines = null; }
+  if (!store.groundProfilesShow || !prof) return;
+  const upm = computeUnitsPerMeter(c._stub) || 1;
+  const grp = new THREE.Group();
+  grp.name = '__road_profile_lines';
+  const liftU = 0.6 * upm; // 0.6 m visual lift off the floor
+  for (const r of prof.roads) {
+    const pos = new Float32Array(r.pts.length * 3);
+    for (let i = 0; i < r.pts.length; i++) {
+      pos[i * 3] = r.pts[i].x;
+      pos[i * 3 + 1] = (r.pts[i].h - c.minHeight) * upm + liftU;
+      pos[i * 3 + 2] = r.pts[i].z;
+    }
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const color = r.throughStructure ? 0x38bdf8 : (r.resolved ? 0xff6600 : 0xef4444);
+    const line = new THREE.Line(geom, new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true }));
+    line.renderOrder = 999;
+    grp.add(line);
+  }
+  c.object.add(grp);
+  c.profileLines = grp;
+};
+
 const extractChunkGround = (c) => {
   if (c.groundMesh) { c.object.remove(c.groundMesh); disposeMesh(c.groundMesh); c.groundMesh = null; }
   if (store.ground.source !== 'tiles') { if (c.terrainNode) c.terrainNode.visible = true; return; }
@@ -332,15 +362,18 @@ const extractChunkGround = (c) => {
   // feed the SAME profile carve the export worker runs, so the preview floor —
   // and everything the AreaInspector measures — includes carved underpasses.
   const g = extractTileGround(c.tilesNode, c._stub, groundStrategyOpts());
-  if (store.ground.carveRoads !== false && Array.isArray(c.osmRoads) && c.osmRoads.length) {
-    const prof = buildRoadProfiles(c.osmRoads, c._stub, g);
-    if (prof) {
-      const cs = carveRoadProfiles(prof, c._stub, g);
-      if (cs.carvedCells > 0) {
-        console.info(`[RoutePreview] chunk ${c.index}: carved ${cs.carvedCells} cells (max shift ${cs.maxShiftM}m)`);
-      }
+  let prof = null;
+  if (Array.isArray(c.osmRoads) && c.osmRoads.length
+      && (store.ground.carveRoads !== false || store.groundProfilesShow)) {
+    prof = buildRoadProfiles(c.osmRoads, c._stub, g);
+  }
+  if (prof && store.ground.carveRoads !== false) {
+    const cs = carveRoadProfiles(prof, c._stub, g);
+    if (cs.carvedCells > 0) {
+      console.info(`[RoutePreview] chunk ${c.index}: carved ${cs.carvedCells} cells (max shift ${cs.maxShiftM}m)`);
     }
   }
+  applyProfileLines(c, prof);
   const upm = computeUnitsPerMeter(c._stub) || 1;
   const heights = new Float32Array(g.heightMap.length);
   for (let i = 0; i < heights.length; i++) heights[i] = (g.heightMap[i] - c.minHeight) * upm;
@@ -362,6 +395,7 @@ const applyGround = () => {
 let _groundTimer = null;
 const scheduleGround = () => { clearTimeout(_groundTimer); _groundTimer = setTimeout(applyGround, 220); };
 watch(() => store.ground, scheduleGround, { deep: true });
+watch(() => store.groundProfilesShow, scheduleGround);
 
 const loadAll = async () => {
   loading.value = true;

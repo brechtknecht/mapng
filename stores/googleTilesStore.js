@@ -226,6 +226,11 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   // Live 3D preview of the extracted ground mesh (debug). Not persisted — purely
   // a viewport overlay, rebuilt from the cached tile bake on every strategy tweak.
   const groundPreviewShow = ref(false);
+  // Road-profile wireframe overlay (debug): render each profile polyline in the
+  // route preview — orange = resolved road, cyan = bridge/tunnel segment (the
+  // "inserted" structure profile), red = unresolved. Display-only: NOT part of
+  // the persisted strategy, so toggling never re-bakes.
+  const groundProfilesShow = ref(false);
   function persistGround() {
     try { localStorage.setItem(GROUND_LS, JSON.stringify(ground)); } catch (_) { /* private mode */ }
   }
@@ -256,7 +261,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     setQuality, setZOffset, setStripGround,
     bakeForPreview, rebake, reset, tryRestore, refineFromView,
     // drivable-ground strategy (Scene-settings menu)
-    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow,
+    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow, groundProfilesShow,
     setGroundSource, setGroundFilter, setGroundFilterParam,
     setGroundPostOn, setGroundPostEffect, setGroundPostParam, setGroundMinNormalY, setGroundSnapRoads, setGroundCarveRoads,
   };

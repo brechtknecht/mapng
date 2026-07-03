@@ -91,14 +91,16 @@ test('bridge/tunnel ways are kept as throughStructure profiles, unresolved witho
   const prof = buildRoadProfiles([
     roadFeature({ highway: 'primary', bridge: 'yes' }),
     roadFeature({ highway: 'primary', tunnel: 'yes' }),
-    roadFeature({ highway: 'primary' }),
   ], DATA, g);
-  assert.equal(prof.roads.length, 3);
-  const [bridge, tunnel, plain] = prof.roads;
+  assert.equal(prof.roads.length, 2);
+  const [bridge, tunnel] = prof.roads;
   assert.ok(bridge.throughStructure && !bridge.resolved, 'bridge: structure, no trusted anchors');
   assert.ok(tunnel.throughStructure && !tunnel.resolved, 'tunnel: structure, no trusted anchors');
+  assert.equal(prof.stats.resolved, 0);
+  // A plain road AWAY from any structure footprint resolves normally. (A road
+  // coincident with a bridge would rightly be demoted — the deck covers it.)
+  const plain = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g).roads[0];
   assert.ok(!plain.throughStructure && plain.resolved, 'plain road resolves normally');
-  assert.equal(prof.stats.resolved, 1);
 });
 
 test('profile reads the RAW min, not the pit-filled filtered ground (covered underpass)', () => {
@@ -120,6 +122,35 @@ test('profile reads the RAW min, not the pit-filled filtered ground (covered und
   carveRoadProfiles(prof, DATA, g);
   const centre = g.heightMap[cellIdx(0, 0)];
   assert.ok(centre < 42.5, `carve restores the dip in the filtered ground, got ${centre.toFixed(2)}`);
+});
+
+test('under a bridge footprint the deck reading is demoted — profile goes THROUGH', () => {
+  // Underpass anatomy: the road descends (ramps trusted), but under the deck
+  // the band gate removed the real road and the raw min reads the DECK at
+  // surface level (45). A north–south bridge way crosses at the centre; its
+  // footprint must demote those samples so the bottom interpolates between the
+  // ramp ends instead of climbing onto the deck.
+  const rampAndDeck = (col) => {
+    if (col < 70 || col > 130) return 45;            // surface streets
+    if (col >= 92 && col <= 108) return 45;          // DECK reading (band-gated road)
+    const t = 1 - Math.abs(col - 100) / 30;          // ramps descending toward 40
+    return 45 - 5 * t;
+  };
+  const bridge = {
+    type: 'road',
+    tags: { highway: 'secondary', bridge: 'yes' },
+    // North–south way crossing the E–W road at its midpoint (lng = 100 m).
+    geometry: [
+      { lat: 20 / 111320, lng: 100 / 111320 },
+      { lat: 180 / 111320, lng: 100 / 111320 },
+    ],
+  };
+  const g = groundStub(() => 45, null, rampAndDeck);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' }), bridge], DATA, g);
+  const road = prof.roads.find((r) => !r.throughStructure);
+  const mid = road.pts.reduce((best, p) => (Math.abs(p.s - road.lengthM / 2) < Math.abs(best.s - road.lengthM / 2) ? p : best));
+  assert.ok(mid.h < 42.5, `profile passes under the deck (got ${mid.h.toFixed(2)} at mid — deck would be ~45)`);
+  assert.ok(prof.stats.maxUntrustedGapM >= 15, `deck span was bridged (gap ${prof.stats.maxUntrustedGapM}m)`);
 });
 
 test('structure-bottom junk in the raw min is rejected, not followed (bridge abutment)', () => {
