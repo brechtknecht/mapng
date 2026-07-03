@@ -359,11 +359,14 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
       session.roadProfiles = prof;
       if (prof) {
         const st = prof.stats;
+        const at = (p) => `${p.highway} @ scene(${p.x.toFixed(0)},${p.z.toFixed(0)})`;
         console.info(
           `[bakeWorker] [roadProfiles] ${st.roads} roads (${st.resolved} resolved, ` +
           `${st.stitched ?? 0} bridge-stitched) over ${st.totalKm}km: ` +
           `${st.trustedPct}% samples trusted, largest bridged gap ${st.maxUntrustedGapM}m, ` +
-          `max grade ${st.maxGradePct}%`,
+          `max grade ${st.maxGradePct}%` +
+          (st.maxGradeAt ? ` (${at(st.maxGradeAt)})` : '') +
+          (st.worstTrust ? `, least trusted ${st.worstTrust.pct}% (${at(st.worstTrust)})` : ''),
         );
         if (groundStrategy?.carveRoads ?? true) {
           const g = session.extractedGround;

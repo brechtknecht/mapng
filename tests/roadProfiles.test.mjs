@@ -174,6 +174,32 @@ test('profile grades are clamped to a physical ceiling', () => {
   assert.ok(prof.stats.maxGradePct <= 26, `grade capped at ~25%, got ${prof.stats.maxGradePct}%`);
 });
 
+test('a near-duplicate endpoint sample cannot report an absurd grade', () => {
+  // The resampler appends the true endpoint even sub-mm past the last regular
+  // sample; the grade stat must use the limiter's 1cm spacing floor instead of
+  // dividing a limiter-approved (~mm) step by the sub-mm true ds.
+  const road = {
+    type: 'road',
+    tags: { highway: 'primary' },
+    geometry: [
+      { lat: C_LAT, lng: 5 / 111320 },
+      { lat: C_LAT, lng: 195.0004 / 111320 }, // 0.4mm past the last 5m sample
+    ],
+  };
+  const g = groundStub((col) => 40 + col * 0.1); // uniform 10% grade
+  const prof = buildRoadProfiles([road], DATA, g);
+  assert.ok(prof.stats.maxGradePct <= 26,
+    `grade stat capped at the physical ceiling, got ${prof.stats.maxGradePct}%`);
+});
+
+test('stats carry worst-road diagnostics with scene positions', () => {
+  const g = groundStub(() => 42);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'residential' })], DATA, g);
+  const wt = prof.stats.worstTrust;
+  assert.ok(wt && wt.highway === 'residential' && wt.pct > 90, 'least-trusted road reported');
+  assert.ok(Number.isFinite(wt.x) && Number.isFinite(wt.z), 'position is scene coords');
+});
+
 test('bridge profiles stitch between abutment anchors of resolved roads', () => {
   // Short bridge crossing the resolved E–W road: both endpoints within the
   // 15m join radius of resolved samples → stitched flat at the road height.
@@ -253,6 +279,62 @@ test('carve shift is clamped to maxCarveM', () => {
   carveRoadProfiles(profileAt(40), DATA, g, { maxCarveM: 10 });
   assert.ok(Math.abs(g.heightMap[cellIdx(0, 0)] - 50) < 0.1,
     `shift capped at 10m, got ${g.heightMap[cellIdx(0, 0)]}`);
+});
+
+test('crossing roads with disagreeing profiles blend at the junction — no stepped patchwork', () => {
+  // Road A (E–W, 40m) was gap-bridged too low; road B (N–S, 44m) is trusted.
+  // Max-weight-wins carved a 4m step at A's corridor edge (weight noise picked
+  // a different winner per cell); the blend must ramp one into the other.
+  const g = groundStub(() => 45);
+  g.coveredMask.fill(0);
+  carveRoadProfiles({
+    roads: [
+      { resolved: true, throughStructure: false, halfWidthM: 4,
+        pts: [{ x: -40, z: 0, s: 0, h: 40 }, { x: 40, z: 0, s: 160, h: 40 }] },
+      { resolved: true, throughStructure: false, halfWidthM: 4,
+        pts: [{ x: 0, z: -40, s: 0, h: 44 }, { x: 0, z: 40, s: 160, h: 44 }] },
+    ],
+  }, DATA, g);
+  const centre = g.heightMap[cellIdx(0, 0)];
+  assert.ok(Math.abs(centre - 42) < 0.3, `junction blends to the midpoint, got ${centre.toFixed(2)}`);
+  // Walk the N–S carriageway away from the junction: 42 → 44 must ramp across
+  // A's corridor+feather without a hard cell-to-cell step.
+  let prev = centre, maxStep = 0;
+  for (let z = 0.5; z <= 16; z += 0.5) {
+    const h = g.heightMap[cellIdx(0, z)];
+    maxStep = Math.max(maxStep, Math.abs(h - prev));
+    prev = h;
+  }
+  // The 4m disagreement now spreads across A's carriageway+feather; the
+  // steepest per-cell step sits mid-feather (~1m/cell for a 3m feather) —
+  // max-wins put the whole 4m into ONE cell edge.
+  assert.ok(maxStep < 1.5, `no stepped patchwork along the crossing road, got ${maxStep.toFixed(2)}m step`);
+  assert.ok(Math.abs(prev - 44) < 0.1, `clear of the junction B owns its height, got ${prev.toFixed(2)}`);
+});
+
+test('a held (untrusted) road end tapers out of the carve instead of stamping a shelf', () => {
+  // Coverage ends at col 150; beyond it the floor is DEM fallback 5m higher.
+  // The profile HOLDS the last trusted height (40) through the uncovered end —
+  // pure extrapolation, which must fade out instead of carving a 5m shelf.
+  const g = groundStub((col) => (col >= 150 ? 45 : 40), [150, 199]);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
+  assert.ok(prof.roads[0].resolved);
+  carveRoadProfiles(prof, DATA, g);
+  const heldEnd = g.heightMap[cellIdx(40, 0)]; // ~30m past the last trusted sample
+  assert.ok(heldEnd > 44.5, `held end left untouched, got ${heldEnd.toFixed(2)}`);
+  const body = g.heightMap[cellIdx(0, 0)];
+  assert.ok(Math.abs(body - 40) < 0.3, `trusted body still carves, got ${body.toFixed(2)}`);
+});
+
+test('interior bridged spans (underpasses) keep full carve strength despite the end taper', () => {
+  // Same shape as the underpass test but run through the CARVE: the untrusted
+  // middle is bracketed by trusted anchors, so it is interpolation, not a held
+  // end — the taper must not touch it.
+  const g = groundStub((col) => (col >= 85 && col <= 115 ? 45 : 40), [85, 115]);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
+  carveRoadProfiles(prof, DATA, g);
+  const mid = g.heightMap[cellIdx(0, 0)]; // centre of the bridged span
+  assert.ok(Math.abs(mid - 40) < 0.5, `bridged underpass fully carved, got ${mid.toFixed(2)}`);
 });
 
 test('non-drivable ways and empty input yield no profiles', () => {

@@ -92,7 +92,9 @@ const gauss1d = (h, radius) => {
  *     pts: Array<{x:number, z:number, s:number, h:number, trusted:boolean}>,
  *   }>,
  *   stats: { roads:number, resolved:number, totalKm:number, trustedPct:number,
- *            maxUntrustedGapM:number, maxGradePct:number },
+ *            maxUntrustedGapM:number, maxGradePct:number,
+ *            maxGradeAt:null|{highway:string,x:number,z:number},
+ *            worstTrust:null|{pct:number,highway:string,x:number,z:number} },
  * }}
  */
 export const buildRoadProfiles = (osmFeatures, data, ground, {
@@ -173,6 +175,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
   const stepScene = stepM * upm;
   const roads = [];
   let totalSamples = 0, totalTrusted = 0, maxUntrustedGapM = 0, aggMaxGradePct = 0;
+  let aggMaxGradeAt = null, worstTrust = null;
 
   for (const f of osmFeatures) {
     if (!f || f.type !== 'road' || !Array.isArray(f.geometry) || f.geometry.length < 2) continue;
@@ -303,15 +306,31 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       for (let i = 0; i < pts.length; i++) smooth[i] = (fwd[i] + bwd[i]) / 2;
     }
 
-    let roadMaxGrade = 0;
+    // Grade stat uses the same 1cm spacing floor as the limiter above: the
+    // resampler can append the final endpoint sub-mm from the previous sample,
+    // and dividing a limiter-approved (~mm) step by that true ds reports an
+    // absurd grade for what is physically a millimetre bump.
+    let roadMaxGrade = 0, roadMaxGradeAt = -1;
     for (let i = 1; i < pts.length; i++) {
       const ds = pts[i].s - pts[i - 1].s;
       if (ds > 1e-6) {
-        const g = Math.abs(smooth[i] - smooth[i - 1]) / ds * 100;
-        if (g > roadMaxGrade) roadMaxGrade = g;
+        const g = Math.abs(smooth[i] - smooth[i - 1]) / Math.max(0.01, ds) * 100;
+        if (g > roadMaxGrade) { roadMaxGrade = g; roadMaxGradeAt = i; }
       }
     }
-    if (resolved && roadMaxGrade > aggMaxGradePct) aggMaxGradePct = roadMaxGrade;
+    if (resolved && roadMaxGrade > aggMaxGradePct) {
+      aggMaxGradePct = roadMaxGrade;
+      aggMaxGradeAt = roadMaxGradeAt >= 0
+        ? { highway: t.highway || 'unknown', x: pts[roadMaxGradeAt].x, z: pts[roadMaxGradeAt].z }
+        : null;
+    }
+    if (resolved && !throughStructure) {
+      const pct = Math.round((trustedCount / pts.length) * 100);
+      if (!worstTrust || pct < worstTrust.pct) {
+        const mid = pts[pts.length >> 1];
+        worstTrust = { pct, highway: t.highway || 'unknown', x: mid.x, z: mid.z };
+      }
+    }
 
     for (let i = 0; i < pts.length; i++) {
       pts[i].h = smooth[i];
@@ -374,6 +393,10 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       trustedPct: totalSamples ? Math.round((totalTrusted / totalSamples) * 100) : 0,
       maxUntrustedGapM: Math.round(maxUntrustedGapM),
       maxGradePct: Math.round(aggMaxGradePct * 10) / 10,
+      // Diagnostics: where the worst numbers live (scene coords, matches the
+      // profile-wireframe debug view) so a bad profile is pinnable from the log.
+      maxGradeAt: aggMaxGradeAt,
+      worstTrust,
     },
   };
 };
@@ -402,23 +425,34 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
  *   the mask feather, so if the floor keeps transitioning further out, the two
  *   disagree in the overhang band and the street edges read as bent lips.
  * @param {number} [opts.maxCarveM=10]  per-cell shift clamp (safety)
+ * @param {number} [opts.endTaperM=10]  arc length over which a road's carve
+ *   strength fades to zero across leading/trailing untrusted HELD spans (flat
+ *   extrapolation, see buildRoadProfiles). Interior bridged spans (underpasses)
+ *   are never tapered.
  * @param {(r:object)=>boolean} [opts.roadFilter]  which roads stamp. Default:
  *   resolved non-structure roads (the .ter carve). The deck snap passes
  *   `r.throughStructure && r.resolved` to stamp stitched bridge profiles into
  *   a TRANSIENT deck floor instead.
  * @returns {{ carvedCells:number, maxShiftM:number, minH:number, maxH:number }}
  */
-export const carveRoadProfiles = (profiles, data, ground, { featherM = 3, maxCarveM = 10, roadFilter = null } = {}) => {
+export const carveRoadProfiles = (profiles, data, ground, {
+  featherM = 3, maxCarveM = 10, endTaperM = 10, roadFilter = null,
+} = {}) => {
   const empty = { carvedCells: 0, maxShiftM: 0, minH: Infinity, maxH: -Infinity };
   if (!profiles?.roads?.length || !ground?.heightMap) return empty;
   const upm = computeUnitsPerMeter(data);
   const W = data.width, H = data.height;
   const hm = ground.heightMap, cm = ground.coveredMask ?? null;
 
-  // Per-cell best (weight, target height) across all roads — max weight wins, so
-  // junction cells take whichever road claims them hardest (heights agree there).
-  const wBest = new Float32Array(W * H);
-  const hBest = new Float32Array(W * H);
+  // Per-cell accumulation: weighted BLEND across claims instead of max-wins.
+  // Within one road consecutive segments overlap and agree, so accumulating is
+  // safe; ACROSS roads the targets can genuinely disagree at a junction (a
+  // gap-bridged profile vs a trusted crossing road), and max-wins turned that
+  // into stepped patchwork — whichever road claimed a cell hardest set it
+  // alone. Blending ramps one profile into the other across the feather.
+  const wSum = new Float32Array(W * H);
+  const whSum = new Float32Array(W * H);
+  const wMax = new Float32Array(W * H);
   const featherScene = featherM * upm;
   const toCol = (x) => ((x + HALF) / SCENE_SIZE) * (W - 1);
   const toRow = (z) => ((z + HALF) / SCENE_SIZE) * (H - 1);
@@ -429,6 +463,30 @@ export const carveRoadProfiles = (profiles, data, ground, { featherM = 3, maxCar
     const halfW = r.halfWidthM * upm;
     const reach = halfW + featherScene;
     const pts = r.pts;
+
+    // Carve confidence along the arc: leading/trailing untrusted spans carry a
+    // flat HOLD of the nearest trusted height (see buildRoadProfiles) — pure
+    // extrapolation, wrong by metres where the road leaves coverage — so their
+    // stamp weight tapers to zero over endTaperM. Interior bridged spans keep
+    // full strength (underpasses depend on them), as do structure decks and
+    // profiles without trust flags (deck snap, hand-built).
+    let conf = null;
+    if (!r.throughStructure) {
+      let firstT = -1, lastT = -1;
+      for (let i = 0; i < pts.length; i++) {
+        if (pts[i].trusted) { if (firstT < 0) firstT = i; lastT = i; }
+      }
+      if (firstT > 0 || (firstT >= 0 && lastT < pts.length - 1)) {
+        conf = new Float64Array(pts.length).fill(1);
+        for (let i = 0; i < firstT; i++) {
+          conf[i] = Math.max(0, 1 - (pts[firstT].s - pts[i].s) / endTaperM);
+        }
+        for (let i = lastT + 1; i < pts.length; i++) {
+          conf[i] = Math.max(0, 1 - (pts[i].s - pts[lastT].s) / endTaperM);
+        }
+      }
+    }
+
     for (let i = 1; i < pts.length; i++) {
       const a = pts[i - 1], b = pts[i];
       const c0 = Math.max(0, Math.floor(toCol(Math.min(a.x, b.x) - reach)));
@@ -445,22 +503,26 @@ export const carveRoadProfiles = (profiles, data, ground, { featherM = 3, maxCar
           t = t < 0 ? 0 : t > 1 ? 1 : t;
           const d = Math.hypot(px - (a.x + t * dx), pz - (a.z + t * dz));
           if (d >= reach) continue;
-          const w = d <= halfW ? 1 : smoothstep((reach - d) / featherScene);
-          const idx = row * W + col;
-          if (w > wBest[idx]) {
-            wBest[idx] = w;
-            hBest[idx] = a.h + (b.h - a.h) * t; // profile samples ~stepM apart
+          let w = d <= halfW ? 1 : smoothstep((reach - d) / featherScene);
+          if (conf) {
+            w *= conf[i - 1] + (conf[i] - conf[i - 1]) * t;
+            if (w <= 0) continue;
           }
+          const idx = row * W + col;
+          const h = a.h + (b.h - a.h) * t; // profile samples ~stepM apart
+          wSum[idx] += w;
+          whSum[idx] += w * h;
+          if (w > wMax[idx]) wMax[idx] = w;
         }
       }
     }
   }
 
   let carvedCells = 0, maxShiftM = 0, minH = Infinity, maxH = -Infinity;
-  for (let idx = 0; idx < wBest.length; idx++) {
-    const w = wBest[idx];
+  for (let idx = 0; idx < wMax.length; idx++) {
+    const w = wMax[idx];
     if (w <= 0) continue;
-    let delta = (hBest[idx] - hm[idx]) * w;
+    let delta = (whSum[idx] / wSum[idx] - hm[idx]) * w;
     if (delta > maxCarveM) delta = maxCarveM;
     else if (delta < -maxCarveM) delta = -maxCarveM;
     if (delta !== 0) {
