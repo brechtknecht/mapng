@@ -156,10 +156,13 @@ const stampSegment = (cov, n, ax, az, bx, bz, halfW, feather, reach) => {
  *   so the snap blends into the surrounding delta-field result without tearing the mesh.
  * @param {number} [opts.cellM]  mask cell size (metres). Default ≈ the DEM raster
  *   (~1 m/px), capped at 2048 cells/side so a large corridor AOI can't blow up memory.
+ * @param {boolean} [opts.elevatedOnly=false]  INVERT the structure exclusion:
+ *   mask ONLY bridge / layer>0 road lines (the deck-snap pass targets a
+ *   transient deck floor, so decks — normally never masked — are the point).
  * @returns {null | { sample(x:number, z:number):number, n:number, coverage:Float32Array }}
  *   null when there are no snappable roads — caller falls back to the delta field alone.
  */
-export const buildGroundMask = (osmFeatures, data, { featherM = 3, cellM } = {}) => {
+export const buildGroundMask = (osmFeatures, data, { featherM = 3, cellM, elevatedOnly = false } = {}) => {
   if (!Array.isArray(osmFeatures) || osmFeatures.length === 0) return null;
   if (!data || !data.bounds || !data.width || !data.height) return null;
 
@@ -188,15 +191,21 @@ export const buildGroundMask = (osmFeatures, data, { featherM = 3, cellM } = {})
     if (!f || !Array.isArray(f.geometry)) continue;
     const t = f.tags || {};
     // Bridges / tunnels / stacked layers are legitimately off the DEM — snapping
-    // them to the floor would be wrong, so they never enter the mask (roads OR areas).
-    if (t.bridge && t.bridge !== 'no') continue;
-    if (t.tunnel && t.tunnel !== 'no') continue;
-    if (t.layer != null && Number(t.layer) !== 0) continue;
+    // them to the floor would be wrong, so they never enter the mask (roads OR
+    // areas). elevatedOnly INVERTS this: deck lines only, everything else out.
+    const elevated = (t.bridge && t.bridge !== 'no') || (t.layer != null && Number(t.layer) > 0);
+    if (elevatedOnly) {
+      if (!elevated) continue;
+    } else {
+      if (t.bridge && t.bridge !== 'no') continue;
+      if (t.tunnel && t.tunnel !== 'no') continue;
+      if (t.layer != null && Number(t.layer) !== 0) continue;
+    }
 
     // Flat ground AREA (parking, plaza, pedestrian area) — fill the polygon.
     // Checked first: a pedestrian area arrives as type 'road' with a closed ring,
     // and must be filled, not stamped as a centreline.
-    if (isFlatGroundArea(t) && f.geometry.length >= 3) {
+    if (!elevatedOnly && isFlatGroundArea(t) && f.geometry.length >= 3) {
       const ring = f.geometry.map((p) => toScene(p.lat, p.lng));
       const holes = Array.isArray(f.holes)
         ? f.holes.filter((h) => Array.isArray(h) && h.length >= 3).map((h) => h.map((p) => toScene(p.lat, p.lng)))

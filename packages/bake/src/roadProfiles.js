@@ -333,12 +333,43 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
   }
   if (roads.length === 0) return null;
 
+  // Stitch structure profiles: a bridge way has no trusted samples of its own
+  // (its raw min reads a mix of deck and the road below), but its ENDPOINTS
+  // join resolved surface roads at the abutments. Anchor each end to the
+  // nearest resolved sample within joinM and span linearly — decks are
+  // straight. One anchored end → flat hold; none → stays unresolved.
+  const joinScene = 15 * upm;
+  const anchorAt = (x, z) => {
+    let best = null, bestD = joinScene;
+    for (const r of roads) {
+      if (!r.resolved || r.throughStructure) continue;
+      for (const p of r.pts) {
+        const d = Math.hypot(p.x - x, p.z - z);
+        if (d < bestD) { bestD = d; best = p.h; }
+      }
+    }
+    return best;
+  };
+  for (const r of roads) {
+    if (!r.throughStructure || r.resolved) continue;
+    const first = r.pts[0], last = r.pts[r.pts.length - 1];
+    const hA = anchorAt(first.x, first.z);
+    const hB = anchorAt(last.x, last.z);
+    if (hA == null && hB == null) continue;
+    const a = hA ?? hB, b = hB ?? hA;
+    const len = last.s || 1;
+    for (const p of r.pts) p.h = a + (b - a) * (p.s / len);
+    r.resolved = true;
+    r.stitched = true;
+  }
+
   const resolvedCount = roads.filter((r) => r.resolved).length;
   return {
     roads,
     stats: {
       roads: roads.length,
       resolved: resolvedCount,
+      stitched: roads.filter((r) => r.stitched).length,
       totalKm: Math.round(roads.reduce((acc, r) => acc + r.lengthM, 0) / 100) / 10,
       trustedPct: totalSamples ? Math.round((totalTrusted / totalSamples) * 100) : 0,
       maxUntrustedGapM: Math.round(maxUntrustedGapM),
@@ -371,9 +402,13 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
  *   the mask feather, so if the floor keeps transitioning further out, the two
  *   disagree in the overhang band and the street edges read as bent lips.
  * @param {number} [opts.maxCarveM=10]  per-cell shift clamp (safety)
+ * @param {(r:object)=>boolean} [opts.roadFilter]  which roads stamp. Default:
+ *   resolved non-structure roads (the .ter carve). The deck snap passes
+ *   `r.throughStructure && r.resolved` to stamp stitched bridge profiles into
+ *   a TRANSIENT deck floor instead.
  * @returns {{ carvedCells:number, maxShiftM:number, minH:number, maxH:number }}
  */
-export const carveRoadProfiles = (profiles, data, ground, { featherM = 3, maxCarveM = 10 } = {}) => {
+export const carveRoadProfiles = (profiles, data, ground, { featherM = 3, maxCarveM = 10, roadFilter = null } = {}) => {
   const empty = { carvedCells: 0, maxShiftM: 0, minH: Infinity, maxH: -Infinity };
   if (!profiles?.roads?.length || !ground?.heightMap) return empty;
   const upm = computeUnitsPerMeter(data);
@@ -388,8 +423,9 @@ export const carveRoadProfiles = (profiles, data, ground, { featherM = 3, maxCar
   const toCol = (x) => ((x + HALF) / SCENE_SIZE) * (W - 1);
   const toRow = (z) => ((z + HALF) / SCENE_SIZE) * (H - 1);
 
+  const keep = roadFilter ?? ((r) => r.resolved && !r.throughStructure);
   for (const r of profiles.roads) {
-    if (!r.resolved || r.throughStructure) continue;
+    if (!keep(r)) continue;
     const halfW = r.halfWidthM * upm;
     const reach = halfW + featherScene;
     const pts = r.pts;

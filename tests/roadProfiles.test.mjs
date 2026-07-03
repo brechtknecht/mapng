@@ -174,6 +174,38 @@ test('profile grades are clamped to a physical ceiling', () => {
   assert.ok(prof.stats.maxGradePct <= 26, `grade capped at ~25%, got ${prof.stats.maxGradePct}%`);
 });
 
+test('bridge profiles stitch between abutment anchors of resolved roads', () => {
+  // Short bridge crossing the resolved E–W road: both endpoints within the
+  // 15m join radius of resolved samples → stitched flat at the road height.
+  const bridge = {
+    type: 'road',
+    tags: { highway: 'secondary', bridge: 'yes' },
+    geometry: [
+      { lat: 90 / 111320, lng: 60 / 111320 },
+      { lat: 110 / 111320, lng: 60 / 111320 },
+    ],
+  };
+  const g = groundStub(() => 45);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' }), bridge], DATA, g);
+  const b = prof.roads.find((r) => r.throughStructure);
+  assert.ok(b.stitched && b.resolved, 'bridge stitched from abutment anchors');
+  for (const p of b.pts) assert.ok(Math.abs(p.h - 45) < 0.2, `deck line at road height, got ${p.h.toFixed(2)}`);
+  assert.equal(prof.stats.stitched, 1);
+});
+
+test('roadFilter stamps stitched decks into a transient deck floor', () => {
+  const g = groundStub(() => 45);
+  g.coveredMask.fill(0);
+  const st = carveRoadProfiles(profileAt(52, { throughStructure: true }), DATA, g, {
+    roadFilter: (r) => r.throughStructure && r.resolved,
+    featherM: 2,
+  });
+  assert.ok(st.carvedCells > 0, 'deck stamped');
+  assert.ok(Math.abs(g.heightMap[cellIdx(0, 0)] - 52) < 0.1,
+    `deck floor at profile height, got ${g.heightMap[cellIdx(0, 0)]}`);
+  assert.equal(g.coveredMask[cellIdx(0, 0)], 1, 'deck cells trusted for the snap');
+});
+
 // ── carve ────────────────────────────────────────────────────────────────────
 // A hand-built profile along z=0 (scene x −40..40 = 160 m), constant height.
 const profileAt = (h, flags = {}) => ({

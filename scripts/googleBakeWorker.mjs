@@ -350,7 +350,8 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
       if (prof) {
         const st = prof.stats;
         console.info(
-          `[bakeWorker] [roadProfiles] ${st.roads} roads (${st.resolved} resolved) over ${st.totalKm}km: ` +
+          `[bakeWorker] [roadProfiles] ${st.roads} roads (${st.resolved} resolved, ` +
+          `${st.stitched ?? 0} bridge-stitched) over ${st.totalKm}km: ` +
           `${st.trustedPct}% samples trusted, largest bridged gap ${st.maxUntrustedGapM}m, ` +
           `max grade ${st.maxGradePct}%`,
         );
@@ -428,6 +429,46 @@ const applyTerGroundSnap = (session, groundStrategy) => {
     `(unsnapped on-surface: ${r.roadWallExcluded} wall-shared, ${r.roadGateExcluded} taper-gated; ` +
     `${r.roadOverheadCount} overhead verts ignored)`,
   );
+
+  // Deck snap: bridges are excluded from the road mask above (they must never
+  // be pulled to the .ter), but their STITCHED profile — spanned between the
+  // abutments of the resolved approach roads — is the deck's true line. Stamp
+  // those profiles into a TRANSIENT deck floor (the .ter itself is untouched)
+  // and snap the deck mesh onto it with a deck-only mask. The underpass road
+  // metres below stays out of reach via the snap ceiling.
+  const prof = session.roadProfiles;
+  if (prof?.roads?.some((rd) => rd.throughStructure && rd.resolved)) {
+    const deckGround = {
+      heightMap: Float32Array.from(g.heightMap),
+      coveredMask: new Uint8Array(g.heightMap.length),
+    };
+    const dc = carveRoadProfiles(prof, session.data, deckGround, {
+      roadFilter: (rd) => rd.throughStructure && rd.resolved,
+      featherM: 2,
+    });
+    const deckMask = dc.carvedCells > 0
+      ? buildGroundMask(osmFeatures, session.data, { elevatedOnly: true })
+      : null;
+    if (deckMask) {
+      // Rebuild the soup from the CURRENT positions — the pass above replaced
+      // the moved records' arrays, and the old soup still points at the originals.
+      const soup2 = recs.map((rec) => ({ positions: rec.positions, index: rec.baseIndex ?? rec.index }));
+      const rd = conformTilesToFloor(soup2, { ...session.data, heightMap: deckGround.heightMap }, {
+        groundMask: deckMask,
+        floorCoveredMask: deckGround.coveredMask,
+        maxSnapM: 3,
+        snapTaperM: 1,
+      });
+      for (let i = 0; i < recs.length; i++) {
+        if (rd.positions[i]) recs[i].positions = rd.positions[i];
+      }
+      console.info(
+        `[bakeWorker] [deckSnap] snapped ${rd.vertsSnapped} deck verts onto ` +
+        `${prof.stats.stitched ?? 0} stitched bridge profiles ` +
+        `(max float fixed ${rd.maxFloatFixedM.toFixed(1)}m, ${dc.carvedCells} deck-floor cells)`,
+      );
+    }
+  }
 };
 
 /**

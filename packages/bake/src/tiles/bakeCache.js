@@ -107,8 +107,10 @@ export const bakeCacheKey = (
   //         mesh now transition together at street edges (no bent lips).
   // tsnap7: samples under a bridge footprint are demoted (raw min reads the DECK
   //         there) — the underpass bottom is interpolated between the ramps.
+  // tsnap8: bridge profiles stitched between abutment anchors + deck snap (the
+  //         deck mesh follows the stitched line via a transient deck floor).
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap7=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap8=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
