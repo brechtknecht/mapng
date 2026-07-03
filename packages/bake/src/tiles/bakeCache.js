@@ -24,7 +24,11 @@
 // v15: ALL geometry post-passes disabled by default (weld/conform/road-mask/
 //      ground-strip) — output is now raw transformed tiles while the
 //      post-processing strategy is reworked. Passes remain opt-in (flags/options).
-export const BAKE_FORMAT_VERSION = 15;
+// v16: semantic structure stiffness in the conform (deform/structureStiffness):
+//      OSM building footprints freeze the delta field locally constant (rigid
+//      re-seat — roofs stay planar) and veto the road snap underneath; sidecar
+//      now ships building/man_made footprints. Conformed bakes change geometry.
+export const BAKE_FORMAT_VERSION = 16;
 
 // FNV-1a 32-bit over a string — the cache key's compact fingerprint primitive.
 const fnv1a = (s, h = 2166136261) => {
@@ -61,6 +65,7 @@ export const bakeCacheKey = (
     weld,
     conform,
     roadmask,
+    stiffness,
     // Route .ter mode: when the worker snaps road verts onto the EXTRACTED tile
     // ground (applyTerGroundSnap), the baked geometry depends on the whole ground
     // strategy — so it must key apart. Undefined/off leaves the key unchanged.
@@ -90,7 +95,8 @@ export const bakeCacheKey = (
   const passes =
     (weld === false ? '|nw' : '') +
     (conform === false ? '|nc' : '') +
-    (roadmask === false ? '|nr' : '');
+    (roadmask === false ? '|nr' : '') +
+    (stiffness === false ? '|ns' : '');
   // Ter-ground snap fingerprint — only when the snap will actually run, so all
   // pre-existing keys (no extraction, or snap disabled) stay byte-for-byte.
   // The literal carries the snap-algo revision: bump it (tsnap3 → tsnap4 …) when
@@ -109,8 +115,12 @@ export const bakeCacheKey = (
   //         there) — the underpass bottom is interpolated between the ramps.
   // tsnap8: bridge profiles stitched between abutment anchors + deck snap (the
   //         deck mesh follows the stitched line via a transient deck floor).
+  // tsnap9: semantic structure stiffness (deform/structureStiffness) in BOTH
+  //         terSnap conforms — OSM footprints freeze the delta field per
+  //         structure (rigid re-seat, planar roofs) and veto the road snap
+  //         underneath. Disable via stiffness=false / MAPNG_CONFORM_STIFFNESS=0.
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap8=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap9=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +

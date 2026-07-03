@@ -20,11 +20,13 @@ import {
 } from '../googleBakeCore.js';
 import { conformTilesToFloor } from '../tileGroundConform.js';
 import { buildGroundMask } from '../groundMask.js';
+import { collectStructureRings } from '../deform/structureStiffness.js';
 import {
   weldSeamsEnabled,
   riserStripEnabled,
   conformTilesEnabled,
   conformRoadmaskEnabled,
+  conformStiffnessEnabled,
 } from './bakeFlags.js';
 
 /**
@@ -104,6 +106,7 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     weld,
     conform,
     roadmask,
+    stiffness,
     onProgress,
   } = options;
 
@@ -406,7 +409,12 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     const groundMask = (roadmask ?? conformRoadmaskEnabled())
       ? buildGroundMask(data.osmFeatures, data)
       : null;
-    const r = conformTilesToFloor(soup, data, { groundMask });
+    // Semantic structure stiffness — OSM building footprints freeze the delta
+    // field per structure (rigid re-seat) and veto the road snap underneath.
+    const structures = (stiffness ?? conformStiffnessEnabled())
+      ? collectStructureRings(data.osmFeatures, data)
+      : null;
+    const r = conformTilesToFloor(soup, data, { groundMask, structures });
     for (let i = 0; i < out.children.length; i++) {
       if (r.positions[i]) {
         const attr = out.children[i].geometry.attributes.position;
@@ -418,6 +426,8 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     console.info(
       `[google3dTiles] tile conform: moved ${r.vertsMoved} verts across ${r.meshesMoved} meshes, ` +
       `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m` +
+      `, field bend |ΔD| p50 ${r.fieldGradP50M.toFixed(2)}/p95 ${r.fieldGradP95M.toFixed(2)}/max ${r.fieldGradMaxM.toFixed(2)} m/cell` +
+      `, structures ${r.structureCount} (snap vetoed ${r.structSnapVetoed})` +
       (groundMask
         ? `, snapped ${r.vertsSnapped} road verts (max float fixed ${r.maxFloatFixedM.toFixed(1)}m)`
         : ' (road mask off/none)'),

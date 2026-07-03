@@ -74,6 +74,7 @@ import {
 import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
 import { extractTileGroundFromSoup } from '@mapng/bake/ground/extractTileGround';
 import { buildGroundMask } from '@mapng/bake/groundMask';
+import { collectStructureRings } from '@mapng/bake/deform/structureStiffness';
 import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
@@ -158,6 +159,9 @@ const WELD_SEAMS = process.env.MAPNG_WELD_SEAMS === '1';
 const STRIP_RISERS = process.env.MAPNG_STRIP_RISERS === '1';
 const CONFORM_TILES = process.env.MAPNG_CONFORM_TILES === '1';
 const CONFORM_ROADMASK = process.env.MAPNG_CONFORM_ROADMASK === '1';
+// Structure stiffness defaults ON whenever the conform runs (it only prevents
+// damage to buildings); MAPNG_CONFORM_STIFFNESS=0 disables it for A/B.
+const CONFORM_STIFFNESS = process.env.MAPNG_CONFORM_STIFFNESS !== '0';
 // Weld tolerances (all metres) — tune without code edits, restart to apply.
 //   BAND      vertical reach onto the target ground (raise to close taller seams)
 //   COHERE    a cell welds only if its ground spans ≤ this (real steps survive)
@@ -284,13 +288,19 @@ const applyConform = (session) => {
   const osmCount = Array.isArray(osmFeatures) ? osmFeatures.length : 0;
   const roadmask = session.options?.roadmask ?? CONFORM_ROADMASK;
   const groundMask = roadmask ? buildGroundMask(osmFeatures, session.data) : null;
-  const r = conformTilesToFloor(soup, session.data, { groundMask });
+  // Semantic structure stiffness — building footprints (shipped by the sidecar
+  // since the payload filter was widened) freeze the delta field per structure.
+  const stiffnessOn = session.options?.stiffness ?? CONFORM_STIFFNESS;
+  const structures = stiffnessOn ? collectStructureRings(osmFeatures, session.data) : null;
+  const r = conformTilesToFloor(soup, session.data, { groundMask, structures });
   for (let i = 0; i < recs.length; i++) {
     if (r.positions[i]) recs[i].positions = r.positions[i];
   }
   console.info(
     `[bakeWorker] [roadmask] tile conform: moved ${r.vertsMoved} verts across ${r.meshesMoved}/${recs.length} meshes, ` +
     `${r.cellsFilled} field cells, ground residual ${r.residualBefore.toFixed(2)}m → ${r.residualAfter.toFixed(2)}m` +
+    `, field bend |ΔD| p50 ${r.fieldGradP50M.toFixed(2)}/p95 ${r.fieldGradP95M.toFixed(2)}/max ${r.fieldGradMaxM.toFixed(2)} m/cell` +
+    `, structures ${r.structureCount} (snap vetoed ${r.structSnapVetoed})` +
     (groundMask
       ? `, snapped ${r.vertsSnapped} ground verts (max float fixed ${r.maxFloatFixedM.toFixed(1)}m)`
       : ` (mask off/none — osm features received=${osmCount}, roadmask=${roadmask})`) +
@@ -397,11 +407,20 @@ const applyTerGroundSnap = (session, groundStrategy) => {
   }
   if (soup.length === 0) return;
   const t0 = performance.now();
+  // Semantic structure stiffness. The claim that "the delta field is near-zero
+  // by construction" does NOT hold near buildings: the extracted floor is
+  // filtered/carved bare earth while the tile ground next to facades carries
+  // junk medians — measured p95 ≈ 2 m/cell of cell-to-cell wobble, which this
+  // pass was printing onto every building (bent roofs). Footprints freeze the
+  // field locally constant instead.
+  const stiffnessOn = session.options?.stiffness ?? CONFORM_STIFFNESS;
+  const structures = stiffnessOn ? collectStructureRings(osmFeatures, session.data) : null;
   // The extracted ground is a drop-in for data.heightMap (same grid, absolute
   // metres, ORIGINAL minHeight datum) — swap it in as the conform floor.
   const floor = { ...session.data, heightMap: g.heightMap };
   const r = conformTilesToFloor(soup, floor, {
     groundMask,
+    structures,
     // Trust the floor only where extraction derived it FROM the tiles. Where it
     // fell back to the DEM (underpasses >3 m below the DEM are band-gated,
     // coverage holes under bridges), snapping would drag the real road metres
@@ -421,7 +440,10 @@ const applyTerGroundSnap = (session, groundStrategy) => {
     `[bakeWorker] [terSnap] snapped ${r.vertsSnapped} road verts onto the extracted ground ` +
     `(max float fixed ${r.maxFloatFixedM.toFixed(1)}m), moved ${r.vertsMoved} verts across ` +
     `${r.meshesMoved}/${recs.length} meshes, residual ${r.residualBefore.toFixed(2)}m → ` +
-    `${r.residualAfter.toFixed(2)}m in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
+    `${r.residualAfter.toFixed(2)}m, field bend |ΔD| p50 ${r.fieldGradP50M.toFixed(2)}/` +
+    `p95 ${r.fieldGradP95M.toFixed(2)}/max ${r.fieldGradMaxM.toFixed(2)} m/cell, ` +
+    `structures ${r.structureCount} (snap vetoed ${r.structSnapVetoed}) ` +
+    `in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
   );
   console.info(
     `[bakeWorker] [terSnap] carriageway flatness: ${r.roadVertsCore} road-surface verts, ` +
@@ -455,6 +477,10 @@ const applyTerGroundSnap = (session, groundStrategy) => {
       const soup2 = recs.map((rec) => ({ positions: rec.positions, index: rec.baseIndex ?? rec.index }));
       const rd = conformTilesToFloor(soup2, { ...session.data, heightMap: deckGround.heightMap }, {
         groundMask: deckMask,
+        // Same protection here: this second conform re-applies ITS delta field
+        // to every vertex too — without stiffness it would re-bend the
+        // buildings the first pass just protected.
+        structures,
         floorCoveredMask: deckGround.coveredMask,
         maxSnapM: 3,
         snapTaperM: 1,

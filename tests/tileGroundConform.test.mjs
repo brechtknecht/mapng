@@ -209,6 +209,136 @@ test('mask does not snap non-horizontal verts over a road (walls / curb risers)'
   assert.equal(r.vertsMoved, 0, 'nothing moved');
 });
 
+// ── Field bend diagnostics (the "buildings morph" instrumentation) ─────────
+// fieldGrad quantifies the cell-to-cell variation of D — the amount by which the
+// per-vertex delta pass BENDS any rigid structure spanning those cells.
+
+const blanket = (heightAt) => {
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 6) {
+    for (let cz = -45; cz <= 45; cz += 6) {
+      verts.push(...horizTri(cx, cz, heightAt(cx, cz)));
+      index.push(v, v + 1, v + 2); v += 3;
+    }
+  }
+  return [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
+};
+
+test('field bend: a constant residual reports ~zero bend', () => {
+  const r = conformTilesToFloor(blanket(() => 1.5), DATA);
+  assert.equal(r.fieldGrad.length, r.fieldN * r.fieldN);
+  assert.ok(r.fieldGradP95M < 0.05, `flat field must not bend, got p95 ${r.fieldGradP95M}`);
+});
+
+test('field bend: cell-scale wobble is reported, not hidden', () => {
+  // Alternate the ground residual ±0.5 m per 6 m column — the photogrammetry-noise
+  // signature that bends buildings. p95 must surface it.
+  const wobbly = (cx) => 1.5 + (Math.round(cx / 6) % 2 === 0 ? 0.5 : -0.5);
+  const r = conformTilesToFloor(blanket(wobbly), DATA);
+  assert.ok(r.fieldGradP95M > 0.3, `wobble must show in p95, got ${r.fieldGradP95M}`);
+  assert.ok(r.fieldGradMaxM >= r.fieldGradP95M && r.fieldGradP95M >= r.fieldGradP50M, 'quantiles ordered');
+});
+
+test('measureOnly: builds the field + diagnostics but moves nothing', () => {
+  const mk = () => blanket((cx) => residual(cx));
+  const m = conformTilesToFloor(mk(), DATA, { measureOnly: true });
+  assert.equal(m.vertsMoved, 0);
+  assert.ok(m.positions.every((p) => p === null), 'no positions allocated/applied');
+  assert.ok(m.cellsFilled > 0 && m.residualBefore > 1.0, 'field was still measured');
+  assert.equal(m.fieldGrad.length, m.fieldN * m.fieldN);
+  // Identical field to the full run — measure-only must not change what is measured.
+  const full = conformTilesToFloor(mk(), DATA);
+  assert.equal(m.fieldGradP95M, full.fieldGradP95M);
+  assert.deepEqual(Array.from(m.fieldValues), Array.from(full.fieldValues));
+});
+
+// ── Structure stiffness (semantic building protection) ─────────────────────
+// A footprint freezes the delta field locally constant, so the building
+// translates rigidly instead of being bent by the field's cell-to-cell wobble.
+
+const FOOTPRINT = [{ ring: [{ x: -15, z: -15 }, { x: 15, z: -15 }, { x: 15, z: 15 }, { x: -15, z: 15 }], holes: [] }];
+const wobble = (cx) => 1.5 + (Math.round(cx / 6) % 2 === 0 ? 0.5 : -0.5);
+
+// Wobbly ground everywhere EXCEPT under the footprint (buildings measure no
+// ground), plus a flat roof 15 m up spanning the footprint.
+const buildingScene = () => {
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 6) {
+    for (let cz = -45; cz <= 45; cz += 6) {
+      if (Math.abs(cx) <= 18 && Math.abs(cz) <= 18) continue; // no ground inside/near the building
+      verts.push(...horizTri(cx, cz, wobble(cx)));
+      index.push(v, v + 1, v + 2); v += 3;
+    }
+  }
+  const roofStart = v;
+  for (let cx = -12; cx <= 12; cx += 6) {
+    for (let cz = -12; cz <= 12; cz += 6) {
+      verts.push(...horizTri(cx, cz, 15));
+      index.push(v, v + 1, v + 2); v += 3;
+    }
+  }
+  return { soup: [{ positions: new Float32Array(verts), index: new Uint32Array(index) }], roofStart, roofEnd: v };
+};
+
+const roofSpread = (r, roofStart, roofEnd) => {
+  const out = r.positions[0];
+  let lo = Infinity, hi = -Infinity;
+  for (let vi = roofStart; vi < roofEnd; vi++) {
+    const y = out[vi * 3 + 1];
+    if (y < lo) lo = y;
+    if (y > hi) hi = y;
+  }
+  return hi - lo;
+};
+
+test('structures: the roof stays planar (rigid re-seat) where the bare field bends it', () => {
+  const a = buildingScene();
+  const bare = conformTilesToFloor(a.soup, DATA);
+  const bareSpread = roofSpread(bare, a.roofStart, a.roofEnd);
+  assert.ok(bareSpread > 0.4, `precondition: the wobbly field bends the roof, spread ${bareSpread}`);
+
+  const b = buildingScene();
+  const rigid = conformTilesToFloor(b.soup, DATA, { structures: FOOTPRINT });
+  assert.equal(rigid.structureCount, 1);
+  const rigidSpread = roofSpread(rigid, b.roofStart, b.roofEnd);
+  assert.ok(rigidSpread < bareSpread / 3 && rigidSpread < 0.25,
+    `roof re-seated rigidly: spread ${rigidSpread} (bare ${bareSpread})`);
+});
+
+test('structures: ground away from any footprint is byte-identical to the bare conform', () => {
+  const a = buildingScene();
+  const bare = conformTilesToFloor(a.soup, DATA);
+  const b = buildingScene();
+  const rigid = conformTilesToFloor(b.soup, DATA, { structures: FOOTPRINT });
+  // Compare the ground blanket verts far outside the footprint+feather (|x|>30).
+  const pa = bare.positions[0], pb = rigid.positions[0];
+  let compared = 0;
+  for (let i = 0; i < pa.length; i += 3) {
+    if (Math.abs(pa[i]) <= 30 || Math.abs(pa[i + 2]) <= 30) continue;
+    assert.equal(pb[i + 1], pa[i + 1], `far ground vert at ${pa[i]},${pa[i + 2]} unchanged`);
+    compared++;
+  }
+  assert.ok(compared > 20, `enough far verts compared (${compared})`);
+});
+
+test('structures: the road snap is vetoed under a footprint', () => {
+  // A wiggling masked road crossing the footprint: outside it snaps onto the
+  // floor, inside the structure veto leaves it to the (frozen) delta field.
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 3) {
+    verts.push(...horizTri(cx, 0, 0.8 * Math.sin(cx * 0.5)));
+    index.push(v, v + 1, v + 2); v += 3;
+  }
+  const mk = () => [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
+  const r = conformTilesToFloor(mk(), DATA, { groundMask: stripMask(3), structures: FOOTPRINT });
+  assert.ok(r.structSnapVetoed > 0, 'snap attempts under the footprint were vetoed');
+  const rBare = conformTilesToFloor(mk(), DATA, { groundMask: stripMask(3) });
+  assert.ok(r.vertsSnapped < rBare.vertsSnapped, 'fewer verts snapped than without structures');
+});
+
 test('short steep road-seam skirts snap flat; only TALL steep faces are wall-protected', () => {
   // Google road meshes carry short vertical seams/skirts that dip below the
   // visible road (LOD seals), plus steep micro-facets on every bump. Those are

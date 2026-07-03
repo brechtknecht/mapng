@@ -56,8 +56,32 @@ export const createScalarFieldGrid = ({ cellM = 8, unitsPerMeter } = {}) => {
    * @param {object} buildOpts
    * @param {number} [buildOpts.smoothPasses=2] box-blur passes (radius 1 each).
    * @param {number} [buildOpts.fallback=0] value when the grid had no samples at all.
+   * @param {Float32Array} [buildOpts.stiffness=null]  optional per-cell rigidity
+   *   s∈[0,1] (n×n, same layout — e.g. deform/structureStiffness.js). When given,
+   *   the median+inpaint result is refined by a WEIGHTED relaxation solve:
+   *
+   *     minimize  Σ (1−s_i)·(D_i − median_i)²  +  Σ_edges κ·min(s_i,s_j)·(D_i − D_j)²
+   *
+   *   min(), not max(): an edge is only as stiff as its SOFTER cell, so every
+   *   s=0 cell has zero smoothness coupling and keeps its median (measured) or
+   *   dilation value (inpainted) EXACTLY — the stiffness-free result away from
+   *   structures, and no dragging of measured road cells that happen to border
+   *   a building. Where s → 1 the data term vanishes and the smoothness term
+   *   dominates: the field is forced locally constant, so a rigid structure
+   *   standing on those cells is translated, not bent, and any contaminated
+   *   in-footprint medians are overruled by the consensus of the surrounding
+   *   ground. The transition is carried by the feathered rim (its cells hold
+   *   both a data anchor and a graded coupling), so stiffness rasters MUST be
+   *   feathered — a hard 1|0 mask would leave the core decoupled instead of
+   *   tied to its surroundings.
+   * @param {number} [buildOpts.stiffnessKappa=50]  smoothness-vs-data ratio at
+   *   s=1. 50 ⇒ a fully rigid cell weighs its neighbours ~200× its own (already
+   *   distrusted) datum — effectively rigid without ruining conditioning.
+   * @param {number} [buildOpts.stiffnessIters=250]  Gauss–Seidel sweeps. The grid
+   *   is small (AOI/6 m per side), so this is sub-millisecond; enough sweeps for
+   *   the constant to propagate across the largest plausible footprint.
    */
-  const build = ({ smoothPasses = 2, fallback = 0 } = {}) => {
+  const build = ({ smoothPasses = 2, fallback = 0, stiffness = null, stiffnessKappa = 50, stiffnessIters = 250 } = {}) => {
     const values = new Float32Array(n * n);
     const filled = new Uint8Array(n * n);
     let filledCount = 0;
@@ -76,6 +100,7 @@ export const createScalarFieldGrid = ({ cellM = 8, unitsPerMeter } = {}) => {
     } else {
       inpaint(values, filled, n);
       for (let p = 0; p < smoothPasses; p++) boxBlur(values, n);
+      if (stiffness) relaxWithStiffness(values, filled, stiffness, n, stiffnessKappa, stiffnessIters);
     }
 
     const sample = (x, z) => {
@@ -114,6 +139,39 @@ export const createScalarFieldGrid = ({ cellM = 8, unitsPerMeter } = {}) => {
 
   return { add, build, cellsPerSide: n };
 };
+
+// Weighted Gauss–Seidel relaxation (see build() doc): each sweep updates
+//   D_i ← (w_i·T_i + Σ_j κ_ij·D_j) / (w_i + Σ_j κ_ij)
+// with data weight w_i = filled_i·(1−s_i) against the median target T_i, and
+// edge smoothness κ_ij = κ·min(s_i, s_j) — an edge is only as stiff as its
+// softer cell, so s=0 cells are never pulled off their median/inpaint value.
+// In-place on `values`; the median targets are snapshotted first since `values`
+// doubles as the iterate.
+function relaxWithStiffness(values, filled, stiffness, n, kappa, iters) {
+  const target = values.slice(); // medians + inpaint — the data term's anchor
+  const sAt = (i) => (stiffness[i] > 1 ? 1 : stiffness[i] < 0 ? 0 : stiffness[i]);
+  for (let it = 0; it < iters; it++) {
+    let moved = 0;
+    for (let z = 0; z < n; z++) {
+      for (let x = 0; x < n; x++) {
+        const i = z * n + x;
+        const si = sAt(i);
+        if (si <= 0) continue; // zero stiffness: all its edges are zero → median/inpaint stands
+        let num = 0, den = 0;
+        if (filled[i]) { const w = 1 - si; num += w * target[i]; den += w; }
+        if (x > 0) { const k = kappa * Math.min(si, sAt(i - 1)); num += k * values[i - 1]; den += k; }
+        if (x < n - 1) { const k = kappa * Math.min(si, sAt(i + 1)); num += k * values[i + 1]; den += k; }
+        if (z > 0) { const k = kappa * Math.min(si, sAt(i - n)); num += k * values[i - n]; den += k; }
+        if (z < n - 1) { const k = kappa * Math.min(si, sAt(i + n)); num += k * values[i + n]; den += k; }
+        if (den <= 0) continue; // isolated stiff cell with no data — keep inpaint value
+        const next = num / den;
+        const d = next - values[i];
+        if (d > 1e-6 || d < -1e-6) { values[i] = next; moved++; }
+      }
+    }
+    if (!moved) break; // converged early — typical well before the cap
+  }
+}
 
 // Iterative nearest-filled dilation: repeatedly average each empty cell from its
 // already-filled 4-neighbours until none remain. Cheap and artefact-free for the

@@ -35,6 +35,16 @@ export const conformRoadmaskEnabled = () => {
   try { return localStorage.getItem('mapng_conform_roadmask') === '1'; } catch (_) { return false; }
 };
 
+// Sub-flag for semantic structure stiffness in the conform (deform/
+// structureStiffness.js): OSM building footprints freeze the delta field
+// locally constant (rigid re-seat, no roof shear) and veto the road snap
+// underneath. Default ON whenever the conform runs — it only PREVENTS damage
+// to buildings, so there is no reason to conform without it;
+// mapng_conform_stiffness='0' disables it for A/B comparison.
+export const conformStiffnessEnabled = () => {
+  try { return localStorage.getItem('mapng_conform_stiffness') !== '0'; } catch (_) { return true; }
+};
+
 /**
  * The preferred bake quality, persisted by the 3D-preview selector. Resolved
  * centrally so the preview AND the exports (which don't pass `quality`)

@@ -87,6 +87,16 @@
         <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Show each road's elevation profile as a wireframe line: orange = resolved road (carved), cyan = bridge/tunnel segment, red = unresolved. Display-only.">show profile wireframes (debug)</span>
       </label>
 
+      <!-- debug: conform delta-field bend heatmap (green→red = |ΔD| per cell,
+           blue tint = inpainted/no measured ground). Display-only — never re-bakes. -->
+      <label class="flex items-center gap-2 cursor-pointer pt-1">
+        <div class="relative">
+          <input type="checkbox" :checked="store.conformFieldShow" @change="store.conformFieldShow = $event.target.checked" class="peer sr-only" />
+          <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#ef4444] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+        </div>
+        <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Heatmap of the tile-conform delta field's cell-to-cell variation |ΔD|: where it's red, the conform's smooth field would BEND rigid structures (buildings) by that many metres per 6 m cell. Blue tint = cell had no measured ground (inpainted guess — typically building interiors). Display-only.">show conform bend heatmap (debug)</span>
+      </label>
+
       <!-- post-process smoothing -->
       <label class="flex items-center gap-2 cursor-pointer pt-1">
         <div class="relative">

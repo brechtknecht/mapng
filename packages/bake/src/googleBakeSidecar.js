@@ -54,7 +54,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
     cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
     corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
     // Per-bake assembly-pass overrides (sandbox / debug). undefined → worker env default.
-    weld, conform, roadmask,
+    weld, conform, roadmask, stiffness,
     // Route mode: extract the bare-earth tile ground for the chunk's .ter, with
     // the strategy the browser resolved (getGroundStrategy). undefined → off.
     extractGround, groundStrategy,
@@ -62,16 +62,20 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
   const heightMap = data.heightMap instanceof Float32Array
     ? data.heightMap
     : new Float32Array(data.heightMap);
-  // Ship the ground the conform mask snaps onto: roads PLUS flat-ground area
-  // polygons (parking, squares, pedestrian areas). The worker uses these ONLY
-  // for the conform mask now (station selection in corridor mode comes from
-  // corridorSegment, NOT OSM), so send them in EVERY mode and quality — incl.
-  // corridor/route bakes, which is where the road z-fight was. Bounded to that
-  // subset to keep the payload small.
+  // Ship what the conform's semantic passes consume: roads PLUS flat-ground
+  // area polygons (parking, squares, pedestrian areas) for the road-snap mask,
+  // AND structure footprints (buildings, man-made) for the stiffness field —
+  // without the latter the worker-side conform can rigidify NOTHING and
+  // buildings get bent by the delta field's wobble (the original "footprint
+  // protection changed nothing" failure: the filter here silently dropped every
+  // building). Station selection in corridor mode comes from corridorSegment,
+  // NOT OSM, so send them in EVERY mode and quality. Bounded to these subsets
+  // to keep the payload small.
   const allOsm = data.osmFeatures ?? [];
   const pickedOsm = allOsm.filter((f) => {
     if (f.type === 'road') return true;
     const t = f.tags || {};
+    if (t.building || t['building:part'] || t.man_made) return true; // structure stiffness
     return t.amenity === 'parking' || t.place === 'square' || t['area:highway'] ||
       (t.area === 'yes' && ['pedestrian', 'footway', 'living_street', 'service'].includes(t.highway));
   });
@@ -96,7 +100,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
       apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
       cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
       corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
-      weld, conform, roadmask,
+      weld, conform, roadmask, stiffness,
       extractGround, groundStrategy,
     },
   };

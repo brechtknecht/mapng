@@ -20,6 +20,7 @@
 
 import { sampleHeightAtScene, computeUnitsPerMeter, SCENE_SIZE } from './googleBakeCore.js';
 import { createScalarFieldGrid } from './scalarFieldGrid.js';
+import { rasterizeStructureStiffness } from './deform/structureStiffness.js';
 
 /**
  * @param {Array<{positions:ArrayLike<number>, index:ArrayLike<number>}>} meshes
@@ -78,10 +79,33 @@ import { createScalarFieldGrid } from './scalarFieldGrid.js';
  *   genuinely derived from the tiles). Where any bilinear neighbour is 0 the snap
  *   is skipped entirely: there the floor is a fallback (DEM) that never saw the
  *   road — snapping to it drags underpasses UP and viaducts DOWN by metres.
+ * @param {boolean} [opts.measureOnly=false]  build the delta field + its bend
+ *   diagnostics from Pass 1 and return WITHOUT touching any vertex (positions are
+ *   all null, Pass-2 stats are 0). This is the debug/overlay path: the preview
+ *   uses it to visualise WHAT the conform would do without allocating per-mesh
+ *   position copies.
+ * @param {Array<{ring,holes}>|null} [opts.structures=null]  OSM structure
+ *   footprints in scene coords (deform/structureStiffness.collectStructureRings).
+ *   When given, a per-cell stiffness raster gates the field build (see
+ *   scalarFieldGrid.build): inside a footprint the field is forced locally
+ *   constant, so the structure translates onto the corrected floor RIGIDLY
+ *   instead of being bent by the field's cell-to-cell wobble. Additionally the
+ *   road snap is attenuated by (1−stiffness) at each vertex — a facade over a
+ *   road pixel is never pulled to road height, semantically this time (the
+ *   heuristic wall gate stays as a fallback for unmapped structures). The
+ *   conform itself stays agnostic of WHAT a structure is — OSM semantics decide
+ *   upstream, precisely so unmapped photogrammetry (street trees!) is not
+ *   falsely rigidified.
  * @returns {{ positions:Array<Float32Array|null>, vertsMoved:number,
  *   meshesMoved:number, cellsFilled:number, residualBefore:number,
- *   residualAfter:number }}
+ *   residualAfter:number, fieldValues:Float32Array, fieldN:number,
+ *   fieldFilled:Uint8Array, fieldGrad:Float32Array, fieldGradP50M:number,
+ *   fieldGradP95M:number, fieldGradMaxM:number }}
  *   positions[i] is a NEW array when mesh i moved, else null (caller keeps its own).
+ *   fieldGrad is the per-cell BEND intensity of D — max |ΔD| to the 4-neighbours
+ *   in metres per cell step — with p50/p95/max taken over MEASURED cells only.
+ *   A rigid structure spanning k cells is bent by ~k× the local fieldGrad, so
+ *   these numbers quantify how much the smooth field distorts buildings.
  */
 export const conformTilesToFloor = (meshes, data, {
   cellM = 6,
@@ -96,6 +120,8 @@ export const conformTilesToFloor = (meshes, data, {
   wallNormalY = 0.34,
   wallMinSpanM = 1.5,
   floorCoveredMask = null,
+  measureOnly = false,
+  structures = null,
   diagnostics = false,
 } = {}) => {
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
@@ -194,7 +220,82 @@ export const conformTilesToFloor = (meshes, data, {
     }
   }
 
-  const field = grid.build({ smoothPasses, fallback: 0 });
+  // Semantic structure stiffness — rasterised onto THIS grid's resolution so the
+  // solve and the raster can't drift apart. Null (legacy behaviour) without
+  // structures.
+  const stiffness = structures && structures.length
+    ? rasterizeStructureStiffness(structures, { n: grid.cellsPerSide, unitsPerMeter: upm })
+    : null;
+
+  const field = grid.build({ smoothPasses, fallback: 0, stiffness });
+
+  // Bilinear stiffness read for the per-vertex snap veto (same cell-centre
+  // mapping as field.sample).
+  const stiffnessAt = stiffness ? (x, z) => {
+    const sn = grid.cellsPerSide;
+    const gx = ((x + SCENE_SIZE / 2) / SCENE_SIZE) * sn - 0.5;
+    const gz = ((z + SCENE_SIZE / 2) / SCENE_SIZE) * sn - 0.5;
+    const x0 = Math.min(sn - 1, Math.max(0, Math.floor(gx)));
+    const z0 = Math.min(sn - 1, Math.max(0, Math.floor(gz)));
+    const x1 = Math.min(sn - 1, x0 + 1);
+    const z1 = Math.min(sn - 1, z0 + 1);
+    const tx = Math.min(1, Math.max(0, gx - x0));
+    const tz = Math.min(1, Math.max(0, gz - z0));
+    return (
+      stiffness[z0 * sn + x0] * (1 - tx) * (1 - tz) +
+      stiffness[z0 * sn + x1] * tx * (1 - tz) +
+      stiffness[z1 * sn + x0] * (1 - tx) * tz +
+      stiffness[z1 * sn + x1] * tx * tz
+    );
+  } : null;
+
+  // --- Field bend diagnostics (always on — grid-sized, cheap) ----------------
+  // Per-cell bend intensity of D: max |ΔD| to the 4-neighbours, in metres per
+  // cell step. The delta pass subtracts D per VERTEX, so wherever D varies, a
+  // rigid structure spanning those cells gets BENT by that variation — a roof
+  // across k cells picks up ~k × the local value. Percentiles are taken over
+  // MEASURED cells only: inpainted cells (building interiors, water) are smooth
+  // by construction and would dilute the wobble the measured medians carry.
+  const fN = field.cellsPerSide;
+  const fV = field.values;
+  const fieldGrad = new Float32Array(fN * fN);
+  const measuredGrads = [];
+  for (let cz = 0; cz < fN; cz++) {
+    for (let cx = 0; cx < fN; cx++) {
+      const ci = cz * fN + cx;
+      const v = fV[ci];
+      let g = 0;
+      if (cx > 0) { const dd = Math.abs(v - fV[ci - 1]); if (dd > g) g = dd; }
+      if (cx + 1 < fN) { const dd = Math.abs(v - fV[ci + 1]); if (dd > g) g = dd; }
+      if (cz > 0) { const dd = Math.abs(v - fV[ci - fN]); if (dd > g) g = dd; }
+      if (cz + 1 < fN) { const dd = Math.abs(v - fV[ci + fN]); if (dd > g) g = dd; }
+      fieldGrad[ci] = g;
+      if (field.filled[ci]) measuredGrads.push(g);
+    }
+  }
+  measuredGrads.sort((a, b) => a - b);
+  const gradQ = (q) => (measuredGrads.length
+    ? measuredGrads[Math.min(measuredGrads.length - 1, Math.floor(q * measuredGrads.length))]
+    : 0);
+  const fieldGradP50M = gradQ(0.5);
+  const fieldGradP95M = gradQ(0.95);
+  const fieldGradMaxM = measuredGrads.length ? measuredGrads[measuredGrads.length - 1] : 0;
+
+  if (measureOnly) {
+    return {
+      positions: meshes.map(() => null),
+      vertsMoved: 0, meshesMoved: 0, vertsSnapped: 0, maxFloatFixedM: 0,
+      roadVertsCore: 0, roadDevMeanM: 0, roadDevMaxM: 0,
+      roadWallExcluded: 0, roadGateExcluded: 0, roadOverheadCount: 0,
+      cellsFilled: field.filledCount,
+      residualBefore: groundSamples ? residualAbsSum / groundSamples : 0,
+      residualAfter: 0, // Pass 2 did not run — measure-only
+      fieldValues: field.values, fieldN: fN, fieldFilled: field.filled,
+      fieldGrad, fieldGradP50M, fieldGradP95M, fieldGradMaxM,
+      structureCount: structures?.length ?? 0, structSnapVetoed: 0,
+      diag: null,
+    };
+  }
 
   // Optional per-cell diagnostics (opt-in — normal bakes don't pay for it). Lets
   // the test lab show WHERE the residual stays / grows and whether that
@@ -230,6 +331,7 @@ export const conformTilesToFloor = (meshes, data, {
   };
 
   let vertsMoved = 0, meshesMoved = 0, vertsSnapped = 0, maxFloatFixedM = 0;
+  let structSnapVetoed = 0;
   let postResidualSum = 0, postResidualCount = 0;
   // Core-carriageway flatness audit (mask w ≥ 0.9): how far the FINAL surface
   // deviates from the floor over the road proper — including the verts the snap
@@ -256,7 +358,19 @@ export const conformTilesToFloor = (meshes, data, {
       // pixel is left alone). The mask weight w restricts this to the road footprint.
       if (groundMask && nh) {
         const trusted = floorTrusted(x, z);
-        const m = trusted ? groundMask.sample(x, z) : 0;
+        let m = trusted ? groundMask.sample(x, z) : 0;
+        // Semantic snap veto: under a structure footprint the road mask must not
+        // pull geometry to road height (facades/roofs overlapping road pixels).
+        // Attenuated, not binary, so the footprint feather and the mask feather
+        // blend instead of tearing. Zeroed m also drops the vertex from the
+        // carriageway flatness audit — it is structure, not road surface.
+        if (stiffnessAt && m > 0) {
+          const sV = stiffnessAt(x, z);
+          if (sV > 0) {
+            m *= Math.max(0, 1 - sV);
+            if (sV >= 0.5) structSnapVetoed++;
+          }
+        }
         const floatBefore = Math.abs(p[i + 1] - terr);
         // Tapered ceiling instead of a hard cutoff: full snap up to
         // (maxSnapM − snapTaperM), fading to 0 at maxSnapM.
@@ -343,9 +457,15 @@ export const conformTilesToFloor = (meshes, data, {
     residualBefore: groundSamples ? residualAbsSum / groundSamples : 0,
     residualAfter: postResidualCount ? postResidualSum / postResidualCount : 0,
     // The built delta field, for inspection/visualisation (e.g. the test lab
-    // heatmap). Read-only — callers must not mutate.
+    // heatmap / preview overlay). Read-only — callers must not mutate.
     fieldValues: field.values,
     fieldN: field.cellsPerSide,
+    fieldFilled: field.filled,
+    fieldGrad, fieldGradP50M, fieldGradP95M, fieldGradMaxM,
+    // Structure stiffness (semantic building protection): footprints received,
+    // and road-snap attempts attenuated to ≤half weight under one.
+    structureCount: structures?.length ?? 0,
+    structSnapVetoed,
     diag,
   };
 };

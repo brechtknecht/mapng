@@ -231,6 +231,12 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   // "inserted" structure profile), red = unresolved. Display-only: NOT part of
   // the persisted strategy, so toggling never re-bakes.
   const groundProfilesShow = ref(false);
+  // Conform delta-field bend overlay (debug): heatmap of |ΔD| per field cell in
+  // the route preview — where the tile→ground conform's smooth field D varies
+  // cell-to-cell, i.e. where it would BEND rigid structures (buildings). Green →
+  // red by bend intensity; blue-tinted cells had no measured ground (inpainted).
+  // Display-only: NOT persisted, never re-bakes.
+  const conformFieldShow = ref(false);
   function persistGround() {
     try { localStorage.setItem(GROUND_LS, JSON.stringify(ground)); } catch (_) { /* private mode */ }
   }
@@ -261,7 +267,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     setQuality, setZOffset, setStripGround,
     bakeForPreview, rebake, reset, tryRestore, refineFromView,
     // drivable-ground strategy (Scene-settings menu)
-    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow, groundProfilesShow,
+    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow, groundProfilesShow, conformFieldShow,
     setGroundSource, setGroundFilter, setGroundFilterParam,
     setGroundPostOn, setGroundPostEffect, setGroundPostParam, setGroundMinNormalY, setGroundSnapRoads, setGroundCarveRoads,
   };

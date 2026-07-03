@@ -189,7 +189,8 @@ import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 import { extractTileGround } from '@mapng/bake/ground/extractTileGround';
 import { buildMeshFromHeights } from '@mapng/bake/ground/heightField';
 import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
-import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
+import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
+import { computeUnitsPerMeter, sampleHeightAtScene, SCENE_SIZE } from '@mapng/bake/googleBakeCore';
 import { useGoogleTilesStore } from '../../stores/googleTilesStore.js';
 
 const { t } = useI18n({ useScope: 'global' });
@@ -346,8 +347,96 @@ const applyProfileLines = (c, prof) => {
   c.profileLines = grp;
 };
 
+// Debug heatmap: the conform delta-field's per-cell bend |ΔD| over this chunk,
+// measured LIVE against the extracted floor (the same surface the route conform
+// seats the tiles onto). Only bending cells are drawn (|ΔD| ≥ 0.05 m/cell):
+// green → red over 0.05…0.5 m, blended toward blue when the cell had no measured
+// ground (inpainted guess — typically a building interior). Where a red/orange
+// patch sits under a bent roof, the delta pass is what bent it, by ~|ΔD| × cells
+// spanned. The tiles themselves are untouched — conformTilesToFloor runs
+// measureOnly, no positions are allocated or applied.
+const BEND_MIN_M = 0.05; // draw threshold — below this the field can't visibly bend anything
+const BEND_MAX_M = 0.5;  // full-red saturation, metres per 6 m cell
+const applyConformField = (c, g) => {
+  if (c.conformField) { c.object.remove(c.conformField); disposeMesh(c.conformField); c.conformField = null; }
+  if (!store.conformFieldShow || !g || !c.tilesNode || !c.bounds) return;
+  // Tile soup in the conform's frame — group-local X/Z in scene units, Y in
+  // metres — using the same localisation heightField.js uses (strips the preview
+  // wrapper's upm scale + z-lift, correct regardless of parenting).
+  c.tilesNode.updateMatrixWorld(true);
+  const groupInv = c.tilesNode.matrixWorld.clone().invert();
+  const localMat = new THREE.Matrix4();
+  const v = new THREE.Vector3();
+  const soup = [];
+  c.tilesNode.traverse((node) => {
+    if (!node.isMesh || !node.geometry?.attributes?.position) return;
+    const pos = node.geometry.attributes.position;
+    localMat.multiplyMatrices(groupInv, node.matrixWorld);
+    const arr = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      v.set(pos.getX(i), pos.getY(i), pos.getZ(i)).applyMatrix4(localMat);
+      arr[i * 3] = v.x; arr[i * 3 + 1] = v.y; arr[i * 3 + 2] = v.z;
+    }
+    let index = node.geometry.index?.array;
+    if (!index) {
+      index = new Uint32Array(pos.count);
+      for (let i = 0; i < pos.count; i++) index[i] = i;
+    }
+    soup.push({ positions: arr, index });
+  });
+  if (!soup.length) return;
+  // The floor the route conform targets IS the extracted tile ground (.ter);
+  // datum stays the chunk's (g.heightMap is absolute metres on the stub grid).
+  const data = { bounds: c.bounds, width: g.width, height: g.height, minHeight: c.minHeight, heightMap: g.heightMap };
+  const r = conformTilesToFloor(soup, data, { measureOnly: true });
+  console.info(
+    `[RoutePreview] chunk ${c.index}: conform field ${r.fieldN}×${r.fieldN} (${r.cellsFilled} measured cells), ` +
+    `bend |ΔD| p50 ${r.fieldGradP50M.toFixed(2)}/p95 ${r.fieldGradP95M.toFixed(2)}/max ${r.fieldGradMaxM.toFixed(2)} m/cell`,
+  );
+  const upm = computeUnitsPerMeter(c._stub) || 1;
+  const n = r.fieldN;
+  const cellU = SCENE_SIZE / n;
+  const half = SCENE_SIZE / 2;
+  const liftU = 0.5 * upm; // float the quads off the ground so they read
+  const positions = [], colors = [], indices = [];
+  for (let cz = 0; cz < n; cz++) {
+    for (let cx = 0; cx < n; cx++) {
+      const ci = cz * n + cx;
+      const bend = r.fieldGrad[ci];
+      if (bend < BEND_MIN_M) continue;
+      const t = Math.min(1, (bend - BEND_MIN_M) / (BEND_MAX_M - BEND_MIN_M));
+      // green → yellow → red ramp; inpainted cells pull toward blue so building
+      // interiors (no measured ground) are tellable from measured wobble.
+      let cr, cg, cb;
+      if (t < 0.5) { const s = t * 2; cr = 0.13 + (0.98 - 0.13) * s; cg = 0.77 + (0.83 - 0.77) * s; cb = 0.37 + (0.15 - 0.37) * s; }
+      else { const s = (t - 0.5) * 2; cr = 0.98 - (0.98 - 0.94) * s; cg = 0.83 - (0.83 - 0.27) * s; cb = 0.15 + (0.27 - 0.15) * s; }
+      if (!r.fieldFilled[ci]) { cr = cr * 0.55 + 0.23 * 0.45; cg = cg * 0.55 + 0.51 * 0.45; cb = cb * 0.55 + 0.96 * 0.45; }
+      const x0 = -half + cx * cellU, x1 = x0 + cellU;
+      const z0 = -half + cz * cellU, z1 = z0 + cellU;
+      const y = (sampleHeightAtScene(data, (x0 + x1) / 2, (z0 + z1) / 2) - c.minHeight) * upm + liftU;
+      const base = positions.length / 3;
+      positions.push(x0, y, z0, x1, y, z0, x1, y, z1, x0, y, z1);
+      for (let k = 0; k < 4; k++) colors.push(cr, cg, cb);
+      indices.push(base, base + 2, base + 1, base, base + 3, base + 2);
+    }
+  }
+  if (!indices.length) return;
+  const geom = new THREE.BufferGeometry();
+  geom.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3));
+  geom.setAttribute('color', new THREE.BufferAttribute(new Float32Array(colors), 3));
+  geom.setIndex(new THREE.BufferAttribute(new Uint32Array(indices), 1));
+  const mesh = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.55, depthTest: false, side: THREE.DoubleSide,
+  }));
+  mesh.name = '__conform_field_debug';
+  mesh.renderOrder = 998; // over the tiles, under the profile lines (999)
+  c.object.add(mesh);
+  c.conformField = mesh;
+};
+
 const extractChunkGround = (c) => {
   if (c.groundMesh) { c.object.remove(c.groundMesh); disposeMesh(c.groundMesh); c.groundMesh = null; }
+  if (c.conformField) { c.object.remove(c.conformField); disposeMesh(c.conformField); c.conformField = null; }
   if (store.ground.source !== 'tiles') { if (c.terrainNode) c.terrainNode.visible = true; return; }
   if (!c.tilesNode || !c.bounds) return;
   if (!c._stub) {
@@ -374,6 +463,7 @@ const extractChunkGround = (c) => {
     }
   }
   applyProfileLines(c, prof);
+  applyConformField(c, g);
   const upm = computeUnitsPerMeter(c._stub) || 1;
   const heights = new Float32Array(g.heightMap.length);
   for (let i = 0; i < heights.length; i++) heights[i] = (g.heightMap[i] - c.minHeight) * upm;
@@ -396,6 +486,7 @@ let _groundTimer = null;
 const scheduleGround = () => { clearTimeout(_groundTimer); _groundTimer = setTimeout(applyGround, 220); };
 watch(() => store.ground, scheduleGround, { deep: true });
 watch(() => store.groundProfilesShow, scheduleGround);
+watch(() => store.conformFieldShow, scheduleGround);
 
 const loadAll = async () => {
   loading.value = true;
@@ -411,7 +502,7 @@ const loadAll = async () => {
       out.push({
         index: c.index, object, placement: c.placement, tilesNode, terrainNode,
         bounds: c.bounds || null, minHeight: Number(c.minHeight) || 0,
-        osmRoads: c.osmRoads || [], groundMesh: null, _stub: null,
+        osmRoads: c.osmRoads || [], groundMesh: null, conformField: null, _stub: null,
       });
       loaded.value = [...out]; // progressive reveal
     }
