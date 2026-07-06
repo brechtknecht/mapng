@@ -5,58 +5,84 @@
 import proj4 from 'proj4';
 import { resampleToMeterGrid, resampleImageToMeterGrid } from './terrainResampler.js';
 
-let worker = null;
 let messageId = 0;
-const pendingMessages = new Map();
 
-/**
- * Lazily create (or return existing) worker instance.
- */
-const getWorker = () => {
-    if (worker) return worker;
-    try {
-        worker = new Worker(
+// Small worker POOL instead of the old singleton: route mode fetches several
+// chunks concurrently, and their per-pixel resamples used to serialize behind
+// the one shared worker — the single biggest CPU stall of the parallel fetch.
+// Lazily grown (a worker is only spawned when all existing ones are busy), so
+// the single-tile flow still costs exactly one worker.
+const POOL_SIZE = Math.max(1, Math.min(4, (globalThis.navigator?.hardwareConcurrency || 4) - 2));
+const pool = []; // [{ w, busy, pending: Map<id, {resolve, reject, onProgress}> }]
+let poolBroken = false; // Worker construction failed — main-thread fallback only
+
+const spawnWorker = () => {
+    const rec = {
+        w: new Worker(
             new URL('./resamplerWorker.js', import.meta.url),
             { type: 'module' }
-        );
-        worker.onmessage = (e) => {
-            const { id, type, error, ...data } = e.data;
-            const pending = pendingMessages.get(id);
-            if (!pending) return;
-            if (type === 'progress') {
-                pending.onProgress?.(data);
-                return;
-            }
-            pendingMessages.delete(id);
-            if (type === 'error') pending.reject(new Error(error));
-            else pending.resolve(data);
-        };
-        worker.onerror = (e) => {
-            console.error('[ResamplerClient] Uncaught error:', e);
-            // Reject all pending, force recreation on next call
-            for (const [, p] of pendingMessages) p.reject(new Error('Worker error'));
-            pendingMessages.clear();
-            worker.terminate();
-            worker = null;
-        };
-        return worker;
+        ),
+        busy: 0,
+        pending: new Map(),
+    };
+    rec.w.onmessage = (e) => {
+        const { id, type, error, ...data } = e.data;
+        const pending = rec.pending.get(id);
+        if (!pending) return;
+        if (type === 'progress') {
+            pending.onProgress?.(data);
+            return;
+        }
+        rec.pending.delete(id);
+        rec.busy--;
+        if (type === 'error') pending.reject(new Error(error));
+        else pending.resolve(data);
+    };
+    rec.w.onerror = (e) => {
+        console.error('[ResamplerClient] Uncaught error:', e);
+        // Reject THIS worker's pending, drop it from the pool — the next call
+        // spawns a replacement. Other workers' jobs keep running.
+        for (const [, p] of rec.pending) p.reject(new Error('Worker error'));
+        rec.pending.clear();
+        rec.busy = 0;
+        rec.w.terminate();
+        const idx = pool.indexOf(rec);
+        if (idx >= 0) pool.splice(idx, 1);
+    };
+    pool.push(rec);
+    return rec;
+};
+
+/**
+ * Pick the least-busy worker, spawning a new one when all are busy and the
+ * pool has headroom. Returns null when workers are unavailable (fallback).
+ */
+const getWorker = () => {
+    if (poolBroken) return null;
+    try {
+        if (pool.length === 0 || (pool.length < POOL_SIZE && pool.every((r) => r.busy > 0))) {
+            spawnWorker();
+        }
+        return pool.reduce((a, b) => (b.busy < a.busy ? b : a));
     } catch (e) {
         console.warn('[ResamplerClient] Failed to create worker, falling back to main thread:', e);
+        poolBroken = true;
         return null;
     }
 };
 
 /**
- * Post a message to the worker and return a promise for the response.
+ * Post a message to a pool worker and return a promise for the response.
  */
 const postToWorker = (message, transferables = [], options = {}) => {
-    const w = getWorker();
-    if (!w) return null; // signal caller to use fallback
+    const rec = getWorker();
+    if (!rec) return null; // signal caller to use fallback
 
     const id = ++messageId;
+    rec.busy++;
     return new Promise((resolve, reject) => {
-        pendingMessages.set(id, { resolve, reject, onProgress: options.onProgress });
-        w.postMessage({ ...message, id }, transferables);
+        rec.pending.set(id, { resolve, reject, onProgress: options.onProgress });
+        rec.w.postMessage({ ...message, id }, transferables);
     });
 };
 

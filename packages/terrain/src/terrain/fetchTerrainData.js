@@ -42,6 +42,21 @@ import { canvasToSatelliteBlobUrl } from './tileLoaders.js';
  * @param {object}   [generationOptions]
  * @returns {Promise<object>} TerrainData — heightMap, bounds, satellite/OSM textures, …
  */
+/**
+ * The exact WGS84 bounds fetchTerrainData will query OSM for, given a chunk
+ * centre + box size — deterministic (same createLocalToWGS84 projection the
+ * resample uses). Exported so the route export can issue ONE union Overpass
+ * query over all its chunks' boxes up front and hand each chunk its slice via
+ * generationOptions.prefetchedOSM.
+ */
+export const computeOSMOutputBounds = (center, resolution) =>
+  getOutputBounds(
+    createLocalToWGS84(center.lat, normalizeLng(center.lng)),
+    resolution,
+    resolution,
+    null,
+  );
+
 export const fetchTerrainData = async (
   center,
   resolution,
@@ -61,6 +76,10 @@ export const fetchTerrainData = async (
     generateHybridTextureAsset = true,
     globalTileConcurrency = 20,
     targetBounds = null,
+    // Route mode: (outputBounds) => Promise<{features, requestInfo}>. When set,
+    // the per-chunk Overpass round-trip is skipped entirely — the route issued
+    // ONE union query up front and this resolver slices this chunk out of it.
+    prefetchedOSM = null,
   } = generationOptions || {};
   // Normalize longitude to handle world wrapping
   const normalizedCenter = {
@@ -99,7 +118,9 @@ export const fetchTerrainData = async (
     height,
     targetBounds,
   );
-  const osmPromise = includeOSM ? fetchOSMDataWithInfo(osmOutputBounds) : null;
+  const osmPromise = includeOSM
+    ? (prefetchedOSM ? prefetchedOSM(osmOutputBounds) : fetchOSMDataWithInfo(osmOutputBounds))
+    : null;
 
   // 2. Try GPXZ / USGS
   let rawData = null;

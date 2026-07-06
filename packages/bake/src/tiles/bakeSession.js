@@ -11,6 +11,7 @@ import {
   ensureSidecarSession,
   exportAssemblyViaSidecar,
   endBakeSession,
+  prefetchViaSidecar,
 } from '../googleBakeSidecar.js';
 import { bakeCacheKey } from './bakeCache.js';
 import { resolveBakeOptions } from './bakeFlags.js';
@@ -195,6 +196,25 @@ export async function refineGoogleTilesBake(data, options, station) {
   const group = await bakeRefinementViaSidecar(key, station, onProgress);
   _bakeCache = { key, promise: Promise.resolve(group) };
   return group;
+}
+
+/**
+ * Warm the sidecar's Google-tile DISK cache for this AOI: sweep-only worker
+ * run that downloads every tile the real bake will select and exits. No
+ * session, no result, nothing persisted browser-side. Fire-and-forget from
+ * the route export while earlier chunks are still baking — the chunk's real
+ * bake later replays tile content from disk. No-op (false) without a sidecar.
+ *
+ * Keyed separately from the real bake (`prefetch|` prefix): the real bake's
+ * key isn't knowable yet (it includes the chunk-0 anchor), and a prefetch job
+ * must never satisfy a real bake's join.
+ */
+export async function prefetchGoogleTilesSweep(data, options = {}) {
+  if (!(await sidecarAvailable())) return false;
+  const { forceRebake: _ignored, onProgress, ...bakeOptions } = resolveBakeOptions(options);
+  const key = `prefetch|${bakeCacheKey(data, bakeOptions)}`;
+  await prefetchViaSidecar(data, { ...bakeOptions, onProgress }, key);
+  return true;
 }
 
 /**

@@ -14,7 +14,8 @@
 // sidecar worker, and per-bounds caching makes re-runs of unchanged chunks free.
 
 import JSZip from 'jszip';
-import { fetchTerrainData } from '@mapng/terrain/terrain';
+import { fetchTerrainData, computeOSMOutputBounds } from '@mapng/terrain/terrain';
+import { fetchOSMUnionRaw, parseOverpassResponse } from '@mapng/fetching';
 import { exportToGLB } from '@mapng/export/export3d';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getGoogleTilesZOffset, googleBakeSidecarAvailable, endGoogleTilesSession } from '@mapng/bake/google3dTiles';
@@ -83,6 +84,17 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // OSM fetch is hidden entirely behind the current chunk's bake. Look-ahead is
   // bounded to 1 to cap memory (only ever 2 terrainData resident at once).
   const terrainCache = new Array(total).fill(null); // i → { promise, fetchMs }
+  // ONE union Overpass round-trip for the whole route (see exportRouteLevel.js);
+  // each chunk's resolver slices its box out of the merged raw response. Lazy —
+  // only fired when the first chunk fetch actually starts.
+  let unionOsmPromise = null;
+  const prefetchedOSM = async (outputBounds) => {
+    unionOsmPromise ??= fetchOSMUnionRaw(
+      chunks.map((c) => computeOSMOutputBounds(c.center, chunkSizeM)),
+    );
+    const { data, requestInfo } = await unionOsmPromise;
+    return { features: parseOverpassResponse(data, outputBounds), requestInfo };
+  };
   const startFetch = (i) => {
     if (i < 0 || i >= total || terrainCache[i]) return terrainCache[i];
     const t0 = performance.now();
@@ -98,6 +110,9 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       undefined,
       undefined, // terrain progress is surfaced per-chunk by processChunk
       signal,
+      // The bake only consumes the OSM texture (centerTextureType 'osm') — the
+      // hybrid texture bake was pure wasted canvas work on every chunk.
+      { generateHybridTextureAsset: false, prefetchedOSM },
     ).then((d) => { rec.fetchMs = Math.round(performance.now() - t0); return d; });
     // A background prefetch may settle (or reject on abort) before anything
     // awaits it — mark it handled so a rejection can't surface as an unhandled
@@ -127,6 +142,12 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // One route-wide Google vertical anchor, captured from chunk 0 (baked first)
   // and reused by every later chunk so the stitched chunks don't float apart.
   let sharedGroundOffsetM = null;
+  // Gate for chunks 1..N: opens on chunk 0's EARLY anchor event (the worker
+  // emits it right after its sweep + ground probe, relayed through
+  // onBakeProgress), or at the latest when chunk 0's bake completes
+  // (onGroundOffset — the only path for cached/restored bakes).
+  let anchorResolve, anchorReject;
+  const anchorGate = new Promise((res, rej) => { anchorResolve = res; anchorReject = rej; });
   // .ter-from-tiles mode: bake with the SAME extraction+snap options the level
   // export uses — they're part of the bake key (tsnap), so this keeps the route
   // bake and a later export on ONE shared bake instead of two divergent ones.
@@ -172,11 +193,23 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       // Google's ground on its own centre's DEM and neighbours float at seams.
       ...(anchorAtBake != null ? { googleGroundOffsetM: anchorAtBake } : {}),
       ...(preferTiles ? { googleExtractGround: true, googleGroundStrategy: groundStrategy } : {}),
-      onGroundOffset: (off) => { if (i === 0 && Number.isFinite(off)) sharedGroundOffsetM = off; },
+      onGroundOffset: (off) => {
+        if (i === 0 && sharedGroundOffsetM == null && Number.isFinite(off)) sharedGroundOffsetM = off;
+      },
       onMaskStats: (s) => { maskStats = s; },
       onBakeStats: (s) => { if (s) bakeStats = s; },
       // Structured sweep progress → per-chunk map fill (station/stations).
       onBakeProgress: (p) => {
+        if (p?.phase === 'anchor') {
+          // Chunk 0's early anchor — open the pool gate now instead of after
+          // chunk 0's whole bake+encode. See anchorGate above.
+          if (i === 0 && sharedGroundOffsetM == null && Number.isFinite(p.groundOffsetM)) {
+            sharedGroundOffsetM = p.groundOffsetM;
+            console.info(`[routeBake] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (early, from chunk 0's sweep)`);
+            anchorResolve();
+          }
+          return; // not a sweep tick — don't reset the bake fraction
+        }
         const frac = p?.stations > 0 ? p.station / p.stations : 0;
         progress.setBakeFraction(i, frac, `${p.visible ?? 0} tiles, ${(p.downloading ?? 0) + (p.parsing ?? 0)} in flight`);
       },
@@ -262,16 +295,20 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
 
   onProgress?.(progress.snapshot()); // initial all-pending snapshot
   primePrefetch();
-  // Bake chunk 0 alone first to learn the shared vertical anchor; every other
-  // chunk then seats on it, so adjacent chunks meet at the seam instead of
-  // floating. Costs one chunk of serial latency up front, then the pool fans
-  // out the rest `limit`-wide as before.
-  if (total > 0) {
-    const first = claim(); // index 0
-    primePrefetch();
-    await poolWorkerStep(first);
-  }
-  await Promise.all(Array.from({ length: limit }, () => poolWorker()));
+  // Chunk 0 starts first to learn the shared vertical anchor; every other
+  // chunk seats on it, so adjacent chunks meet at the seam instead of
+  // floating. The pool no longer waits for chunk 0's WHOLE bake though: the
+  // gate opens on the worker's early anchor event (sweep + probe done — the
+  // value can't change after that), overlapping chunk 0's conform/encode with
+  // the other chunks' bakes. Cached bakes emit no live progress — then the
+  // gate opens when chunk 0 completes, which is the old serial behaviour.
+  const first = claim(); // index 0
+  primePrefetch();
+  const chunk0 = poolWorkerStep(first);
+  chunk0.then(() => anchorResolve(), (err) => anchorReject(err));
+  await anchorGate; // throws if chunk 0 failed before an anchor existed
+  // chunk0 rides along so a post-anchor chunk-0 failure still fails the run.
+  await Promise.all([chunk0, ...Array.from({ length: limit }, () => poolWorker())]);
 
   // Assemble in route order — the pool finishes chunks out of order.
   for (let i = 0; i < total; i++) {

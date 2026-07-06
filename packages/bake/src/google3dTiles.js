@@ -24,6 +24,7 @@ export {
   restoreBakedGoogle3DTiles,
   refineGoogleTilesBake,
   exportGoogleTilesViaSidecar,
+  prefetchGoogleTilesSweep,
   endGoogleTilesSession,
   disposeBakeGroup,
   clearGoogleTilesCache,

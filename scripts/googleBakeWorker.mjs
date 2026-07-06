@@ -955,6 +955,11 @@ async function startBake(data, options, outPath) {
     // single-tile export). null strategy → extractTileGround defaults.
     extractGround = false,
     groundStrategy = null,
+    // Prefetch mode: run the station sweep ONLY (downloads the Google tiles →
+    // warm disk cache), then exit. No transform/weld/conform/atlas/write. The
+    // route export fires these for later chunks while chunk 0's real bake runs,
+    // so their eventual bakes replay tile content from local disk.
+    prefetchOnly = false,
   } = options;
 
   if (!apiKey) throw new Error('bake worker: missing apiKey');
@@ -1034,6 +1039,25 @@ async function startBake(data, options, outPath) {
     );
   }
 
+  if (prefetchOnly) {
+    // Tiles are on disk (TileDiskCache wrote them during the sweep) — that was
+    // the whole job. No session, no result container; the plugin's 'done'
+    // handling is result-agnostic and the client never fetches a result.
+    emit({
+      type: 'done',
+      meshes: 0,
+      bytes: 0,
+      selected: selectedTiles.size,
+      kept: 0,
+      stations: stations.length,
+      timedOut,
+      elapsedMs: Math.round(elapsedMs),
+      session: false,
+      prefetch: true,
+    });
+    return null;
+  }
+
   // Vertical anchor: probe over the kept tiles' scenes.
   const keptForProbe = selectFinestCovering(selectedTiles);
   const forEachKeptMesh = (cb) => {
@@ -1060,6 +1084,11 @@ async function startBake(data, options, outPath) {
     `[bakeWorker] vertical anchor: googleGroundAlt=${googleGroundAlt.toFixed(1)}m (ellipsoidal), ` +
     `mapngGroundY=${transformMesh.mapngGroundY.toFixed(1)}m, minHeight=${transformMesh.minH.toFixed(1)}m`,
   );
+  // Surface the anchor NOW (sweep + probe are done — it can never change from
+  // here). Route mode gates chunks 1..N on chunk 0's anchor; without this event
+  // they'd wait for chunk 0's ENTIRE bake + export instead of just its sweep.
+  // Progress-typed so the plugin relays it over SSE like any other progress.
+  emit({ type: 'progress', phase: 'anchor', groundOffsetM: transformMesh.groundOffsetM });
 
   const session = {
     data, options, tiles, cam, frame, stations, selectedTiles,
@@ -1348,7 +1377,7 @@ try {
   process.exit(1);
 }
 
-if (session.options.session !== true) {
+if (session?.options?.session !== true) { // null session ⇒ prefetch-only run
   process.exit(0);
 }
 

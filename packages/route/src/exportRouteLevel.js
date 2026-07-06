@@ -18,10 +18,11 @@
 // its chunk-centre offset from the combined-terrain centre (metres), lifted by
 // (chunkMinHeight − combinedMinHeight) so its ground meets the terrain datum.
 
-import { fetchTerrainData } from '@mapng/terrain/terrain';
+import { fetchTerrainData, computeOSMOutputBounds } from '@mapng/terrain/terrain';
+import { fetchOSMUnionRaw, parseOverpassResponse } from '@mapng/fetching';
 import { exportToGLB } from '@mapng/export/export3d';
 import { exportBeamNGLevel } from '@mapng/export/exportBeamNGLevel';
-import { exportGoogleTilesViaSidecar, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION, TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
+import { exportGoogleTilesViaSidecar, prefetchGoogleTilesSweep, getGoogleTilesZOffset, endGoogleTilesSession, purgeRetainedBakes, BAKE_FORMAT_VERSION, TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
@@ -172,7 +173,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // concurrently. Each chunk fans out to its own keyed sidecar bake job +
     // its own Blender process, so several run safely in parallel; bounded
     // because each is heap/CPU heavy. Mirrors routeBake.js's bake pool.
-    concurrency = 2,
+    concurrency = 3,
   } = opts;
   if (!Array.isArray(chunks) || chunks.length === 0) throw new Error('exportRouteAsBeamNGLevel: no chunks');
   if (!googleApiKey) throw new Error('exportRouteAsBeamNGLevel: missing tiles credential');
@@ -232,11 +233,66 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // regardless of the chosen base texture (a satellite route used to skip OSM
     // and lose the mask). Texture-ASSET generation stays gated by `tex` below.
     const includeOSM = true;
+    // ONE union Overpass round-trip for the whole route instead of one query
+    // per chunk: N racing queries from one IP used to pile onto the public
+    // mirrors' per-IP slots and serialize (the dominant fetch-phase cost).
+    // Each chunk's resolver slices its box out of the merged raw response —
+    // parseOverpassResponse's bbox clip does the per-chunk split. Bounds are
+    // deterministic from centre + size (computeOSMOutputBounds = the exact
+    // bounds fetchTerrainData would have queried itself).
+    const unionOsmPromise = fetchOSMUnionRaw(
+      chunks.map((c) => computeOSMOutputBounds(c.center, chunkSizeM)),
+    );
+    const prefetchedOSM = async (outputBounds) => {
+      const { data, requestInfo } = await unionOsmPromise;
+      return { features: parseOverpassResponse(data, outputBounds), requestInfo };
+    };
     const genOpts = {
       generateOSMTextureAsset: tex === 'osm',
       generateHybridTextureAsset: tex === 'hybrid',
+      prefetchedOSM,
     };
-    const terrainConcurrency = (useGPXZ || useUSGS) ? 2 : 4;
+    // GPXZ/USGS fan out internally and are rate-limited — keep the low cap.
+    // The global-tile path is pure network (tiles are disk/IndexedDB-cached,
+    // OSM is one shared union query now), so run wider.
+    const terrainConcurrency = (useGPXZ || useUSGS) ? 2 : 8;
+
+    // Google-tile PREFETCH: as soon as a chunk's terrain lands, warm the
+    // sidecar's tile disk cache for it (sweep-only worker — downloads exactly
+    // the tiles the real bake will select and exits). This overlaps the two
+    // big network phases: previously chunks 1..N downloaded ZERO Google bytes
+    // until chunk 0's whole anchor bake finished, which is most of the
+    // "queued for tile bake" dead time. Fire-and-forget — a failed or late
+    // prefetch only costs warmth, never correctness (the real bake just hits
+    // the network as before). Chunks whose REAL bake has already started are
+    // skipped (their prefetch would be pure duplicate downloads).
+    const bakeStarted = new Set(); // chunk indices whose real bake began
+    const prefetchQueue = [];
+    let prefetchActive = 0;
+    const PREFETCH_LIMIT = 2;
+    const pumpPrefetch = () => {
+      while (prefetchActive < PREFETCH_LIMIT && prefetchQueue.length) {
+        const { i, run } = prefetchQueue.shift();
+        if (bakeStarted.has(i) || signal?.aborted) continue;
+        prefetchActive++;
+        run()
+          .catch((err) => console.info(`[routeLevel] tile prefetch ${i} skipped: ${err?.message ?? err}`))
+          .finally(() => { prefetchActive--; pumpPrefetch(); });
+      }
+    };
+    const schedulePrefetch = (i, terrainData) => {
+      if (i === 0) return; // chunk 0 IS the first real bake — nothing to hide
+      prefetchQueue.push({
+        i,
+        run: () => prefetchGoogleTilesSweep(terrainData, {
+          apiKey: googleApiKey,
+          quality: tier.googleQuality,
+          corridorSegment: chunks[i].segment,
+          corridorHalfWidthM: tier.halfWidthM,
+        }),
+      });
+      pumpPrefetch();
+    };
 
     const terrains = new Array(total);
     let nextChunk = 0;
@@ -256,6 +312,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           chunks[i].center, chunkSizeM, includeOSM, useUSGS, useGPXZ, useKRON86, gpxzApiKey,
           undefined, undefined, signal, genOpts,
         );
+        schedulePrefetch(i, terrains[i]);
         progress.setPhase(i, 'pending', 'terrain fetched, queued for tile bake');
       }
     };
@@ -298,6 +355,12 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // would otherwise re-seat Google's ground onto its OWN centre's DEM height,
     // so neighbours disagree at the shared seam and the next chunk floats.
     let sharedGroundOffsetM = null;
+    // Gate for chunks 1..N: opens the moment chunk 0's anchor is KNOWN — via the
+    // worker's early progress event (right after its sweep + ground probe), or
+    // at the latest when chunk 0's assembly returns (cached/restored bakes emit
+    // no live progress). Rejects if chunk 0 fails before an anchor exists.
+    let anchorResolve, anchorReject;
+    const anchorGate = new Promise((res, rej) => { anchorResolve = res; anchorReject = rej; });
 
     // Assemble ONE chunk: keyed sidecar bake → Blender DAE → preview GLB. All
     // three are per-chunk independent, so the pool below runs several at once.
@@ -307,6 +370,7 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       // then sets the shared value), the shared value for chunks 1..N. Captured
       // up front so the session-end below recomputes the exact bake key.
       const assemblyAnchor = sharedGroundOffsetM;
+      bakeStarted.add(i); // a still-queued prefetch for this chunk is now pointless
       progress.setPhase(i, 'bake', `assembling tiles ${i + 1}/${total}`);
       // Bake/conform against this chunk's SLICE OF THE COMBINED terrain (the
       // surface the level drives on), not its independently-fetched DEM. Keeps
@@ -328,13 +392,28 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           ...(assemblyAnchor != null ? { sharedGroundOffsetM: assemblyAnchor } : {}),
           // Extract the chunk's .ter ground (shared anchor ⇒ one absolute frame).
           ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
-          onProgress: (p) => progress.setPhase(i, 'bake', `tiles ${i + 1}/${total}: ${p.visible ?? 0} loaded`),
+          onProgress: (p) => {
+            if (p?.phase === 'anchor') {
+              // Chunk 0's early anchor (worker emits it right after sweep+probe):
+              // set the shared value and open the gate — chunks 1..N start baking
+              // while chunk 0 is still conforming/exporting/converting.
+              if (i === 0 && sharedGroundOffsetM == null && Number.isFinite(p.groundOffsetM)) {
+                sharedGroundOffsetM = p.groundOffsetM;
+                console.info(`[routeLevel] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (early, from chunk 0's sweep)`);
+                anchorResolve();
+              }
+              return; // not a sweep-progress tick — don't clobber the tile count
+            }
+            progress.setPhase(i, 'bake', `tiles ${i + 1}/${total}: ${p.visible ?? 0} loaded`);
+          },
         },
         // Unique material prefix per chunk so BeamNG's global material resolution
         // doesn't cross-wire textures. zOffsetM:0 — z-offset is positional.
         { worldSize: chunkSizeM, zOffsetM: 0, materialPrefix: `c${pad2(i)}_` },
       );
-      if (i === 0 && Number.isFinite(exported?.groundOffsetM)) {
+      if (i === 0 && sharedGroundOffsetM == null && Number.isFinite(exported?.groundOffsetM)) {
+        // Fallback path: no live progress event fired (bake restored from
+        // IndexedDB / job already done) — the anchor arrives with the export.
         sharedGroundOffsetM = exported.groundOffsetM;
         console.info(`[routeLevel] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (from chunk 0)`);
       }
@@ -435,11 +514,16 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       if (previewAnchor !== assemblyAnchor) endSession(previewAnchor);
     };
 
-    // Chunk 0 alone first to learn the shared vertical anchor (every later chunk
-    // seats on it), THEN fan the rest out `limit`-wide — the same one-up-front
-    // pattern routeBake.js uses. Now multiple chunks bake at once (multiple
-    // orange boxes), not strictly one after another.
-    await assembleChunk(0);
+    // Chunk 0 starts first to learn the shared vertical anchor (every later
+    // chunk seats on it) — but the pool no longer waits for its WHOLE assembly.
+    // The gate opens on the worker's early anchor event (right after chunk 0's
+    // sweep + ground probe), so chunk 0's conform + atlas export + Blender DAE
+    // + preview encode all overlap chunks 1..N's bakes. If no event arrives
+    // (cached/restored bake), the gate opens when chunk 0's assembly returns.
+    const chunk0 = assembleChunk(0);
+    // Late-open fallback + failure propagation. Settled-gate re-calls are no-ops.
+    chunk0.then(() => anchorResolve(), (err) => anchorReject(err));
+    await anchorGate; // throws if chunk 0 failed before an anchor existed
     let nextAsm = 1;
     const limit = Math.max(1, Math.min(concurrency, Math.max(1, total - 1)));
     const assembleWorker = async () => {
@@ -450,7 +534,8 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         await assembleChunk(i);
       }
     };
-    await Promise.all(Array.from({ length: limit }, assembleWorker));
+    // chunk0 rides along so a post-anchor chunk-0 failure still fails the run.
+    await Promise.all([chunk0, ...Array.from({ length: limit }, assembleWorker)]);
 
     // Composite the per-chunk tile grounds into ONE route .ter (bare-earth along
     // the corridor, DEM off-corridor, feathered between). Cached on asm.

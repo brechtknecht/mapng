@@ -7,17 +7,9 @@
 
 import { clipPolygon, clipLineString } from './osmClip.js';
 
-export const buildQuery = (bounds) => {
-  const bbox = `${bounds.south},${bounds.west},${bounds.north},${bounds.east}`;
-
-  // Timeout reduced to 30s (more realistic for public mirrors).
-  // Maxsize reduced to 128 MB — 512 MB was triggering server-side rejection.
-  // Query trimmed: removed redundant/rare keys (seamark, tidal, harbour subtypes,
-  // vegetation, crop, orchard, vineyard, material) that overlap with natural/landuse
-  // and add significant response weight with minimal 3D rendering value.
-  return `
-[out:json][timeout:15][maxsize:134217728];
-(
+// The clause set for ONE bbox — shared by the single-box query and the
+// route-wide union query so both fetch the identical feature classes.
+const clausesForBbox = (bbox) => `
   way["highway"](${bbox});
   way["building"](${bbox});
   way["waterway"](${bbox});
@@ -61,6 +53,40 @@ export const buildQuery = (bounds) => {
   node["highway"="street_lamp"](${bbox});
   node["barrier"="bollard"](${bbox});
   node["amenity"="bench"](${bbox});
+`;
+
+export const buildQuery = (bounds) => {
+  const bbox = `${bounds.south},${bounds.west},${bounds.north},${bounds.east}`;
+
+  // Timeout reduced to 30s (more realistic for public mirrors).
+  // Maxsize reduced to 128 MB — 512 MB was triggering server-side rejection.
+  // Query trimmed: removed redundant/rare keys (seamark, tidal, harbour subtypes,
+  // vegetation, crop, orchard, vineyard, material) that overlap with natural/landuse
+  // and add significant response weight with minimal 3D rendering value.
+  return `
+[out:json][timeout:15][maxsize:134217728];
+(
+${clausesForBbox(bbox)}
+);
+out body geom;
+`;
+};
+
+/**
+ * One Overpass query spanning SEVERAL bboxes (a route's chunk boxes) as a
+ * single union — one round-trip instead of one query per chunk, which is what
+ * used to serialize behind the public mirrors' per-IP slot limits. The caller
+ * splits the merged response back per chunk with parseOverpassResponse(data,
+ * chunkBounds) (its bbox clip already does the slicing).
+ */
+export const buildUnionQuery = (boundsList, { timeoutSec = 30 } = {}) => {
+  const clauses = boundsList
+    .map((b) => clausesForBbox(`${b.south},${b.west},${b.north},${b.east}`))
+    .join('\n');
+  return `
+[out:json][timeout:${timeoutSec}][maxsize:134217728];
+(
+${clauses}
 );
 out body geom;
 `;

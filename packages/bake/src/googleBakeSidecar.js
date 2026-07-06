@@ -58,6 +58,8 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
     // Route mode: extract the bare-earth tile ground for the chunk's .ter, with
     // the strategy the browser resolved (getGroundStrategy). undefined → off.
     extractGround, groundStrategy,
+    // Sweep-only tile warm-up (route mode) — see prefetchViaSidecar.
+    prefetchOnly,
   } = options;
   const heightMap = data.heightMap instanceof Float32Array
     ? data.heightMap
@@ -102,6 +104,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
       corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
       weld, conform, roadmask, stiffness,
       extractGround, groundStrategy,
+      prefetchOnly,
     },
   };
 };
@@ -254,6 +257,33 @@ export async function bakeViaSidecar(data, options, key, { force = false } = {})
     await waitForJob(jobId, key, options.onProgress);
   }
   return buildGroup(key, await fetchAndDecodeResult(jobId));
+}
+
+/**
+ * Sweep-only tile warm-up: runs the worker's station sweep for this AOI (which
+ * writes every downloaded Google tile to the shared disk cache) and exits — no
+ * transform/conform/atlas, no result download. The route export fires these
+ * for chunks 1..N while chunk 0's real (anchor-discovering) bake runs, so the
+ * later real bakes replay tile content from disk instead of the network.
+ * Same-key re-posts join the running job (plugin dedupe).
+ */
+export async function prefetchViaSidecar(data, options, key) {
+  const body = buildJobBody(data, { ...options, prefetchOnly: true }, key, false);
+  const res = await fetch('/api/google-bake', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try { detail = (await res.json())?.error ?? ''; } catch (_) { /* noop */ }
+    throw new Error(`bake sidecar rejected the prefetch (HTTP ${res.status}${detail ? `: ${detail}` : ''})`);
+  }
+  const { jobId, status, joined } = await res.json();
+  if (joined) console.info(`[google-bake] joined existing prefetch job ${jobId} (${status})`);
+  if (status !== 'done') {
+    await waitForJob(jobId, key, options.onProgress);
+  }
 }
 
 /**
