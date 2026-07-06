@@ -121,18 +121,29 @@ test('road mask pulls down floaters beyond the ±band the delta field ignores', 
   assert.ok(Math.abs(r.positions[0][1] - 0.02) < 0.05, `floater seated on floor, got ${r.positions[0][1]}`);
 });
 
-test('snap ceiling tapers: a floater at maxSnapM is left alone (roof/overpass guard)', () => {
+test('snap ceiling tapers: a floater at maxSnapM over real road surface is left alone', () => {
+  // The overhang guard only applies where the column HAS a road surface — a
+  // floater over a coverage hole is a glitch now (see the glitch-override
+  // tests). Ground at 0.1 fills the cells; the 5 m floaters above it must
+  // still be spared by the tapered ceiling.
   const verts = [], index = [];
   let v = 0;
+  const floaterStart = [];
   for (let cx = -45; cx <= 45; cx += 6) {
+    verts.push(...horizTri(cx, 0, 0.1)); // real road surface (in band)
+    index.push(v, v + 1, v + 2); v += 3;
+    floaterStart.push(v);
     verts.push(...horizTri(cx, 0, 5)); // exactly maxSnapM → gate weight 0
     index.push(v, v + 1, v + 2); v += 3;
   }
   const soup = [{ positions: new Float32Array(verts), index: new Uint32Array(index) }];
   const r = conformTilesToFloor(soup, DATA, { groundMask: stripMask(3) });
-  assert.equal(r.vertsSnapped, 0, 'at-ceiling floater must not snap');
-  assert.equal(r.vertsMoved, 0, 'nothing moved');
-  assert.equal(r.positions[0], null, 'untouched mesh reports null positions (no rewrite)');
+  assert.equal(r.glitchVertsFlattened, 0, 'filled cells: no glitch path');
+  const out = r.positions[0];
+  for (const fs of floaterStart) {
+    const y = out[fs * 3 + 1];
+    assert.ok(y > 4.5, `at-ceiling floater must not snap, got ${y}`);
+  }
 });
 
 test('snap targets the heightMap it is given, not the datum (extracted-ground floor swap)', () => {
@@ -200,13 +211,19 @@ test('mask leaves off-road geometry byte-identical to the no-mask conform', () =
 });
 
 test('mask does not snap non-horizontal verts over a road (walls / curb risers)', () => {
-  // A vertical-plane tri floating over the masked strip: normal is horizontal, so
-  // it must NOT be flagged as ground — no snap, no movement (field is empty).
-  const verts = [0, 0, 0, 0, 5, 0, 1, 5, 0]; // spans Y in the x=const plane
-  const soup = [{ positions: new Float32Array(verts), index: new Uint32Array([0, 1, 2]) }];
+  // A vertical-plane tri over the masked strip, NEXT TO real road surface (the
+  // ground tri fills the cell — without it the wall would be a glitch column
+  // and flattened by design). The wall verts must stay put.
+  const verts = [
+    ...[-3, 0.1, 0, -2, 0.1, 0, -3, 0.1, 1], // road surface in the same cell
+    0, 0, 0, 0, 5, 0, 1, 5, 0,               // wall: spans Y in the x=const plane
+  ];
+  const soup = [{ positions: new Float32Array(verts), index: new Uint32Array([0, 1, 2, 3, 4, 5]) }];
   const r = conformTilesToFloor(soup, DATA, { groundMask: stripMask(3) });
-  assert.equal(r.vertsSnapped, 0, 'vertical face is not a snap candidate');
-  assert.equal(r.vertsMoved, 0, 'nothing moved');
+  assert.equal(r.glitchVertsFlattened, 0, 'filled cell: wall is not a glitch');
+  const out = r.positions[0] ?? verts;
+  assert.ok(Math.abs(out[13] - 5) < 0.3, `wall top vert stays up, got ${out[13]}`);
+  assert.ok(Math.abs(out[16] - 5) < 0.3, `wall top vert stays up, got ${out[16]}`);
 });
 
 // ── Field bend diagnostics (the "buildings morph" instrumentation) ─────────
@@ -364,4 +381,63 @@ test('short steep road-seam skirts snap flat; only TALL steep faces are wall-pro
     const y = out[(skirtStart + k) * 3 + 1];
     assert.ok(Math.abs(y - 0.02) < 0.1, `skirt vert ${k} pulled onto the floor, got ${y}`);
   }
+});
+
+// ── Road-prior glitch override ───────────────────────────────────────────────
+// Build a road blanket with a COVERAGE HOLE at the centre and a horizontal cap
+// floating high above it — the anomaly signature: the glitch REPLACED the road,
+// so its column has no ground-level surface, yet it floats far beyond maxSnapM
+// where the old guards would protect it forever.
+const glitchScene = (withRoadUnderCap) => {
+  const verts = [], index = [];
+  let v = 0;
+  for (let cx = -45; cx <= 45; cx += 6) {
+    for (let cz = -45; cz <= 45; cz += 6) {
+      // hole: no ground tris within 9m of the origin (unless the control asks)
+      if (!withRoadUnderCap && Math.abs(cx) < 9 && Math.abs(cz) < 9) continue;
+      verts.push(...horizTri(cx, cz, 0.2));
+      index.push(v, v + 1, v + 2); v += 3;
+    }
+  }
+  // The blanket lattice (−45 + 6k) never lands on the origin, so the cap's
+  // cell needs its road surface added explicitly for the overhang control.
+  if (withRoadUnderCap) {
+    verts.push(...horizTri(0, 0, 0.2));
+    index.push(v, v + 1, v + 2); v += 3;
+  }
+  const capStart = v;
+  verts.push(...horizTri(0, 0, 18)); // the glitch: 18m up, way past maxSnapM
+  index.push(v, v + 1, v + 2); v += 3;
+  return { soup: [{ positions: new Float32Array(verts), index: new Uint32Array(index) }], capStart };
+};
+const fullMask = { n: 1, coverage: new Float32Array(), sample: () => 1 };
+
+test('glitch override: a spike over a road with no surface under it is flattened', () => {
+  const { soup, capStart } = glitchScene(false);
+  const r = conformTilesToFloor(soup, DATA, { groundMask: fullMask });
+  assert.ok(r.glitchVertsFlattened >= 3, `cap verts flattened, got ${r.glitchVertsFlattened}`);
+  assert.ok(Math.abs(r.glitchMaxFloatM - 18) < 0.5, `18m float recorded, got ${r.glitchMaxFloatM}`);
+  const out = r.positions[0];
+  for (let k = 0; k < 3; k++) {
+    const y = out[(capStart + k) * 3 + 1];
+    assert.ok(Math.abs(y - 0.02) < 0.15, `glitch vert ${k} seated on the floor, got ${y}`);
+  }
+});
+
+test('glitch override: a legit overhang (road surface underneath) is preserved', () => {
+  const { soup, capStart } = glitchScene(true); // road tris DO cover the cap's cell
+  const r = conformTilesToFloor(soup, DATA, { groundMask: fullMask });
+  assert.equal(r.glitchVertsFlattened, 0, 'overhang not treated as glitch');
+  const out = r.positions[0];
+  const y = out[capStart * 3 + 1];
+  assert.ok(y > 15, `tree-crown/deck stays up, got ${y}`);
+});
+
+test('glitch override: glitchSnap=false restores the old ceiling behaviour', () => {
+  const { soup, capStart } = glitchScene(false);
+  const r = conformTilesToFloor(soup, DATA, { groundMask: fullMask, glitchSnap: false });
+  assert.equal(r.glitchVertsFlattened, 0);
+  const out = r.positions[0];
+  const y = out ? out[capStart * 3 + 1] : 18;
+  assert.ok(y > 15, `spike survives without the override, got ${y}`);
 });

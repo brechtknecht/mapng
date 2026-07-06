@@ -40,7 +40,13 @@
 //      junction solve caps consensus at what the blend can physically absorb
 //      (junctionBlendM × grade ceiling) — untagged stacked geometry no longer
 //      bends both roads.
-export const BAKE_FORMAT_VERSION = 19;
+// v20: road-prior glitch override in the conform snap (glitchSnap): inside the
+//      core carriageway, a column with NO ground-level surface (pre-inpaint
+//      field cell unfilled) is a photogrammetry glitch — pulled onto the floor
+//      past the maxSnapM ceiling and wall guards. Legit overhangs (surface
+//      underneath, mapped structures) keep their protection. Geometry changes
+//      wherever tiles glitched over roads.
+export const BAKE_FORMAT_VERSION = 20;
 
 // FNV-1a 32-bit over a string — the cache key's compact fingerprint primitive.
 const fnv1a = (s, h = 2166136261) => {

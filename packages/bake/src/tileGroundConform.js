@@ -84,6 +84,18 @@ import { rasterizeStructureStiffness } from './deform/structureStiffness.js';
  *   all null, Pass-2 stats are 0). This is the debug/overlay path: the preview
  *   uses it to visualise WHAT the conform would do without allocating per-mesh
  *   position copies.
+ * @param {boolean} [opts.glitchSnap=true]  road-prior glitch override. The
+ *   snap guards (maxSnapM ceiling, wall flags) exist to protect legitimate
+ *   geometry that overhangs a road — but they also protect photogrammetry
+ *   GLITCHES, which float far above the ceiling and bristle with steep
+ *   pseudo-facades (measured live: 8–30 m spikes sitting on carriageways,
+ *   immune to every guard). The discriminator is the pre-inpaint delta-field
+ *   coverage: a legit overhang has the road surface UNDER it, so its cell has
+ *   in-band ground samples (filled=1); a glitch REPLACED the road, so its
+ *   column has no ground-level surface at all (filled=0). Inside the core
+ *   carriageway (m ≥ 0.9, floor trusted, no structure veto) an unfilled cell
+ *   means the OSM road network is the stronger prior: pull the geometry onto
+ *   the floor regardless of float height or wall flags. false disables (A/B).
  * @param {Array<{ring,holes}>|null} [opts.structures=null]  OSM structure
  *   footprints in scene coords (deform/structureStiffness.collectStructureRings).
  *   When given, a per-cell stiffness raster gates the field build (see
@@ -123,6 +135,7 @@ export const conformTilesToFloor = (meshes, data, {
   measureOnly = false,
   structures = null,
   diagnostics = false,
+  glitchSnap = true,
 } = {}) => {
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
   const upm = computeUnitsPerMeter(data); // metres-Y → scene units, to metricise normals
@@ -285,6 +298,7 @@ export const conformTilesToFloor = (meshes, data, {
     return {
       positions: meshes.map(() => null),
       vertsMoved: 0, meshesMoved: 0, vertsSnapped: 0, maxFloatFixedM: 0,
+      glitchVertsFlattened: 0, glitchMaxFloatM: 0,
       roadVertsCore: 0, roadDevMeanM: 0, roadDevMaxM: 0,
       roadWallExcluded: 0, roadGateExcluded: 0, roadOverheadCount: 0,
       cellsFilled: field.filledCount,
@@ -331,7 +345,8 @@ export const conformTilesToFloor = (meshes, data, {
   };
 
   let vertsMoved = 0, meshesMoved = 0, vertsSnapped = 0, maxFloatFixedM = 0;
-  let structSnapVetoed = 0;
+  let structSnapVetoed = 0, glitchVertsFlattened = 0, glitchMaxFloatM = 0;
+  const HALF_SCENE = SCENE_SIZE / 2;
   let postResidualSum = 0, postResidualCount = 0;
   // Core-carriageway flatness audit (mask w ≥ 0.9): how far the FINAL surface
   // deviates from the floor over the road proper — including the verts the snap
@@ -372,14 +387,25 @@ export const conformTilesToFloor = (meshes, data, {
           }
         }
         const floatBefore = Math.abs(p[i + 1] - terr);
+        // Road-prior glitch override (see opts.glitchSnap): inside the CORE
+        // carriageway, a column whose delta-field cell never saw a ground-level
+        // surface (pre-inpaint filled=0) cannot be an overhang — there is no
+        // road under it to overhang. Whatever occupies it REPLACED the road: a
+        // photogrammetry glitch. The road network outranks the geometry here —
+        // the ceiling and wall guards that would protect an overhang are the
+        // very guards that were pinning the glitch in place.
+        const glitch = glitchSnap && m >= 0.9
+          && x >= -HALF_SCENE && x <= HALF_SCENE && z >= -HALF_SCENE && z <= HALF_SCENE
+          && !field.filled[field.cellIndex(x, z)];
         // Tapered ceiling instead of a hard cutoff: full snap up to
         // (maxSnapM − snapTaperM), fading to 0 at maxSnapM.
-        const snapGate = floatBefore <= maxSnapM - snapTaperM
-          ? 1
-          : floatBefore >= maxSnapM
-            ? 0
-            : (maxSnapM - floatBefore) / snapTaperM;
-        if (!nh[vi]) {
+        const snapGate = glitch ? 1
+          : floatBefore <= maxSnapM - snapTaperM
+            ? 1
+            : floatBefore >= maxSnapM
+              ? 0
+              : (maxSnapM - floatBefore) / snapTaperM;
+        if (glitch || !nh[vi]) {
           const w = m * snapGate;
           if (w > 0) {
             const ySnap = terr + roadEpsM;
@@ -391,6 +417,10 @@ export const conformTilesToFloor = (meshes, data, {
               if (floatBefore >= groundDistanceM && floatBefore > maxFloatFixedM) {
                 maxFloatFixedM = floatBefore;
               }
+              if (glitch && floatBefore >= maxSnapM) {
+                glitchVertsFlattened++;
+                if (floatBefore > glitchMaxFloatM) glitchMaxFloatM = floatBefore;
+              }
             }
           }
         }
@@ -399,12 +429,13 @@ export const conformTilesToFloor = (meshes, data, {
         // whose XZ lands on a road pixel would otherwise dominate the mean with
         // multi-metre "deviations" that are not road surface at all.
         if (m >= 0.9) {
-          if (floatBefore < maxSnapM) {
+          if (floatBefore < maxSnapM || glitch) {
+            // Flattened glitches are road surface now — audit them as such.
             roadVertsCore++;
             const dev = Math.abs(newY - (terr + roadEpsM));
             roadDevSum += dev;
             if (dev > roadDevMax) roadDevMax = dev;
-            if (nh[vi]) roadWallExcluded++;
+            if (!glitch && nh[vi]) roadWallExcluded++;
             else if (snapGate <= 0) roadGateExcluded++;
           } else {
             roadOverheadCount++;
@@ -445,6 +476,10 @@ export const conformTilesToFloor = (meshes, data, {
     meshesMoved,
     vertsSnapped,
     maxFloatFixedM,
+    // Road-prior glitch override: verts beyond the snap ceiling flattened
+    // because their column had no ground-level surface (glitchSnap).
+    glitchVertsFlattened,
+    glitchMaxFloatM,
     // Carriageway flatness audit (mask w ≥ 0.9, float < maxSnapM): FINAL
     // |y − (floor+eps)| over the road surface incl. deliberately-unsnapped verts.
     roadVertsCore,

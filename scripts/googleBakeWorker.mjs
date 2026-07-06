@@ -467,7 +467,9 @@ const applyTerGroundSnap = (session, groundStrategy) => {
     `[bakeWorker] [terSnap] carriageway flatness: ${r.roadVertsCore} road-surface verts, ` +
     `final deviation mean ${r.roadDevMeanM.toFixed(2)}m / max ${r.roadDevMaxM.toFixed(2)}m ` +
     `(unsnapped on-surface: ${r.roadWallExcluded} wall-shared, ${r.roadGateExcluded} taper-gated; ` +
-    `${r.roadOverheadCount} overhead verts ignored)`,
+    `${r.roadOverheadCount} overhead verts ignored), ` +
+    `road-prior glitch fix: ${r.glitchVertsFlattened} verts flattened` +
+    (r.glitchVertsFlattened ? ` (max float ${r.glitchMaxFloatM.toFixed(1)}m)` : ''),
   );
 
   // Deck snap: bridges are excluded from the road mask above (they must never
