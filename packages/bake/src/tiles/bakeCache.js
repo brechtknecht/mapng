@@ -35,7 +35,12 @@
 //      different surface roads agree one consensus height per junction and
 //      each profile eases into it (junctionBlendM). Carved .ter changes at
 //      every crossing, so cached grounds/bakes are stale.
-export const BAKE_FORMAT_VERSION = 18;
+// v19: elevator/escalator/platform/construction/proposed ways excluded from
+//      the road mask + profiles (elevator shafts carved 60m gouges), and the
+//      junction solve caps consensus at what the blend can physically absorb
+//      (junctionBlendM × grade ceiling) — untagged stacked geometry no longer
+//      bends both roads.
+export const BAKE_FORMAT_VERSION = 19;
 
 // FNV-1a 32-bit over a string — the cache key's compact fingerprint primitive.
 const fnv1a = (s, h = 2166136261) => {

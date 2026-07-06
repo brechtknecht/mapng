@@ -494,6 +494,20 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
         let hw = 0, ww = 0;
         for (const k of c) { hw += samples[k].w * samples[k].h; ww += samples[k].w; }
         const H = hw / ww;
+        // Physicality cap: easing a correction into a profile over
+        // junctionBlendM at the maxGradePct ceiling can absorb at most
+        // ~junctionBlendM×grade metres. A disagreement beyond that is not a
+        // junction — it's stacked geometry without layer tags (parking decks,
+        // mistagged ramps; seen live: 16m "consensus" adjustments) — and
+        // forcing consensus would bend both roads at the grade ceiling. Skip;
+        // the step metric still reports it for the log.
+        const capM = junctionBlendM * (maxGradePct / 100);
+        let maxDev = 0;
+        for (const k of c) {
+          const d = Math.abs(samples[k].h - H);
+          if (d > maxDev) maxDev = d;
+        }
+        if (maxDev > capM) continue;
         junctionClusters++;
         for (const k of c) {
           const s2 = samples[k];
@@ -799,20 +813,21 @@ export const carveRoadProfiles = (profiles, data, ground, {
   // grid actually holds is the resolution/blend cost — the .ter's own bumps
   // (grid aliasing, cross-road blend zones, maxCarveM clamps all land here).
   const carvedFloor = { ...data, heightMap: hm };
-  let resSq = 0, resN = 0, resMax = 0;
+  let resSq = 0, resN = 0, resMax = 0, resMaxAt = null;
   for (const k of keptRoads) {
     for (let i = 0; i < k.pts.length; i++) {
       if (k.conf && k.conf[i] < 1) continue; // tapered ends never fully stamp
       const p = k.pts[i];
       const e = Math.abs(sampleHeightAtScene(carvedFloor, p.x, p.z) - p.h);
       resSq += e * e; resN++;
-      if (e > resMax) resMax = e;
+      if (e > resMax) { resMax = e; resMaxAt = { x: p.x, z: p.z }; }
     }
   }
   return {
     carvedCells, maxShiftM: +maxShiftM.toFixed(2), minH, maxH,
     profileResidualRmsM: resN ? Math.round(Math.sqrt(resSq / resN) * 1000) / 1000 : 0,
     profileResidualMaxM: Math.round(resMax * 100) / 100,
+    profileResidualMaxAt: resMaxAt,
     residualSamples: resN,
   };
 };

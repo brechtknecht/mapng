@@ -22,6 +22,11 @@ const HALF = SCENE_SIZE / 2;
 // what counts as a drivable road.)
 export const EXCLUDE_HIGHWAY = new Set([
   'footway', 'path', 'pedestrian', 'steps', 'cycleway', 'bridleway', 'corridor',
+  // Vertical / not-yet-real ways: an elevator is a SHAFT — profiled as a road
+  // it reports absurd junction steps and carves a deep gouge into the .ter
+  // (seen live: junctionStepMaxM 63m, elevator×elevator). Construction and
+  // proposed ways have no drivable surface to conform to either.
+  'elevator', 'escalator', 'platform', 'construction', 'proposed',
 ]);
 
 // Per-class carriageway HALF-width in metres (full road ≈ 2×). Replaces

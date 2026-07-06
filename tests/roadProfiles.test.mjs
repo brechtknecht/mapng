@@ -340,8 +340,40 @@ test('interior bridged spans (underpasses) keep full carve strength despite the 
 test('non-drivable ways and empty input yield no profiles', () => {
   const g = groundStub(() => 40);
   assert.equal(buildRoadProfiles([roadFeature({ highway: 'footway' })], DATA, g), null);
+  assert.equal(buildRoadProfiles([roadFeature({ highway: 'elevator' })], DATA, g), null,
+    'an elevator is a shaft, not a road');
+  assert.equal(buildRoadProfiles([roadFeature({ highway: 'construction' })], DATA, g), null);
   assert.equal(buildRoadProfiles([], DATA, g), null);
   assert.equal(buildRoadProfiles(null, DATA, g), null);
+});
+
+test('junction solve skips stacked geometry beyond the physical blend cap', () => {
+  // Same crossing shape as the disagreement test but with a 20m gap — untagged
+  // stacked geometry (parking deck over street). Easing 10m into each profile
+  // over 25m of arc would exceed any physical grade: the solve must skip it,
+  // while the step metric still reports it for the log.
+  const heightMap = new Float32Array(N * N);
+  const coveredMask = new Uint8Array(N * N).fill(1);
+  for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+      heightMap[row * N + col] = (col >= 90 && col <= 110) ? 30 : 50;
+      if (col >= 88 && col <= 112 && row >= 88 && row <= 112) coveredMask[row * N + col] = 0;
+    }
+  }
+  const g = { heightMap, coveredMask };
+  const ns = {
+    type: 'road',
+    tags: { highway: 'service' },
+    geometry: [
+      { lat: 5 / 111320, lng: 100 / 111320 },
+      { lat: 195 / 111320, lng: 100 / 111320 },
+    ],
+  };
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' }), ns], DATA, g);
+  const st = prof.stats;
+  assert.equal(st.junctionClusters, 0, 'stacked crossing not "solved"');
+  assert.equal(st.junctionMaxAdjM, 0, 'no correction applied');
+  assert.ok(st.junctionStepMaxM > 10, `metric still reports it, got ${st.junctionStepMaxM}m`);
 });
 
 test('evenness telemetry: flat road scores ~zero roughness and no junction pairs', () => {

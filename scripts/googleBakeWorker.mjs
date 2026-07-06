@@ -388,7 +388,10 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
               `[bakeWorker] [roadProfiles] carved ${cs.carvedCells} cells into the .ter ` +
               `(max shift ${cs.maxShiftM}m), .ter-vs-profile residual rms ` +
               `${cs.profileResidualRmsM}m / max ${cs.profileResidualMaxM}m ` +
-              `over ${cs.residualSamples} samples`,
+              `over ${cs.residualSamples} samples` +
+              (cs.profileResidualMaxAt
+                ? ` (worst @ scene(${cs.profileResidualMaxAt.x.toFixed(0)},${cs.profileResidualMaxAt.z.toFixed(0)}))`
+                : ''),
             );
           }
         }
