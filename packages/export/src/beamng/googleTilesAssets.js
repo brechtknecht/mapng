@@ -367,9 +367,11 @@ export async function exportGoogleTilesForLevel(exportTerrainData, worldSize, { 
       // Server-side artifacts ride through the existing zip variables as
       // {fromPath} markers — the zip sidecar ingests them from disk.
       googleTilesGlbBlob = { fromPath: exported.glbPath, size: exported.glbBytes ?? 0 };
+      // ext is 'dds' when the sidecar BC1-compressed the atlas (≈8× less BeamNG
+      // VRAM), else 'png' fallback — main.materials.json's colorMap follows it.
       googleTilesTextureFiles = (exported.textures ?? []).map((t) => ({
         name: t.name,
-        ext: 'png',
+        ext: t.ext ?? 'png',
         data: { fromPath: t.path, size: t.bytes ?? 0 },
       }));
       googleTilesMaterialNames = exported.materialNames ?? [];

@@ -112,7 +112,10 @@ const hashArchive = ({ dirs, entries }) => {
 
 // Repinned after the google-atlas materials gained emissive:true (photogrammetry
 // carries baked-in lighting — BeamNG must not re-light it).
-const GOLDEN = '6c79c10a3a6edd92';
+// Repinned again after the google_tiles README_CONVERT.txt text was made
+// texture-format-neutral (atlases now ship as DDS BC1 when the sidecar has
+// ImageMagick, else PNG — see googleExportAssembly.mjs encodeDdsBC1).
+const GOLDEN = '43275960df79c491';
 
 test('writeLevelEntries is deterministic and records the expected tree', () => {
   const a = makeRecorder();

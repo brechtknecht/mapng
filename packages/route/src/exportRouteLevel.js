@@ -488,8 +488,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         name: `google_tiles_${pad2(i)}`,
         daeBlob: dae,
         glbBlob: dae ? null : { fromPath: exported.glbPath, size: exported.glbBytes ?? 0 },
+        // ext is 'dds' when the sidecar BC1-compressed the atlas (≈8× less
+        // BeamNG VRAM), else 'png' fallback — the per-chunk materials.json
+        // colorMap (levelFiles.js) follows tex.ext.
         textureFiles: (exported.textures ?? []).map((t) => ({
-          name: t.name, ext: 'png', data: { fromPath: t.path, size: t.bytes ?? 0 },
+          name: t.name, ext: t.ext ?? 'png', data: { fromPath: t.path, size: t.bytes ?? 0 },
         })),
         materialNames: exported.materialNames ?? [],
         east: Math.round(east * 100) / 100,

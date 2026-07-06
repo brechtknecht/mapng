@@ -1,5 +1,6 @@
 import { createWriteStream } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import sharp from 'sharp';
 import { computeWeldedNormals } from '@mapng/bake/tiles/weldedNormals';
@@ -31,8 +32,54 @@ const ATLAS_SIZE = 4096;
 const GUTTER = 8;
 const PAD = GUTTER * 2;
 const VERT_LIMIT = 60000;
+// Full mip chain for a 4096² atlas: log2(4096)+1 = 13 levels (4096…1).
+const ATLAS_MIPS = Math.log2(ATLAS_SIZE) + 1;
 
 const align4 = (n) => (n + 3) & ~3;
+
+// DDS BC1 (DXT1) encoder via ImageMagick. BeamNG loads DDS natively and keeps
+// it GPU-compressed — a 4096² atlas costs ~11 MB VRAM as BC1+mips vs ~89 MB
+// decoded to RGBA8 from PNG (≈8×). Photogrammetry atlases are opaque, so DXT1's
+// 1-bit alpha is irrelevant and 4 bpp is the ideal fit. Piped end-to-end (PNG in
+// on stdin, DDS out on stdout) — no temp files. Returns null when magick is
+// missing / disabled / fails, so the caller ships the PNG and BeamNG still works
+// (just at the old VRAM cost). Env: MAPNG_DDS=0 disables; MAPNG_DDS_QUALITY=high
+// enables cluster-fit (≈2.5× slower, cleaner on smooth gradients).
+let _magickOk = null; // null=unprobed, true/false=known this process
+function encodeDdsBC1(pngBuffer) {
+  if (process.env.MAPNG_DDS === '0' || _magickOk === false) return Promise.resolve(null);
+  return new Promise((resolve) => {
+    const hi = process.env.MAPNG_DDS_QUALITY === 'high';
+    const args = [
+      'png:-',
+      '-define', 'dds:compression=dxt1',
+      '-define', `dds:mipmaps=${ATLAS_MIPS}`,
+      '-define', `dds:cluster-fit=${hi ? 'true' : 'false'}`,
+      'dds:-',
+    ];
+    const p = spawn('magick', args);
+    const out = [];
+    let err = '';
+    p.stdout.on('data', (d) => out.push(d));
+    p.stderr.on('data', (d) => { err += d.toString(); });
+    p.on('error', (e) => { // magick not installed / not on PATH
+      if (_magickOk === null) {
+        console.warn(
+          `[export] ImageMagick unavailable (${e.code ?? e.message}) — shipping uncompressed PNG ` +
+          'atlases (higher BeamNG VRAM). Install `magick` for DDS BC1 compression.',
+        );
+      }
+      _magickOk = false;
+      resolve(null);
+    });
+    p.on('close', (code) => {
+      if (code === 0 && out.length) { _magickOk = true; resolve(Buffer.concat(out)); }
+      else { console.warn(`[export] DDS encode failed (exit ${code}): ${err.slice(0, 200)} — shipping PNG`); resolve(null); }
+    });
+    p.stdin.on('error', () => {}); // swallow EPIPE if magick exits before we finish writing
+    p.stdin.end(pngBuffer);
+  });
+}
 
 /**
  * @param {Array} records bake records: {name, positions, uvs, index, texture}
@@ -156,11 +203,33 @@ export async function assembleGoogleTilesExport(records, {
       raw: { width: rawInfo.width, height: rawInfo.height, channels: rawInfo.channels },
     }).png().toBuffer();
 
-    const file = path.join(outDir, `${matName}.png`);
-    await writeFile(file, png);
-    textures.push({ name: matName, path: file, bytes: png.length, png });
+    // Ship the atlas as DDS BC1 when available (BeamNG reads it GPU-compressed);
+    // the PNG buffer is still embedded in the GLB below — the Blender→DAE
+    // intermediate needs a decodable image and BeamNG ignores DAE textures
+    // anyway (materials resolve via main.materials.json → the .dds we ship).
+    const dds = await encodeDdsBC1(png);
+    let ext;
+    let file;
+    let bytes;
+    if (dds) {
+      ext = 'dds';
+      file = path.join(outDir, `${matName}.dds`);
+      bytes = dds.length;
+      await writeFile(file, dds);
+      const vramRgba = (ATLAS_SIZE * ATLAS_SIZE * 4 * 1.333) / 1024 ** 2;
+      log(
+        `[export] atlas ${matName}: ${a.entries.length} tiles, PNG ${(png.length / 1024 ** 2).toFixed(1)} MB → ` +
+        `DDS BC1 ${(bytes / 1024 ** 2).toFixed(1)} MB (VRAM ~${vramRgba.toFixed(0)}→${(bytes / 1024 ** 2).toFixed(0)} MB)`,
+      );
+    } else {
+      ext = 'png';
+      file = path.join(outDir, `${matName}.png`);
+      bytes = png.length;
+      await writeFile(file, png);
+      log(`[export] atlas ${matName}: ${a.entries.length} tiles, ${(png.length / 1024 ** 2).toFixed(1)} MB PNG`);
+    }
+    textures.push({ name: matName, path: file, bytes, ext, png });
     materialNames.push(matName);
-    log(`[export] atlas ${matName}: ${a.entries.length} tiles, ${(png.length / 1024 ** 2).toFixed(1)} MB PNG`);
   }
 
   // ---- 4. UV remap into the atlas cells (half-texel inset) -----------------
@@ -380,7 +449,7 @@ export async function assembleGoogleTilesExport(records, {
   return {
     glbPath,
     glbBytes,
-    textures: textures.map(({ name, path: p, bytes }) => ({ name, path: p, bytes })),
+    textures: textures.map(({ name, path: p, bytes, ext }) => ({ name, path: p, bytes, ext })),
     materialNames,
     meshCount: chunks.length,
     meshBounds,

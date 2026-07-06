@@ -154,7 +154,7 @@ export function writeLevelFiles(zip, ctx) {
           'or https://gltf-viewer.donmccurdy.com) to verify the bake before converting.',
           '',
           'Textures are NOT read from the .dae — they resolve via main.materials.json',
-          'in this folder (google_atlas_NN entries pointing at textures/*.png).',
+          'in this folder (google_atlas_NN entries pointing at the textures/ atlases).',
         ].join('\n'),
         );
       }
