@@ -2,6 +2,8 @@ import { createWriteStream } from 'node:fs';
 import { writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
+import { computeWeldedNormals } from '@mapng/bake/tiles/weldedNormals';
+import { bakeAcesToneMap } from '@mapng/bake/materials/acesFilmicBake';
 
 // Server-side assembly of the BeamNG google_tiles export: texture ATLASES +
 // chunked-mesh GLB, built straight from the bake session's records — the
@@ -19,8 +21,11 @@ import sharp from 'sharp';
 //    named ..._mesh (trailing digits parse as LOD sizes)
 //
 // The GLB is written by hand (no GLTFExporter): geometry is trivial
-// (POSITION/TEXCOORD_0/indices) and the atlas PNGs embed as pre-encoded
-// bytes — no canvas, no decode, flat memory, streamed to disk.
+// (POSITION/NORMAL/TEXCOORD_0/indices) and the atlas PNGs embed as
+// pre-encoded bytes — no canvas, no decode, flat memory, streamed to disk.
+// NORMAL is required: without it Blender's glTF import flat-shades, the
+// Collada round trip bakes those per-face normals in, and BeamNG renders
+// every triangle as a facet.
 
 const ATLAS_SIZE = 4096;
 const GUTTER = 8;
@@ -86,6 +91,12 @@ export async function assembleGoogleTilesExport(records, {
   }
   if (entries.length === 0) return null;
 
+  // Smooth normals welded ACROSS tiles (same rationale and helper as the
+  // browser path): duplicated seam/border vertices must average, or BeamNG's
+  // sun draws a hard shading edge along every tile boundary.
+  const normalArrays = computeWeldedNormals(entries);
+  for (let i = 0; i < entries.length; i++) entries[i].normals = normalArrays[i];
+
   // ---- 2. shelf-pack tallest-first into as many atlases as needed ----------
   const atlases = [];
   const newAtlas = () => {
@@ -132,9 +143,18 @@ export async function assembleGoogleTilesExport(records, {
         composites.push({ input: withGutter, left: e.x - GUTTER, top: e.y - GUTTER });
       } catch { /* undecodable tile — gray cell */ }
     }
-    const png = await sharp({
+    // Bake the preview's ACES filmic grade (exposure 0.8) into the atlas
+    // pixels — BeamNG has no equivalent of the preview's scene tone mapping,
+    // and the atlas materials are emissive (never re-lit), so the texture IS
+    // the final on-screen colour. Same curve as the browser path
+    // (acesFilmicBake), applied on sharp's raw buffer before PNG encode.
+    const { data: rawPixels, info: rawInfo } = await sharp({
       create: { width: ATLAS_SIZE, height: ATLAS_SIZE, channels: 3, background: { r: 128, g: 128, b: 128 } },
-    }).composite(composites).png().toBuffer();
+    }).composite(composites).raw().toBuffer({ resolveWithObject: true });
+    bakeAcesToneMap(rawPixels, rawInfo.channels);
+    const png = await sharp(rawPixels, {
+      raw: { width: rawInfo.width, height: rawInfo.height, channels: rawInfo.channels },
+    }).png().toBuffer();
 
     const file = path.join(outDir, `${matName}.png`);
     await writeFile(file, png);
@@ -160,7 +180,7 @@ export async function assembleGoogleTilesExport(records, {
   }
 
   // ---- 5. chunk-merge ≤60k verts per atlas material -------------------------
-  const chunks = []; // { name, materialIdx, positions, uvs, indices(u32), min, max }
+  const chunks = []; // { name, materialIdx, positions, normals, uvs, indices(u32), min, max }
   for (let ai = 0, mi = 0; ai < atlases.length; ai++) {
     const a = atlases[ai];
     if (a.entries.length === 0) continue;
@@ -176,6 +196,7 @@ export async function assembleGoogleTilesExport(records, {
         iTotal += e.index ? e.index.length : e.positions.length / 3;
       }
       const positions = new Float32Array(vTotal * 3);
+      const normals = new Float32Array(vTotal * 3);
       const uvs = new Float32Array(vTotal * 2);
       const indices = new Uint32Array(iTotal);
       const min = [Infinity, Infinity, Infinity];
@@ -184,6 +205,7 @@ export async function assembleGoogleTilesExport(records, {
       let iOff = 0;
       for (const e of group) {
         positions.set(e.positions, vOff * 3);
+        normals.set(e.normals, vOff * 3);
         uvs.set(e.uvs, vOff * 2);
         const vCount = e.positions.length / 3;
         if (e.index) {
@@ -205,7 +227,7 @@ export async function assembleGoogleTilesExport(records, {
       const matTag = String(materialIdx).padStart(2, '0');
       chunks.push({
         name: `google_tiles_a${matTag}_c${String(chunks.length).padStart(3, '0')}_mesh`,
-        materialIdx, positions, uvs, indices, min, max,
+        materialIdx, positions, normals, uvs, indices, min, max,
       });
       group = [];
       groupVerts = 0;
@@ -244,11 +266,15 @@ export async function assembleGoogleTilesExport(records, {
   const nodes = [{ name: 'google_tiles', children: [] }];
   for (const c of chunks) {
     const posView = pushBin(c.positions, 34962);
+    const nrmView = pushBin(c.normals, 34962);
     const uvView = pushBin(c.uvs, 34962);
     const idxView = pushBin(c.indices, 34963);
     const posAcc = accessors.push({
       bufferView: posView, componentType: 5126, count: c.positions.length / 3,
       type: 'VEC3', min: c.min, max: c.max,
+    }) - 1;
+    const nrmAcc = accessors.push({
+      bufferView: nrmView, componentType: 5126, count: c.normals.length / 3, type: 'VEC3',
     }) - 1;
     const uvAcc = accessors.push({
       bufferView: uvView, componentType: 5126, count: c.uvs.length / 2, type: 'VEC2',
@@ -259,7 +285,7 @@ export async function assembleGoogleTilesExport(records, {
     const meshIdx = meshes.push({
       name: c.name,
       primitives: [{
-        attributes: { POSITION: posAcc, TEXCOORD_0: uvAcc },
+        attributes: { POSITION: posAcc, NORMAL: nrmAcc, TEXCOORD_0: uvAcc },
         indices: idxAcc,
         material: c.materialIdx,
         mode: 4,

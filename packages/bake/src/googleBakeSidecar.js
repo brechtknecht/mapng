@@ -222,6 +222,14 @@ const buildGroup = async (key, { meshes, stations, stats }) => {
     `(${stats.selected ?? '?'} tiles selected, ${stats.kept ?? '?'} kept, ` +
     `${((stats.elapsedMs ?? 0) / 1000).toFixed(1)}s bake${stats.timedOut ? ', TIMED OUT' : ''})`,
   );
+  // A timed-out sweep SKIPPED stations — the geometry has holes. Never persist
+  // it: a cached partial bake would serve those holes forever (every re-export
+  // restores from IndexedDB instead of re-sweeping). Kept usable in-session so
+  // the current export still completes; the next run re-bakes this AOI fresh.
+  if (stats.timedOut) {
+    console.warn(`[google-bake] sweep timed out — NOT persisting this partial bake (key=${key}); it will re-bake next run`);
+    return group;
+  }
   // Persist in the background so reloads restore from IndexedDB first.
   persistBakeRecords(key, meshes, stations)
     .then((bytes) => {

@@ -173,6 +173,9 @@ export function writeLevelFiles(zip, ctx) {
       // Per-tile photogrammetry textures + matching materials. Material shape
       // mirrors the working mapng_flag entry exactly (Material class uses
       // `colorMap`, not `diffuseMap`; needs 4 Stages even if 3 are empty).
+      // emissive: the photos carry baked-in sunlight/shadows — letting BeamNG
+      // re-light them adds facet shading on the low-poly mesh and doubles the
+      // shadows; emissive renders the (ACES-graded) atlas as-is.
       if (googleTilesTextureFiles.length > 0) {
         zip.folder(`${base}/art/shapes/google_tiles/textures`);
         for (const tex of googleTilesTextureFiles) {
@@ -182,7 +185,10 @@ export function writeLevelFiles(zip, ctx) {
             mapTo: tex.name,
             class: 'Material',
             Stages: [
-              { colorMap: `levels/${levelName}/art/shapes/google_tiles/textures/${tex.name}.${tex.ext}` },
+              {
+                colorMap: `levels/${levelName}/art/shapes/google_tiles/textures/${tex.name}.${tex.ext}`,
+                emissive: true,
+              },
               {},
               {},
               {},
@@ -329,7 +335,12 @@ export function writeLevelFiles(zip, ctx) {
             mapTo: tex.name,
             class: 'Material',
             Stages: [
-              { colorMap: `levels/${levelName}/${dir}/textures/${tex.name}.${tex.ext}` },
+              // emissive: same rationale as the single-tile google_tiles
+              // materials — photogrammetry is pre-lit, don't re-light it.
+              {
+                colorMap: `levels/${levelName}/${dir}/textures/${tex.name}.${tex.ext}`,
+                emissive: true,
+              },
               {}, {}, {},
             ],
             translucentBlendOp: 'None',

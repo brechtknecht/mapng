@@ -110,7 +110,9 @@ const hashArchive = ({ dirs, entries }) => {
   return h.digest('hex').slice(0, 16);
 };
 
-const GOLDEN = '4ca421d2fe6840c5';
+// Repinned after the google-atlas materials gained emissive:true (photogrammetry
+// carries baked-in lighting — BeamNG must not re-light it).
+const GOLDEN = '6c79c10a3a6edd92';
 
 test('writeLevelEntries is deterministic and records the expected tree', () => {
   const a = makeRecorder();

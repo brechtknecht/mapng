@@ -85,6 +85,14 @@ const gauss1d = (h, radius) => {
  *   untrusted and is interpolated along the road like any other gap
  * @param {number} [opts.maxGradePct=25]  physical road-grade ceiling; a
  *   forward/backward slope limiter caps whatever junk survives smoothing
+ * @param {number} [opts.junctionBlendM=25]  junction joint solve: arc length
+ *   over which each road's profile is blended into the junction consensus
+ *   height. Two roads meeting at a crossing sampled the ground independently
+ *   (different cross-taps, different bridged spans), so their carve targets can
+ *   disagree by metres AT THE SAME SPOT — the carve's weight blend ramps
+ *   between the two surfaces but cannot remove the step. The solve clusters
+ *   co-located samples of different roads, agrees one trust-weighted height
+ *   per junction, and eases each profile into it. 0 disables (A/B).
  * @returns {null | {
  *   roads: Array<{
  *     highway: string, halfWidthM: number, throughStructure: boolean,
@@ -94,11 +102,15 @@ const gauss1d = (h, radius) => {
  *   stats: { roads:number, resolved:number, totalKm:number, trustedPct:number,
  *            maxUntrustedGapM:number, maxGradePct:number,
  *            maxGradeAt:null|{highway:string,x:number,z:number},
- *            worstTrust:null|{pct:number,highway:string,x:number,z:number} },
+ *            worstTrust:null|{pct:number,highway:string,x:number,z:number},
+ *            roughnessRmsM:number, worstBump:null|{m,highway,x,z},
+ *            junctionClusters:number, junctionMaxAdjM:number,
+ *            junctionPairs:number, junctionStepP95M:number,
+ *            junctionStepMaxM:number, junctionStepMaxAt:null|{highway,x,z} },
  * }}
  */
 export const buildRoadProfiles = (osmFeatures, data, ground, {
-  stepM = 5, smoothM = 15, outlierM = 2.5, maxGradePct = 25,
+  stepM = 5, smoothM = 15, outlierM = 2.5, maxGradePct = 25, junctionBlendM = 25,
 } = {}) => {
   if (!Array.isArray(osmFeatures) || osmFeatures.length === 0) return null;
   if (!data?.bounds || !data.width || !data.height) return null;
@@ -176,6 +188,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
   const roads = [];
   let totalSamples = 0, totalTrusted = 0, maxUntrustedGapM = 0, aggMaxGradePct = 0;
   let aggMaxGradeAt = null, worstTrust = null;
+  let aggBumpSq = 0, aggBumpN = 0, worstBump = null;
 
   for (const f of osmFeatures) {
     if (!f || f.type !== 'road' || !Array.isArray(f.geometry) || f.geometry.length < 2) continue;
@@ -332,6 +345,30 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       }
     }
 
+    // Longitudinal evenness: each interior sample's residual against the
+    // straight line through its two neighbours — the bump amplitude a wheel
+    // actually feels, in metres. Grade says STEEP; this says WAVY (the grade
+    // limiter's flat-then-kink output scores here while passing the grade cap).
+    let bumpSq = 0, bumpN = 0, roadBumpMax = 0, roadBumpMaxAt = -1;
+    if (resolved) {
+      for (let i = 1; i < pts.length - 1; i++) {
+        const ds0 = pts[i].s - pts[i - 1].s, ds1 = pts[i + 1].s - pts[i].s;
+        if (ds0 <= 1e-6 || ds1 <= 1e-6) continue;
+        const tt = ds0 / (ds0 + ds1);
+        const bump = Math.abs(smooth[i] - (smooth[i - 1] * (1 - tt) + smooth[i + 1] * tt));
+        bumpSq += bump * bump; bumpN++;
+        if (bump > roadBumpMax) { roadBumpMax = bump; roadBumpMaxAt = i; }
+      }
+      aggBumpSq += bumpSq; aggBumpN += bumpN;
+      if (roadBumpMaxAt >= 0 && (!worstBump || roadBumpMax > worstBump.m)) {
+        worstBump = {
+          m: Math.round(roadBumpMax * 1000) / 1000,
+          highway: t.highway || 'unknown',
+          x: pts[roadBumpMaxAt].x, z: pts[roadBumpMaxAt].z,
+        };
+      }
+    }
+
     for (let i = 0; i < pts.length; i++) {
       pts[i].h = smooth[i];
       pts[i].trusted = !!trusted[i];
@@ -347,10 +384,152 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       lengthM: Math.round(lengthM * 10) / 10,
       trustedPct: Math.round((trustedCount / pts.length) * 100),
       maxGradePct: Math.round(roadMaxGrade * 10) / 10,
+      roughnessRmsM: bumpN ? Math.round(Math.sqrt(bumpSq / bumpN) * 1000) / 1000 : 0,
       pts,
     });
   }
   if (roads.length === 0) return null;
+
+  // ── Junction joint solve ──────────────────────────────────────────────────
+  // Each road profiled the ground on its own (own cross-taps, own outlier
+  // rejection, own bridged spans), so where two roads pass through the same
+  // spot their heights can disagree — and the carve's weighted blend then ramps
+  // between two surfaces instead of meeting at one. Cluster co-located samples
+  // of DIFFERENT surface roads (union-find over the same 6m gate the step
+  // metric uses), agree a trust-weighted consensus height per cluster, and
+  // ease every member road into it over junctionBlendM of arc. Runs BEFORE
+  // deck stitching (abutments anchor onto agreed heights) and BEFORE the step
+  // metric (which then reports the residual disagreement, not the solved one).
+  // Bridges/tunnels never join a cluster: crossing at a different level is
+  // their whole point.
+  let junctionClusters = 0, junctionMaxAdjM = 0;
+  if (junctionBlendM > 0 && roads.length > 1) {
+    const gate = 6 * upm, cellS = 5 * upm;
+    const samples = [];
+    for (let ri = 0; ri < roads.length; ri++) {
+      const r = roads[ri];
+      if (!r.resolved || r.throughStructure) continue;
+      let firstT = -1, lastT = -1;
+      for (let i = 0; i < r.pts.length; i++) {
+        if (r.pts[i].trusted) { if (firstT < 0) firstT = i; lastT = i; }
+      }
+      if (firstT < 0) continue;
+      // Only the full-strength span joins: held ends never stamp the carve, so
+      // they neither vote on a consensus nor get corrected toward one.
+      for (let i = firstT; i <= lastT; i++) {
+        const p = r.pts[i];
+        samples.push({ ri, i, x: p.x, z: p.z, h: p.h, w: p.trusted ? 1 : 0.3 });
+      }
+    }
+    if (samples.length > 1) {
+      const parent = new Int32Array(samples.length);
+      for (let k = 0; k < samples.length; k++) parent[k] = k;
+      const find = (a) => {
+        while (parent[a] !== a) { parent[a] = parent[parent[a]]; a = parent[a]; }
+        return a;
+      };
+      const cells = new Map();
+      for (let k = 0; k < samples.length; k++) {
+        const s2 = samples[k];
+        const key = Math.round(s2.x / cellS) * 100003 + Math.round(s2.z / cellS);
+        let b = cells.get(key);
+        if (!b) cells.set(key, b = []);
+        b.push(k);
+      }
+      const link = (ka, kb) => {
+        const a = samples[ka], b2 = samples[kb];
+        if (a.ri === b2.ri) return;
+        if (Math.hypot(a.x - b2.x, a.z - b2.z) > gate) return;
+        const ra = find(ka), rb = find(kb);
+        if (ra !== rb) parent[ra] = rb;
+      };
+      const NEIGH2 = [[1, 0], [0, 1], [1, 1], [1, -1]];
+      for (const [key, b] of cells) {
+        for (let i = 0; i < b.length; i++) {
+          for (let j = i + 1; j < b.length; j++) link(b[i], b[j]);
+        }
+        for (const [dx, dz] of NEIGH2) {
+          const nb = cells.get(key + dx * 100003 + dz);
+          if (!nb) continue;
+          for (const ka of b) for (const kb of nb) link(ka, kb);
+        }
+      }
+      const clusters = new Map();
+      for (let k = 0; k < samples.length; k++) {
+        const root = find(k);
+        let c = clusters.get(root);
+        if (!c) clusters.set(root, c = []);
+        c.push(k);
+      }
+      // Per-road constraint list: (sample index, delta toward the consensus).
+      const constraints = new Map();
+      for (const c of clusters.values()) {
+        if (c.length < 2) continue;
+        const riSet = new Set(c.map((k) => samples[k].ri));
+        if (riSet.size < 2) continue; // one road folding back on itself is not a junction
+        // Parallel-run guard: a genuine junction is POINT-like along every
+        // member road. Two roads running side by side within the gate (dual
+        // carriageway, slip lane, mapped service strip) chain into ONE cluster
+        // through the union-find — and a single consensus height would flatten
+        // both over their whole shared run, erasing real grade. If any road's
+        // member samples span more than a junction plausibly can, skip: the
+        // carve's weight blend keeps handling parallel corridors.
+        const JUNCTION_SPAN_M = 15;
+        let parallelRun = false;
+        const spanByRoad = new Map();
+        for (const k of c) {
+          const s2 = samples[k];
+          const sArc = roads[s2.ri].pts[s2.i].s;
+          const sp = spanByRoad.get(s2.ri);
+          if (!sp) spanByRoad.set(s2.ri, [sArc, sArc]);
+          else {
+            if (sArc < sp[0]) sp[0] = sArc;
+            if (sArc > sp[1]) sp[1] = sArc;
+          }
+        }
+        for (const [lo, hi] of spanByRoad.values()) {
+          if (hi - lo > JUNCTION_SPAN_M) { parallelRun = true; break; }
+        }
+        if (parallelRun) continue;
+        let hw = 0, ww = 0;
+        for (const k of c) { hw += samples[k].w * samples[k].h; ww += samples[k].w; }
+        const H = hw / ww;
+        junctionClusters++;
+        for (const k of c) {
+          const s2 = samples[k];
+          let list = constraints.get(s2.ri);
+          if (!list) constraints.set(s2.ri, list = []);
+          list.push({ i: s2.i, delta: H - s2.h });
+        }
+      }
+      // Ease each profile into its constraints: falloff-weighted average of the
+      // deltas, normalised so overlapping junctions cannot overshoot, exact at
+      // the junction sample itself. The falloff is smooth, so the correction
+      // cannot introduce a kink the smoother just removed.
+      for (const [ri, list] of constraints) {
+        const pts = roads[ri].pts;
+        const corr = new Float64Array(pts.length);
+        const wsum = new Float64Array(pts.length);
+        for (const { i: i0, delta } of list) {
+          const s0 = pts[i0].s;
+          for (let i = 0; i < pts.length; i++) {
+            const dsAbs = Math.abs(pts[i].s - s0);
+            if (dsAbs >= junctionBlendM) continue;
+            const w = smoothstep(1 - dsAbs / junctionBlendM);
+            corr[i] += w * delta;
+            wsum[i] += w;
+          }
+        }
+        for (let i = 0; i < pts.length; i++) {
+          if (wsum[i] <= 0) continue;
+          const adj = corr[i] / Math.max(1, wsum[i]);
+          pts[i].h += adj;
+          const a = Math.abs(adj);
+          if (a > junctionMaxAdjM) junctionMaxAdjM = a;
+        }
+      }
+    }
+  }
 
   // Stitch structure profiles: a bridge way has no trusted samples of its own
   // (its raw min reads a mix of deck and the road below), but its ENDPOINTS
@@ -382,6 +561,66 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
     r.stitched = true;
   }
 
+  // Junction evenness: wherever two carving roads pass through the same spot,
+  // BOTH profiles stamp the cell — the carve blends their weights, but any
+  // HEIGHT gap between the two targets survives as a step/ramp in the .ter
+  // (weights taper smoothly; disagreeing heights don't). Spatial-hash the
+  // full-strength samples and measure the worst cross-road disagreement. This
+  // is the number the junction joint-solve has to drive to zero.
+  const stepGate = 6 * upm;   // only compare samples this close (scene units)
+  const cellJ = 5 * upm;      // hash cell ≈ one profile step
+  const buckets = new Map();
+  for (let ri = 0; ri < roads.length; ri++) {
+    const r = roads[ri];
+    if (!r.resolved || r.throughStructure) continue;
+    let firstT = -1, lastT = -1;
+    for (let i = 0; i < r.pts.length; i++) {
+      if (r.pts[i].trusted) { if (firstT < 0) firstT = i; lastT = i; }
+    }
+    if (firstT < 0) { firstT = 0; lastT = r.pts.length - 1; }
+    // Held end spans taper to zero carve weight — they never stamp, so they
+    // don't belong in the junction audit. Interior bridged spans carve at full
+    // strength and stay in.
+    for (let i = firstT; i <= lastT; i++) {
+      const p = r.pts[i];
+      const kx = Math.round(p.x / cellJ), kz = Math.round(p.z / cellJ);
+      const key = kx * 100003 + kz;
+      let b = buckets.get(key);
+      if (!b) buckets.set(key, b = []);
+      b.push({ ri, h: p.h, x: p.x, z: p.z, hw: r.highway });
+    }
+  }
+  const steps = [];
+  let junctionMax = null;
+  const compare = (a, b2) => {
+    if (a.ri === b2.ri) return;
+    const d = Math.hypot(a.x - b2.x, a.z - b2.z);
+    if (d > stepGate) return;
+    const step = Math.abs(a.h - b2.h);
+    steps.push(step);
+    if (!junctionMax || step > junctionMax.m) {
+      junctionMax = {
+        m: step, highways: `${a.hw}×${b2.hw}`,
+        x: (a.x + b2.x) / 2, z: (a.z + b2.z) / 2,
+      };
+    }
+  };
+  // Half-neighbourhood sweep so every nearby pair is compared exactly once.
+  const NEIGH = [[1, 0], [0, 1], [1, 1], [1, -1]];
+  for (const [key, b] of buckets) {
+    for (let i = 0; i < b.length; i++) {
+      for (let j = i + 1; j < b.length; j++) compare(b[i], b[j]);
+    }
+    for (const [dx, dz] of NEIGH) {
+      const nb = buckets.get(key + dx * 100003 + dz);
+      if (!nb) continue;
+      for (const a of b) for (const c of nb) compare(a, c);
+    }
+  }
+  steps.sort((a, b2) => a - b2);
+  const junctionStepP95M = steps.length
+    ? Math.round(steps[Math.floor(0.95 * (steps.length - 1))] * 100) / 100 : 0;
+
   const resolvedCount = roads.filter((r) => r.resolved).length;
   return {
     roads,
@@ -397,6 +636,19 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       // profile-wireframe debug view) so a bad profile is pinnable from the log.
       maxGradeAt: aggMaxGradeAt,
       worstTrust,
+      // Evenness telemetry (see task: road/.ter good→great). roughnessRmsM is
+      // the aggregate bump amplitude of the SMOOTHED profiles; junction steps
+      // measure cross-road target disagreement the carve blend can only ramp.
+      roughnessRmsM: aggBumpN ? Math.round(Math.sqrt(aggBumpSq / aggBumpN) * 1000) / 1000 : 0,
+      worstBump,
+      junctionClusters,
+      junctionMaxAdjM: Math.round(junctionMaxAdjM * 100) / 100,
+      junctionPairs: steps.length,
+      junctionStepP95M,
+      junctionStepMaxM: junctionMax ? Math.round(junctionMax.m * 100) / 100 : 0,
+      junctionStepMaxAt: junctionMax
+        ? { highway: junctionMax.highways, x: junctionMax.x, z: junctionMax.z }
+        : null,
     },
   };
 };
@@ -433,7 +685,9 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
  *   resolved non-structure roads (the .ter carve). The deck snap passes
  *   `r.throughStructure && r.resolved` to stamp stitched bridge profiles into
  *   a TRANSIENT deck floor instead.
- * @returns {{ carvedCells:number, maxShiftM:number, minH:number, maxH:number }}
+ * @returns {{ carvedCells:number, maxShiftM:number, minH:number, maxH:number,
+ *            profileResidualRmsM:number, profileResidualMaxM:number,
+ *            residualSamples:number }}
  */
 export const carveRoadProfiles = (profiles, data, ground, {
   featherM = 3, maxCarveM = 10, endTaperM = 10, roadFilter = null,
@@ -458,6 +712,7 @@ export const carveRoadProfiles = (profiles, data, ground, {
   const toRow = (z) => ((z + HALF) / SCENE_SIZE) * (H - 1);
 
   const keep = roadFilter ?? ((r) => r.resolved && !r.throughStructure);
+  const keptRoads = []; // for the post-carve fidelity resample below
   for (const r of profiles.roads) {
     if (!keep(r)) continue;
     const halfW = r.halfWidthM * upm;
@@ -486,6 +741,7 @@ export const carveRoadProfiles = (profiles, data, ground, {
         }
       }
     }
+    keptRoads.push({ pts, conf });
 
     for (let i = 1; i < pts.length; i++) {
       const a = pts[i - 1], b = pts[i];
@@ -537,5 +793,26 @@ export const carveRoadProfiles = (profiles, data, ground, {
     // so the terSnap pass may pull the road mesh onto it (underpass included).
     if (cm && w >= 0.9) cm[idx] = 1;
   }
-  return { carvedCells, maxShiftM: +maxShiftM.toFixed(2), minH, maxH };
+
+  // Post-carve fidelity: resample the carved grid along every full-strength
+  // profile span. The gap between what the 1D smoother promised and what the
+  // grid actually holds is the resolution/blend cost — the .ter's own bumps
+  // (grid aliasing, cross-road blend zones, maxCarveM clamps all land here).
+  const carvedFloor = { ...data, heightMap: hm };
+  let resSq = 0, resN = 0, resMax = 0;
+  for (const k of keptRoads) {
+    for (let i = 0; i < k.pts.length; i++) {
+      if (k.conf && k.conf[i] < 1) continue; // tapered ends never fully stamp
+      const p = k.pts[i];
+      const e = Math.abs(sampleHeightAtScene(carvedFloor, p.x, p.z) - p.h);
+      resSq += e * e; resN++;
+      if (e > resMax) resMax = e;
+    }
+  }
+  return {
+    carvedCells, maxShiftM: +maxShiftM.toFixed(2), minH, maxH,
+    profileResidualRmsM: resN ? Math.round(Math.sqrt(resSq / resN) * 1000) / 1000 : 0,
+    profileResidualMaxM: Math.round(resMax * 100) / 100,
+    residualSamples: resN,
+  };
 };

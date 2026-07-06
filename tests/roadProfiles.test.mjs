@@ -343,3 +343,102 @@ test('non-drivable ways and empty input yield no profiles', () => {
   assert.equal(buildRoadProfiles([], DATA, g), null);
   assert.equal(buildRoadProfiles(null, DATA, g), null);
 });
+
+test('evenness telemetry: flat road scores ~zero roughness and no junction pairs', () => {
+  const g = groundStub(() => 42);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'residential' })], DATA, g);
+  const st = prof.stats;
+  assert.ok(st.roughnessRmsM < 0.005, `flat road is not wavy, got ${st.roughnessRmsM}m`);
+  assert.equal(st.junctionPairs, 0, 'a single road has no cross-road pairs');
+  assert.equal(st.junctionStepMaxM, 0);
+  assert.equal(prof.roads[0].roughnessRmsM, prof.stats.roughnessRmsM);
+});
+
+test('junction step telemetry flags cross-road target disagreement', () => {
+  // Ground: a 45m-deep column band inside a 50m plain. Coverage is punched out
+  // in a box around the crossing, so BOTH roads bridge it — the EW road from
+  // 50m plain to 50m plain (target ~50 over the crossing), the NS road along
+  // the 45m band (target ~45). Same spot, ~5m of disagreement: exactly the
+  // stepped-junction signature the carve blend can only ramp.
+  const heightMap = new Float32Array(N * N);
+  const coveredMask = new Uint8Array(N * N).fill(1);
+  for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+      heightMap[row * N + col] = (col >= 90 && col <= 110) ? 45 : 50;
+      if (col >= 88 && col <= 112 && row >= 88 && row <= 112) coveredMask[row * N + col] = 0;
+    }
+  }
+  const g = { heightMap, coveredMask };
+  const ns = {
+    type: 'road',
+    tags: { highway: 'primary' },
+    geometry: [
+      { lat: 5 / 111320, lng: 100 / 111320 },
+      { lat: 195 / 111320, lng: 100 / 111320 },
+    ],
+  };
+  // A: solve disabled — the raw ~5m disagreement is reported.
+  const raw = buildRoadProfiles(
+    [roadFeature({ highway: 'primary' }), ns], DATA, g, { junctionBlendM: 0 },
+  );
+  assert.ok(raw.roads.every((r) => r.resolved), 'both roads resolved');
+  assert.ok(raw.stats.junctionPairs > 0, 'crossing detected');
+  assert.ok(raw.stats.junctionStepMaxM > 3, `~5m disagreement reported, got ${raw.stats.junctionStepMaxM}m`);
+  assert.ok(raw.stats.junctionStepMaxAt, 'worst junction is pinnable');
+  assert.equal(raw.stats.junctionClusters, 0, 'solve off ⇒ no clusters');
+
+  // B: joint solve on (default) — the two profiles agree at the crossing and
+  // the residual step collapses; the correction eases in without new kinks.
+  const solved = buildRoadProfiles([roadFeature({ highway: 'primary' }), ns], DATA, g);
+  const st = solved.stats;
+  assert.ok(st.junctionClusters > 0, 'junction clustered');
+  assert.ok(st.junctionMaxAdjM > 1, `metres of correction applied, got ${st.junctionMaxAdjM}m`);
+  assert.ok(st.junctionStepMaxM < 1,
+    `solved step, got ${st.junctionStepMaxM}m (raw ${raw.stats.junctionStepMaxM}m)`);
+  for (const r of solved.roads) {
+    for (let i = 1; i < r.pts.length; i++) {
+      const ds = Math.max(0.01, r.pts[i].s - r.pts[i - 1].s);
+      const g2 = Math.abs(r.pts[i].h - r.pts[i - 1].h) / ds;
+      assert.ok(g2 < 0.35, `no kink from the blend-in: grade ${(g2 * 100).toFixed(0)}% at s=${r.pts[i].s}`);
+    }
+  }
+});
+
+test('junction solve leaves parallel roads alone (no flattening of real grade)', () => {
+  // Two E–W roads 4m apart, on a 5% west–east slope, seated 2m apart in height
+  // (terrace street). The union-find chains their samples into one cluster for
+  // the whole shared run — the parallel-run guard must reject it, or the
+  // "consensus" would flatten both roads to one constant mean height.
+  const heightMap = new Float32Array(N * N);
+  const coveredMask = new Uint8Array(N * N).fill(1);
+  for (let row = 0; row < N; row++) {
+    for (let col = 0; col < N; col++) {
+      heightMap[row * N + col] = col * 0.05 + (row < 100 ? 2 : 0);
+    }
+  }
+  const g = { heightMap, coveredMask };
+  const upper = {
+    type: 'road',
+    tags: { highway: 'residential' },
+    geometry: [
+      { lat: 98 / 111320, lng: 5 / 111320 },
+      { lat: 98 / 111320, lng: 195 / 111320 },
+    ],
+  };
+  const prof = buildRoadProfiles([roadFeature({ highway: 'residential' }), upper], DATA, g);
+  assert.equal(prof.stats.junctionClusters, 0, 'parallel run rejected, no junction solved');
+  for (const r of prof.roads) {
+    const first = r.pts[0], last = r.pts[r.pts.length - 1];
+    const rise = last.h - first.h;
+    assert.ok(Math.abs(rise - 9.5) < 1, `5% grade preserved over 190m, got rise ${rise.toFixed(2)}m`);
+  }
+});
+
+test('carve reports .ter-vs-profile residual over full-strength spans', () => {
+  const g = groundStub(() => 42);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'residential' })], DATA, g);
+  const cs = carveRoadProfiles(prof, DATA, g);
+  assert.ok(cs.residualSamples > 30, `samples audited, got ${cs.residualSamples}`);
+  assert.ok(cs.profileResidualRmsM < 0.05, `flat carve is faithful, got rms ${cs.profileResidualRmsM}m`);
+  assert.ok(cs.profileResidualMaxM < 0.2, `no outlier cells, got max ${cs.profileResidualMaxM}m`);
+});

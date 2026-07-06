@@ -353,6 +353,7 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
   // cannot tell those from junk dips; the road can). Runs BEFORE terSnap, which
   // therefore snaps the road mesh onto the carved floor.
   session.roadProfiles = null;
+  session.carveStats = null;
   if (session.extractedGround) {
     try {
       const prof = buildRoadProfiles(session.data.osmFeatures, session.data, session.extractedGround);
@@ -368,15 +369,26 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
           (st.maxGradeAt ? ` (${at(st.maxGradeAt)})` : '') +
           (st.worstTrust ? `, least trusted ${st.worstTrust.pct}% (${at(st.worstTrust)})` : ''),
         );
+        console.info(
+          `[bakeWorker] [roadProfiles] evenness: profile roughness rms ${st.roughnessRmsM}m` +
+          (st.worstBump ? ` (worst bump ${st.worstBump.m}m, ${at(st.worstBump)})` : '') +
+          `, junctions: ${st.junctionClusters} solved (max adj ${st.junctionMaxAdjM}m), ` +
+          `residual steps: ${st.junctionPairs} pairs, p95 ${st.junctionStepP95M}m, ` +
+          `max ${st.junctionStepMaxM}m` +
+          (st.junctionStepMaxAt ? ` (${at(st.junctionStepMaxAt)})` : ''),
+        );
         if (groundStrategy?.carveRoads ?? true) {
           const g = session.extractedGround;
           const cs = carveRoadProfiles(prof, session.data, g);
+          session.carveStats = cs;
           if (cs.carvedCells > 0) {
             g.minHeight = Math.min(g.minHeight, cs.minH);
             g.maxHeight = Math.max(g.maxHeight, cs.maxH);
             console.info(
               `[bakeWorker] [roadProfiles] carved ${cs.carvedCells} cells into the .ter ` +
-              `(max shift ${cs.maxShiftM}m)`,
+              `(max shift ${cs.maxShiftM}m), .ter-vs-profile residual rms ` +
+              `${cs.profileResidualRmsM}m / max ${cs.profileResidualMaxM}m ` +
+              `over ${cs.residualSamples} samples`,
             );
           }
         }
@@ -1354,9 +1366,17 @@ async function exportAssembly(session, revision, spec) {
     // The effective vertical anchor this bake used — chunk 0 of a route reports
     // it back so every later chunk (and the preview) seats on the same datum.
     groundOffsetM: session.transformMesh?.groundOffsetM,
+    // Sweep budget exhaustion = stations were SKIPPED = geometry is missing
+    // (holes at the corridor tail / chunk seams). Shipped so the browser can
+    // warn per chunk instead of burying it in the worker log.
+    timedOut: session.lastTimedOut === true,
     // Route mode: the bare-earth tile ground for this chunk's .ter (z-offset-
     // independent, extracted once in startBake). Absent for single-tile bakes.
     ...(session.extractedGround ? { ground: encodeGround(session.extractedGround) } : {}),
+    // Road-profile evenness telemetry: the worker has no /api/log bridge, so
+    // the browser forwards these to the turbolog `road-profiles` stream.
+    ...(session.roadProfiles?.stats ? { roadProfileStats: session.roadProfiles.stats } : {}),
+    ...(session.carveStats ? { roadCarveStats: session.carveStats } : {}),
   });
 }
 

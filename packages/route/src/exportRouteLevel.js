@@ -269,8 +269,16 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     const bakeStarted = new Set(); // chunk indices whose real bake began
     const prefetchQueue = [];
     let prefetchActive = 0;
+    // Once the assembly pool fans out (post-anchor), REAL bakes own the
+    // bandwidth: `concurrency` concurrent sweeps + prefetches on top starved
+    // each sweep enough to trip its wall-clock budget, which silently skips
+    // the corridor's tail stations — the "missing pieces at chunk seams"
+    // failure. Prefetch's whole win is the fetch + chunk-0-anchor window, so
+    // it stops scheduling the moment the pool opens (in-flight ones finish).
+    let poolOpen = false;
     const PREFETCH_LIMIT = 2;
     const pumpPrefetch = () => {
+      if (poolOpen) { prefetchQueue.length = 0; return; }
       while (prefetchActive < PREFETCH_LIMIT && prefetchQueue.length) {
         const { i, run } = prefetchQueue.shift();
         if (bakeStarted.has(i) || signal?.aborted) continue;
@@ -417,6 +425,13 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         sharedGroundOffsetM = exported.groundOffsetM;
         console.info(`[routeLevel] shared Google vertical anchor = ${sharedGroundOffsetM.toFixed(2)}m (from chunk 0)`);
       }
+      if (exported?.timedOut) {
+        // Budget-exhausted sweep = skipped corridor stations = missing mesh at
+        // this chunk's tail/seam. Loud, per chunk — re-export re-sweeps only
+        // the timed-out chunk (the others restore from cache).
+        console.warn(`[routeLevel] chunk ${i + 1}/${total}: sweep budget exhausted — geometry is INCOMPLETE (expect holes near this chunk's seam)`);
+        devLog('route-placement', `chunk ${i} sweep TIMED OUT — partial geometry`, { chunk: i, stage: 'bake-timeout' });
+      }
       // Assembled-mesh geometry probe (turbolog `dae-geometry`): where the WORKER
       // GLB actually lands, in final metres, vs the chunk's expected extent. The
       // DAE is placed at [east,north]≈mesh-centre, so mesh centre X/Z should be
@@ -433,6 +448,23 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           expectedHalfM: chunkSizeM / 2,
           corridorHalfWidthM: tier.halfWidthM,
         });
+      }
+
+      // Road-profile evenness telemetry (turbolog `road-profiles`): the worker
+      // builds and carves the profiles but has no /api/log bridge, so its stats
+      // ride the exported payload and are forwarded here. These are the numbers
+      // the junction-solve / smoother work has to drive down.
+      const rp = exported?.roadProfileStats;
+      if (rp) {
+        const rc = exported?.roadCarveStats;
+        devLog('road-profiles',
+          `chunk ${i}: roughness rms ${rp.roughnessRmsM}m, ` +
+          `junction steps p95 ${rp.junctionStepP95M}m / max ${rp.junctionStepMaxM}m (${rp.junctionPairs} pairs)` +
+          (rc ? `, .ter-vs-profile residual rms ${rc.profileResidualRmsM}m / max ${rc.profileResidualMaxM}m` : ''), {
+            chunk: i,
+            ...rp,
+            carve: rc ?? null,
+          });
       }
 
       // Pair the chunk's ground with its bounds (terrains[i] alive here). Absent
@@ -524,6 +556,8 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // Late-open fallback + failure propagation. Settled-gate re-calls are no-ops.
     chunk0.then(() => anchorResolve(), (err) => anchorReject(err));
     await anchorGate; // throws if chunk 0 failed before an anchor existed
+    poolOpen = true; // real bakes fan out now — stop scheduling prefetches
+    pumpPrefetch(); // drains the queue
     let nextAsm = 1;
     const limit = Math.max(1, Math.min(concurrency, Math.max(1, total - 1)));
     const assembleWorker = async () => {

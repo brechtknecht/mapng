@@ -28,7 +28,14 @@
 //      OSM building footprints freeze the delta field locally constant (rigid
 //      re-seat — roofs stay planar) and veto the road snap underneath; sidecar
 //      now ships building/man_made footprints. Conformed bakes change geometry.
-export const BAKE_FORMAT_VERSION = 16;
+// v17: road-profile evenness telemetry rides the worker's exported payload
+//      (roadProfileStats/roadCarveStats → turbolog `road-profiles` stream).
+//      Geometry unchanged, but cached payloads lack the stats fields.
+// v18: junction joint solve in buildRoadProfiles — co-located samples of
+//      different surface roads agree one consensus height per junction and
+//      each profile eases into it (junctionBlendM). Carved .ter changes at
+//      every crossing, so cached grounds/bakes are stale.
+export const BAKE_FORMAT_VERSION = 18;
 
 // FNV-1a 32-bit over a string — the cache key's compact fingerprint primitive.
 const fnv1a = (s, h = 2166136261) => {

@@ -75,7 +75,16 @@ export async function runStationSweep({
   let timedOut = false;
   // Derived from the (AOI-dependent) station count; recomputed when the
   // road pass appends stations mid-sweep.
-  let bakeBudgetMs = maxWaitMs ?? (120000 + stations.length * 25000);
+  //
+  // Corridor (route) bakes get 3× headroom: several chunk sweeps + tile
+  // prefetches run CONCURRENTLY and share bandwidth/CPU, so each sweep's
+  // wall-clock stretches well past the single-bake pacing this formula was
+  // tuned on. An exhausted budget silently SKIPS the remaining stations —
+  // corridor stations follow the route in order, so the dropped tail is the
+  // chunk's far end, which shows up as missing mesh pieces at chunk seams.
+  // The budget is a hang guard, not a pacing tool — scale it, don't drop tiles.
+  const budgetScale = (Array.isArray(corridorSegment) && corridorSegment.length >= 2) ? 3 : 1;
+  let bakeBudgetMs = maxWaitMs ?? (120000 + stations.length * 25000) * budgetScale;
 
   // 'max' tier: stop sweeping the deepen oblique tail once it stops adding new
   // tiles. Google's photorealistic LOD is finite — past the ceiling, extra
@@ -255,7 +264,7 @@ export async function runStationSweep({
               `(${corridorMode ? 'degenerate route segment' : 'no OSM roads in the AOI'}) — overview only`,
             );
           } else {
-            if (maxWaitMs == null) bakeBudgetMs = 120000 + stations.length * 25000;
+            if (maxWaitMs == null) bakeBudgetMs = (120000 + stations.length * 25000) * budgetScale;
             console.info(
               `[google3dTiles] ${corridorMode ? 'corridor' : 'road'} pass: ${appended.length} stations queued ` +
               `(ground ≈ ${centerGroundAlt.toFixed(1)}m ellipsoidal, budget now ${Math.round(bakeBudgetMs / 1000)}s)`,

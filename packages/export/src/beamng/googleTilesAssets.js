@@ -9,7 +9,23 @@ import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { ColladaExporter } from '../ColladaExporter.js';
 import { getOrBakeGoogle3DTiles, getGoogleTilesZOffset, exportGoogleTilesViaSidecar, googleBakeSidecarAvailable } from '@mapng/bake/google3dTiles';
+import { computeWeldedNormals } from '@mapng/bake/tiles/weldedNormals';
+import { bakeAcesToneMap } from '@mapng/bake/materials/acesFilmicBake';
 import { SCENE_SIZE } from '../scene3d/sceneProjection.js';
+
+// Plain VEC3 view of a position attribute — glTF-loaded geometry can be
+// interleaved, where `.array` is the whole interleaved buffer.
+function readPositionsVec3(geom) {
+  const attr = geom.attributes.position;
+  if (!attr.isInterleavedBufferAttribute) return attr.array;
+  const out = new Float32Array(attr.count * 3);
+  for (let i = 0; i < attr.count; i++) {
+    out[i * 3] = attr.getX(i);
+    out[i * 3 + 1] = attr.getY(i);
+    out[i * 3 + 2] = attr.getZ(i);
+  }
+  return out;
+}
 
 /**
  * Bake Google Photorealistic 3D Tiles into a BeamNG-ready GLB plus the atlas
@@ -84,7 +100,6 @@ export async function generateGoogleTilesGLB(terrainData, worldSize, googleOptio
     if (!mesh.geometry?.attributes?.position) continue;
     const geom = mesh.geometry.clone();
     geom.applyMatrix4(transformMatrix);
-    geom.computeVertexNormals();
     const mat = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
     const img = mat?.map?.image ?? null;
     const valid = img && img.width > 0 && img.height > 0;
@@ -101,6 +116,19 @@ export async function generateGoogleTilesGLB(terrainData, worldSize, googleOptio
     });
   }
   if (entries.length === 0) return null;
+
+  // Smooth normals welded ACROSS tiles, not per tile: duplicated vertices at
+  // UV seams and tile borders otherwise keep un-averaged normals — a hard
+  // shading edge along every seam under BeamNG's directional sun. Positions
+  // must already be final (post-transform) so duplicates land on the same
+  // weld-grid cell.
+  const normalArrays = computeWeldedNormals(entries.map(({ geom }) => ({
+    positions: readPositionsVec3(geom),
+    index: geom.index ? geom.index.array : null,
+  })));
+  entries.forEach(({ geom }, i) => {
+    geom.setAttribute('normal', new THREE.BufferAttribute(normalArrays[i], 3));
+  });
 
   // Shelf-pack, tallest first, into as many atlases as needed.
   const atlases = [];
@@ -168,6 +196,18 @@ export async function generateGoogleTilesGLB(terrainData, worldSize, googleOptio
       const v = Math.min(1, Math.max(0, uv.getY(i)));
       uv.setXY(i, u0 + u * uw, v0 + v * vh);
     }
+  }
+
+  // Bake the preview's ACES filmic grade (exposure 0.8) into the atlas
+  // pixels: BeamNG has no equivalent of the preview's scene tone mapping, and
+  // the atlas materials are emissive (never re-lit), so the texture IS the
+  // final on-screen colour. Must run after every tile is drawn and before the
+  // CanvasTexture snapshot below.
+  for (const a of atlases) {
+    if (a.entries.length === 0) continue;
+    const imgData = a.ctx.getImageData(0, 0, ATLAS_SIZE, ATLAS_SIZE);
+    bakeAcesToneMap(imgData.data, 4);
+    a.ctx.putImageData(imgData, 0, 0);
   }
 
   // Chunked meshes, ≤60k vertices each, ONE atlas material each. The final
