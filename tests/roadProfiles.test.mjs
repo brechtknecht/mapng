@@ -529,6 +529,30 @@ test('carve veto: a mostly-interpolated service way is vetoed, an arterial road 
   assert.equal(res.carveVeto, null, 'residential keeps carving on low trust (the route may run under trees)');
 });
 
+test('junction consensus: the higher-class road is the reference, the side road meets its grade', () => {
+  // E–W road through the centre (roadFeature) crossing a N–S road at x≈0. The
+  // ground reads 42 m everywhere except a 9-column band under the N–S road at
+  // 44 m (a raised crossing / parked cars the side road profiled as its level).
+  const ns = (tags) => ({ type: 'road', tags, geometry: [{ lat: 5 / 111320, lng: 100 / 111320 }, { lat: 195 / 111320, lng: 100 / 111320 }] });
+  const ground = () => {
+    const heightMap = new Float32Array(N * N), coveredMask = new Uint8Array(N * N).fill(1);
+    for (let row = 0; row < N; row++) for (let col = 0; col < N; col++) heightMap[row * N + col] = col >= 96 && col <= 104 ? 44 : 42;
+    return { heightMap, coveredMask };
+  };
+  const centreOf = (r) => r.pts.reduce((best, p) => (Math.hypot(p.x, p.z) < Math.hypot(best.x, best.z) ? p : best), r.pts[0]);
+  // residential (E–W, 42 m) × service (N–S, 44 m): the residential stays, the service comes down.
+  let prof = buildRoadProfiles([roadFeature({ highway: 'residential' }), ns({ highway: 'service' })], DATA, ground());
+  let [a, b] = prof.roads;
+  assert.ok(prof.stats.junctionClusters >= 1, 'a junction was solved');
+  assert.ok(centreOf(a).h < 42.35, `residential keeps ~42 m at the junction, got ${centreOf(a).h.toFixed(2)}`);
+  assert.ok(Math.abs(centreOf(b).h - centreOf(a).h) < 0.3, `service meets the residential grade, got ${centreOf(b).h.toFixed(2)} vs ${centreOf(a).h.toFixed(2)}`);
+  // Swap the classes: now the N–S residential (44 m) is the reference and the E–W service rises to it.
+  prof = buildRoadProfiles([roadFeature({ highway: 'service' }), ns({ highway: 'residential' })], DATA, ground());
+  [a, b] = prof.roads;
+  assert.ok(Math.abs(centreOf(b).h - 44) < 0.15, `residential keeps 44 m, got ${centreOf(b).h.toFixed(2)}`);
+  assert.ok(centreOf(a).h > 43.5, `service rises to the residential grade, got ${centreOf(a).h.toFixed(2)}`);
+});
+
 test('carve reports .ter-vs-profile residual over full-strength spans', () => {
   const g = groundStub(() => 42);
   const prof = buildRoadProfiles([roadFeature({ highway: 'residential' })], DATA, g);

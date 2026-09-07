@@ -33,6 +33,16 @@ const smoothstep = (t) => (t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t));
 
 // The minimal road subset a preview needs to build profiles later (geometry +
 // tags only, no texture/area payloads) — small enough to pin per chunk.
+// Road-class precedence for the junction solve: lower = more important. At a
+// junction the more important road is the reference and the others meet its
+// grade (see the consensus step in buildRoadProfiles).
+const HIGHWAY_RANK = {
+  motorway: 0, motorway_link: 1, trunk: 1, trunk_link: 2, primary: 2, primary_link: 3,
+  secondary: 3, secondary_link: 4, tertiary: 4, tertiary_link: 5,
+  unclassified: 6, residential: 6, living_street: 7, service: 8, track: 9,
+};
+export const highwayRank = (highway) => HIGHWAY_RANK[highway] ?? 7;
+
 export const pickProfileRoads = (features) => (Array.isArray(features) ? features : [])
   .filter((f) => f?.type === 'road' && Array.isArray(f.geometry) && f.geometry.length >= 2)
   .map((f) => ({ type: 'road', geometry: f.geometry, tags: f.tags }));
@@ -502,7 +512,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       // they neither vote on a consensus nor get corrected toward one.
       for (let i = firstT; i <= lastT; i++) {
         const p = r.pts[i];
-        samples.push({ ri, i, x: p.x, z: p.z, h: p.h, w: p.trusted ? 1 : 0.3 });
+        samples.push({ ri, i, x: p.x, z: p.z, h: p.h, w: p.trusted ? 1 : 0.3, rank: highwayRank(r.highway) });
       }
     }
     if (samples.length > 1) {
@@ -575,8 +585,17 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
           if (hi - lo > JUNCTION_SPAN_M) { parallelRun = true; break; }
         }
         if (parallelRun) continue;
+        // Consensus = the HIGHEST-CLASS road present (trust-weighted mean over
+        // its samples); lower classes ease into it. Roads are built that way —
+        // a side street meets the main road's grade, never the reverse — and
+        // the alternative (a trust-weighted mean over all members) let a
+        // service way that read a raised crossing or parked cars lift the
+        // driven road: measured as a 0.45 m hump over 40 m of a flat
+        // residential road, exactly the 0.43 m junction adjustment logged.
+        let topRank = Infinity;
+        for (const k of c) if (samples[k].rank < topRank) topRank = samples[k].rank;
         let hw = 0, ww = 0;
-        for (const k of c) { hw += samples[k].w * samples[k].h; ww += samples[k].w; }
+        for (const k of c) { if (samples[k].rank !== topRank) continue; hw += samples[k].w * samples[k].h; ww += samples[k].w; }
         const H = hw / ww;
         // Physicality cap: easing a correction into a profile over
         // junctionBlendM at the maxGradePct ceiling can absorb at most

@@ -621,7 +621,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         // ownershipFeatherM: the .ter takes the OWNER chunk's floor (Voronoi by
         // chunk centre), crossing over within ±6 m of the bisector — the same
         // line the worker clipped each chunk's mesh on.
-        const cg = compositeRouteGround(grounds, combined, { featherM: 15, ownershipFeatherM: 6 });
+        // ownershipFeatherM 20: on the road the chunk floors agree (≤ 0.02 m
+        // measured), so the feather costs nothing there; off the road the two
+        // chunks' DEM frames can still differ by ~1–2 m at the seam, and a 20 m
+        // cross-fade turns that into a gentle ramp instead of a step.
+        const cg = compositeRouteGround(grounds, combined, { featherM: 15, ownershipFeatherM: 20 });
         combinedGround = { heightMap: cg.heightMap, groundMax: cg.groundMax };
         console.info(
           `[routeLevel] route .ter ground: ${(cg.coverage * 100).toFixed(0)}% of the grid from tiles, ` +

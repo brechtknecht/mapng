@@ -222,7 +222,13 @@ export const estimateTileDemOffsetField = (soup, data, {
   windowM = 60,
   stepM = 10,
   minCellsWindow = 25,
-  fullWidthM = 50,
+  // Lateral behaviour: hold the along-route value across the whole box by
+  // default. Fading to the chunk-constant median made neighbouring chunks'
+  // DEM frames differ by their constants' difference off the corridor (5 m at
+  // one seam) — a cliff in the filler terrain beside the road at the
+  // ownership line. Off the corridor there are no tiles, so consistency
+  // between chunks matters more than local accuracy.
+  fullWidthM = Infinity,
   fadeWidthM = 100,
 } = {}) => {
   if (!route) return null;

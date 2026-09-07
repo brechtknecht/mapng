@@ -78,6 +78,7 @@ import { collectStructureRings } from '@mapng/bake/deform/structureStiffness';
 import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
 import { clipSoupToOwnership } from '@mapng/bake/tiles/chunkOwnership';
 import { estimateTileDemOffset, estimateTileDemOffsetField, corridorCellFilter, sceneRouteLine, shiftHeightMap, shiftHeightMapByField } from '@mapng/bake/tiles/demReseat';
+import { applyGroundCeiling } from '@mapng/bake/ground/groundCeiling';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
@@ -527,6 +528,22 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
       }
     } catch (e) {
       console.warn('[bakeWorker] road-profile build/carve failed (ground stays as extracted):', e?.stack ?? e);
+    }
+  }
+  // Ceiling: off the carriageway the .ter must not sit above the visible tile
+  // surface (it pokes through the tiles — the "z-fighting am Boden"). Runs
+  // AFTER the carve (the road keeps the profile) and BEFORE the terSnap (which
+  // seats the visible road onto the floor). See ground/groundCeiling.js.
+  if (session.extractedGround) {
+    try {
+      const roadMask = buildGroundMask(session.data.osmFeatures, session.data);
+      const c = applyGroundCeiling(session.extractedGround, roadMask);
+      console.info(
+        `[bakeWorker] ground ceiling: lowered ${c.lowered}/${c.candidates} off-carriageway cells that sat above the tile surface ` +
+        `(mean ${c.meanLoweredM.toFixed(2)}m, max ${c.maxLoweredM.toFixed(2)}m)`,
+      );
+    } catch (e) {
+      console.warn('[bakeWorker] ground ceiling failed (ground stays as carved):', e?.stack ?? e);
     }
   }
 };

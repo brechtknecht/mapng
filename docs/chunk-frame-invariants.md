@@ -99,3 +99,29 @@ work moved to the side roads and the process:
 - Open: z-fighting between the coarser `.ter` and the tile road at ground level (the
   render bias is `TILE_RENDER_BIAS_M` = 0.15 m plus the live z-offset control); a
   route-wide DEM offset field to remove the 0.7 m off-road steps between chunk fields.
+
+## Follow-up 2 (tsnap17, 2026-09-07)
+
+Measured on the tsnap16 re-bake (4 chunks, ground seat on the corridor 0.00–0.02 m,
+floor disagreement on the road ≤ 0.00 m, 11 side-road profiles vetoed, junction steps
+max 3.55 → 0.33 m):
+
+- **Poke-through beside the road** was the visible "z-fighting am Boden": 10–36 % of
+  the covered cells 6–60 m from the route line had the `.ter` above the tile surface
+  even with the 0.15 m render bias (p90 0.3–2.8 m, p99 up to 10 m). On the carriageway
+  only 1–4 %, ≤ 0.4 m. Fix: `ground/groundCeiling.js` — off the carriageway mask the
+  ground is lowered to (per-cell tile minimum − 0.05 m) wherever it exceeds it by at
+  most 1.5 m (larger excesses are junk / sunken yards, left to the pit defences).
+  What-if on the containers: poke-through 18 / 32 / 26 / 23 % → 5.5 / 10 / 1.2 / 1.9 %.
+  Runs after the carve, before the terSnap. No slider involved; the bias stays 0.15 m.
+- **Off-road step between chunk fields** (mean |Δ| 3.2 m in the 1↔2 band): the DEM
+  re-seat field faded laterally to the chunk-constant median, and the constants differed
+  by 5 m. The field is now held laterally (`fullWidthM = Infinity` default) and the
+  `.ter` ownership feather is 20 m (free on the road, where the floors agree).
+- **0.45 m hump on a flat residential road** (s 713–756 of the route) matched the
+  logged 0.43 m junction adjustment: the trust-weighted consensus let a side road that
+  had profiled a raised crossing lift the driven road. The consensus is now the
+  highest-class road present (`highwayRank`); lower classes meet its grade.
+- Bumpiness otherwise: `.ter` grade change per 10 m p50 0.24, p95 1.28 %-points;
+  profile roughness RMS 1.9–3.0 cm; the 5.9 %-point outliers in the offline profile were
+  artefacts of joining chunk segments, the ground there is smooth.

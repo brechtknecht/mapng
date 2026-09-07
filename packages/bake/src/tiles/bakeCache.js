@@ -176,8 +176,11 @@ export const bakeCacheKey = (
   //          (groundMask.roadHalfWidthM) for mask, taps and carve; profiles
   //          with a non-physical grade or too little trust no longer carve or
   //          join junctions (roadProfiles carveVeto).
+  // tsnap17: ground ceiling off the carriageway (ground/groundCeiling.js — the
+  //          .ter never sits above the visible tile surface) and the DEM
+  //          re-seat field held laterally instead of fading to a chunk constant.
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap16=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap17=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
   // Datum fingerprint. Every baked Y is METRES ABOVE data.minHeight, and the
   // placement lifts the mesh by that same datum — so a bake is only valid for
