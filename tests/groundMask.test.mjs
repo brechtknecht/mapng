@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { buildGroundMask } from '@mapng/bake/groundMask';
+import { buildGroundMask, roadHalfWidthM, HALF_WIDTH_M, ROAD_KERB_MARGIN_M } from '@mapng/bake/groundMask';
 
 // 200 m AOI ⇒ unitsPerMeter = SCENE_SIZE(100) / 200 = 0.5 scene units per metre.
 // heightMap is unused by the mask (it only rasterises OSM polylines).
@@ -29,18 +29,34 @@ test('road centreline reads w≈1, feathers to 0 past the carriageway', () => {
   const mask = buildGroundMask([roadFeature({ highway: 'residential' })], DATA);
   assert.ok(mask, 'a residential road produces a mask');
 
-  // residential half-width = 4 m, feather = 3 m → solid to 4 m, zero beyond 7 m.
+  // residential half-width = 4 m + 1 m kerb margin = 5 m, feather = 3 m →
+  // solid to 5 m, zero beyond 8 m.
+  const half = roadHalfWidthM({ highway: 'residential' });
+  assert.equal(half, HALF_WIDTH_M.residential + ROAD_KERB_MARGIN_M);
   assert.ok(mask.sample(0, 0) > 0.95, `centreline solid, got ${mask.sample(0, 0)}`);
-  assert.ok(mask.sample(0, zM(3)) > 0.9, `inside carriageway, got ${mask.sample(0, zM(3))}`);
-  const mid = mask.sample(0, zM(5.5)); // halfway through the feather
+  assert.ok(mask.sample(0, zM(half - 1)) > 0.9, `inside carriageway, got ${mask.sample(0, zM(half - 1))}`);
+  const mid = mask.sample(0, zM(half + 1.5)); // halfway through the feather
   assert.ok(mid > 0.15 && mid < 0.85, `feather mid in (0,1), got ${mid}`);
-  assert.ok(mask.sample(0, zM(10)) < 0.05, `well outside is 0, got ${mask.sample(0, zM(10))}`);
+  assert.ok(mask.sample(0, zM(half + 5)) < 0.05, `well outside is 0, got ${mask.sample(0, zM(half + 5))}`);
+});
+
+test('road half-width honours OSM width / lanes tags and adds the kerb margin', () => {
+  const base = HALF_WIDTH_M.residential + ROAD_KERB_MARGIN_M;
+  assert.equal(roadHalfWidthM({ highway: 'residential' }), base);
+  assert.equal(roadHalfWidthM({ highway: 'residential', width: '12' }), 6 + ROAD_KERB_MARGIN_M, 'width tag widens');
+  assert.equal(roadHalfWidthM({ highway: 'residential', width: '6,5 m' }), base, 'a narrower width tag never shrinks below the class');
+  assert.equal(roadHalfWidthM({ highway: 'residential', lanes: '4' }), (4 * 3.25) / 2 + ROAD_KERB_MARGIN_M, 'lanes widen');
+  assert.equal(roadHalfWidthM({ highway: 'service', width: 'abc' }), HALF_WIDTH_M.service + ROAD_KERB_MARGIN_M, 'garbage tag ignored');
+  assert.equal(roadHalfWidthM({}), HALF_WIDTH_M.default + ROAD_KERB_MARGIN_M);
+  // The mask follows the tag: a 12 m wide residential road is solid at 5.5 m off-centre.
+  const wide = buildGroundMask([roadFeature({ highway: 'residential', width: '12' })], DATA);
+  assert.ok(wide.sample(0, zM(5.5)) > 0.9, `width-tagged road solid at 5.5 m, got ${wide.sample(0, zM(5.5))}`);
 });
 
 test('carriageway width scales with highway class', () => {
   const res = buildGroundMask([roadFeature({ highway: 'residential' })], DATA);
   const mot = buildGroundMask([roadFeature({ highway: 'motorway' })], DATA);
-  // 10 m off-centre: outside a 4 m residential road, inside a 12 m motorway.
+  // 10 m off-centre: outside a 5 m (4 + kerb) residential road, inside a 13 m motorway.
   assert.ok(res.sample(0, zM(10)) < 0.05, `residential narrow, got ${res.sample(0, zM(10))}`);
   assert.ok(mot.sample(0, zM(10)) > 0.9, `motorway wide, got ${mot.sample(0, zM(10))}`);
 });

@@ -37,6 +37,40 @@ export const HALF_WIDTH_M = {
   default: 4,
 };
 
+// Kerb-to-kerb margin added on each side of the class/tag width: the OSM
+// width or lane count describes the travelled lanes, but the flat surface the
+// .ter must follow (and the snap must flatten) reaches to the kerb — parking
+// lane, gutter, the photogrammetry blur along the kerb line. Measured need
+// (Felix, 2026-09-07 BeamNG drive): "die Straßen könnten bisschen breiter
+// gemappt sein".
+export const ROAD_KERB_MARGIN_M = 1.0;
+const LANE_WIDTH_M = 3.25;
+
+/** Parse an OSM width-like tag ("6.5", "6,5", "6.5 m", "7 metres") → metres or null. */
+const parseWidthM = (v) => {
+  if (v == null) return null;
+  const m = String(v).replace(',', '.').match(/-?\d+(\.\d+)?/);
+  if (!m) return null;
+  const n = Number(m[0]);
+  return Number.isFinite(n) && n > 0 && n < 80 ? n : null;
+};
+
+/**
+ * Carriageway HALF-width (metres) for a road's tags: the class table, widened
+ * by an explicit `width` tag or a `lanes` count when they say the road is
+ * wider, plus the kerb margin. Shared by the ground mask (snap), the profile
+ * taps and the carve so all three agree on the footprint.
+ */
+export const roadHalfWidthM = (tags) => {
+  const t = tags || {};
+  let half = HALF_WIDTH_M[t.highway] ?? HALF_WIDTH_M.default;
+  const w = parseWidthM(t.width);
+  if (w) half = Math.max(half, w / 2);
+  const lanes = parseWidthM(t.lanes);
+  if (lanes) half = Math.max(half, (lanes * LANE_WIDTH_M) / 2);
+  return half + ROAD_KERB_MARGIN_M;
+};
+
 // Closed OSM polygons that ARE flat man-made ground — snappable like roads. Tag-
 // based (NOT feature.type, which buckets parking under "landuse" and pedestrian
 // areas under "road"). Deliberately tight: clearly-paved/flat ground only, never
@@ -223,7 +257,7 @@ export const buildGroundMask = (osmFeatures, data, { featherM = 3, cellM, elevat
     // Drivable ROAD line — stamp each segment with its carriageway width.
     if (f.type === 'road' && f.geometry.length >= 2) {
       if (t.highway && EXCLUDE_HIGHWAY.has(t.highway)) continue;
-      const halfWScene = (HALF_WIDTH_M[t.highway] ?? HALF_WIDTH_M.default) * upm;
+      const halfWScene = roadHalfWidthM(t) * upm;
       const reach = halfWScene + featherScene;
       let prev = toScene(f.geometry[0].lat, f.geometry[0].lng);
       for (let i = 1; i < f.geometry.length; i++) {

@@ -77,7 +77,7 @@ import { buildGroundMask } from '@mapng/bake/groundMask';
 import { collectStructureRings } from '@mapng/bake/deform/structureStiffness';
 import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
 import { clipSoupToOwnership } from '@mapng/bake/tiles/chunkOwnership';
-import { estimateTileDemOffset, estimateTileDemOffsetField, sceneRouteLine, shiftHeightMap, shiftHeightMapByField } from '@mapng/bake/tiles/demReseat';
+import { estimateTileDemOffset, estimateTileDemOffsetField, corridorCellFilter, sceneRouteLine, shiftHeightMap, shiftHeightMapByField } from '@mapng/bake/tiles/demReseat';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
@@ -338,6 +338,44 @@ const applyDemReseat = (session, { enabled }) => {
 };
 
 /**
+ * Ground-seat audit (route mode): after the terSnap, how far is the visible
+ * tile road from the shipped .ter floor along the route corridor? Median of the
+ * per-cell tile-surface minimum − carved ground over carriageway cells within
+ * 6 m of the route line — the invariant tools/chunk_frame_invariants.mjs
+ * checks offline, measured HERE on every bake and shipped in the exported
+ * payload so the route export logs it (turbolog `ground-overlap`). A median
+ * off zero means the floor left the road in this chunk.
+ */
+const applyGroundSeatAudit = (session) => {
+  const g = session.extractedGround;
+  session.groundSeatStats = null;
+  if (!g?.heightMap) return;
+  const soup = [];
+  for (const entry of session.outputs.values()) {
+    for (const r of entry.records) soup.push({ positions: r.positions, index: r.index });
+  }
+  if (!soup.length) return;
+  const seg = session.options?.corridorSegment;
+  const cellFilter = Array.isArray(seg) && seg.length >= 2
+    ? corridorCellFilter(seg, session.data, 6, session.fp.projector)
+    : null;
+  const roadMask = buildGroundMask(session.data.osmFeatures, session.data, { featherM: 0 });
+  const floor = { ...session.data, heightMap: g.heightMap };
+  const est = estimateTileDemOffset(soup, floor, { roadMask, cellFilter, minCells: 20 });
+  session.groundSeatStats = {
+    n: est.n,
+    medianM: Number.isFinite(est.p50) ? +est.p50.toFixed(3) : null,
+    p05M: Number.isFinite(est.p05) ? +est.p05.toFixed(3) : null,
+    p95M: Number.isFinite(est.p95) ? +est.p95.toFixed(3) : null,
+    corridorOnly: !!cellFilter,
+  };
+  console.info(
+    `[bakeWorker] ground-seat audit: tile − .ter on the ${cellFilter ? 'route corridor' : 'carriageways'} ` +
+    `median ${session.groundSeatStats.medianM ?? '—'}m (p05 ${session.groundSeatStats.p05M ?? '—'} / p95 ${session.groundSeatStats.p95M ?? '—'}, n=${est.n})`,
+  );
+};
+
+/**
  * Delta-field conform (googleBakeCore → conformTilesToFloor): seat the tiles onto
  * the .ter floor. Runs AFTER applyWeld (so it reads the welded, ground-consistent
  * positions) and BEFORE applyGroundStrip (which needs the ground tris to survive
@@ -450,7 +488,9 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
         const at = (p) => `${p.highway} @ scene(${p.x.toFixed(0)},${p.z.toFixed(0)})`;
         console.info(
           `[bakeWorker] [roadProfiles] ${st.roads} roads (${st.resolved} resolved, ` +
-          `${st.stitched ?? 0} bridge-stitched) over ${st.totalKm}km: ` +
+          `${st.stitched ?? 0} bridge-stitched, ${st.vetoed ?? 0} carve-vetoed` +
+          (st.vetoedRoads?.length ? `: ${st.vetoedRoads.map((v) => `${v.highway} @ scene(${v.x},${v.z}) ${v.reason}`).join('; ')}` : '') +
+          `) over ${st.totalKm}km: ` +
           `${st.trustedPct}% samples trusted, largest bridged gap ${st.maxUntrustedGapM}m, ` +
           `max grade ${st.maxGradePct}%` +
           (st.maxGradeAt ? ` (${at(st.maxGradeAt)})` : '') +
@@ -1316,6 +1356,7 @@ async function startBake(data, options, outPath) {
   // across re-exports (the route re-exports only to tweak the tile z-offset).
   extractSessionGround(session, extractGround, groundStrategy);
   applyTerGroundSnap(session, groundStrategy); // flatten road visuals onto the extracted .ter ground
+  applyGroundSeatAudit(session);               // measure tile − .ter on the corridor (shipped in the export)
 
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
@@ -1453,6 +1494,7 @@ async function refine(session, revision, stationSpec) {
   // (shipped for the .ter) and the road snap onto it must be recomputed.
   extractSessionGround(session, session.options?.extractGround, session.options?.groundStrategy);
   applyTerGroundSnap(session, session.options?.groundStrategy);
+  applyGroundSeatAudit(session);
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
   applyOwnershipClip(session); // route mode: keep only this chunk's Voronoi cell
@@ -1552,6 +1594,8 @@ async function exportAssembly(session, revision, spec) {
     // the browser forwards these to the turbolog `road-profiles` stream.
     ...(session.roadProfiles?.stats ? { roadProfileStats: session.roadProfiles.stats } : {}),
     ...(session.carveStats ? { roadCarveStats: session.carveStats } : {}),
+    // Ground-seat invariant (tile − .ter on the corridor after the snap).
+    ...(session.groundSeatStats ? { groundSeatStats: session.groundSeatStats } : {}),
   });
 }
 

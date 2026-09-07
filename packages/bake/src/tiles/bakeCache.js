@@ -172,8 +172,12 @@ export const bakeCacheKey = (
   //          included). Extracted grounds change wherever the probe was off.
   // tsnap15: the re-seat is a running median ALONG the route line (the DEM
   //          error moved by 7 m inside one chunk), applied per pixel.
+  // tsnap16: road width from OSM width/lanes tags + kerb margin
+  //          (groundMask.roadHalfWidthM) for mask, taps and carve; profiles
+  //          with a non-physical grade or too little trust no longer carve or
+  //          join junctions (roadProfiles carveVeto).
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap15=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap16=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
   // Datum fingerprint. Every baked Y is METRES ABOVE data.minHeight, and the
   // placement lifts the mesh by that same datum — so a bake is only valid for

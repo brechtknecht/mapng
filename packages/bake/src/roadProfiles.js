@@ -24,7 +24,7 @@
 import { SCENE_SIZE, computeUnitsPerMeter } from './googleBakeCore.js';
 import { sampleHeightAtScene } from './scene/sceneSample.js';
 import { createMetricProjector } from '@mapng/geo';
-import { EXCLUDE_HIGHWAY, HALF_WIDTH_M } from './groundMask.js';
+import { EXCLUDE_HIGHWAY, roadHalfWidthM } from './groundMask.js';
 import { fitAsymmetricProfile } from './ground/asymmetricWhittaker.js';
 
 const HALF = SCENE_SIZE / 2;
@@ -84,6 +84,12 @@ const gauss1d = (h, radius) => {
  * @param {number} [opts.outlierM=2.5]  a sample deviating more than this from
  *   its sliding-median neighbourhood is junk (wall bottoms, skirts) — it turns
  *   untrusted and is interpolated along the road like any other gap
+ * @param {number} [opts.vetoGradePct=35]  a resolved surface profile steeper than
+ *   this anywhere is not a road (garage ramp, driveway under a building,
+ *   untagged stacked geometry): it keeps its profile for display/stats but
+ *   neither carves the .ter nor joins junction clusters (`carveVeto`).
+ * @param {number} [opts.vetoTrustPct=25]  same veto for a `service` way whose
+ *   trusted-sample share is below this (mostly interpolated guesswork).
  * @param {number} [opts.maxGradePct=25]  physical road-grade ceiling; a
  *   forward/backward slope limiter caps whatever junk survives smoothing
  * @param {number} [opts.junctionBlendM=25]  junction joint solve: arc length
@@ -112,6 +118,7 @@ const gauss1d = (h, radius) => {
  */
 export const buildRoadProfiles = (osmFeatures, data, ground, {
   stepM = 5, smoothM = 15, outlierM = 2.5, maxGradePct = 25, junctionBlendM = 25,
+  vetoGradePct = 35, vetoTrustPct = 25,
   // Profile solver. 'whittaker' (default): asymmetric Whittaker baseline —
   // the road is the smooth curve UNDER the tile surface; observations above
   // it (cars, canopies, decks) weigh `aboveWeight`, observations below it are
@@ -189,7 +196,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
     const elevated = (t.bridge && t.bridge !== 'no') || (t.layer != null && Number(t.layer) > 0);
     if (!elevated) continue;
     // Deck footprint: class half-width + 2m margin (deck edges overhang a bit).
-    const r = ((HALF_WIDTH_M[t.highway] ?? HALF_WIDTH_M.default) + 2) * upm;
+    const r = (roadHalfWidthM(t) + 2) * upm;
     let prev = toScene(f.geometry[0].lat, f.geometry[0].lng);
     for (let i = 1; i < f.geometry.length; i++) {
       const cur = toScene(f.geometry[i].lat, f.geometry[i].lng);
@@ -252,7 +259,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
     // Read the extracted ground + trust along the line. CROSS-ROAD MEDIAN of 3
     // taps (centreline ± 40% of the half-width): a single centreline tap on the
     // raw min is fragile — one junk cell (wall bottom, skirt) poisons it.
-    const halfWscene = (HALF_WIDTH_M[t.highway] ?? HALF_WIDTH_M.default) * 0.4 * upm;
+    const halfWscene = roadHalfWidthM(t) * 0.4 * upm;
     const raw = new Float64Array(pts.length);
     const trusted = new Uint8Array(pts.length);
     for (let i = 0; i < pts.length; i++) {
@@ -436,11 +443,28 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
 
     totalSamples += pts.length;
     totalTrusted += trustedCount;
+    // Carve veto — profile hygiene. A resolved surface profile whose solved
+    // grade exceeds what any road can do is not a road profile: it is a garage
+    // ramp, a driveway diving under a building, stacked geometry without layer
+    // tags. Stamping it carves a gouge into the .ter and drags the junction
+    // solve with it (measured live: service roads at 84–169 % grade, junction
+    // steps of 2.8–3.6 m where they meet the route road). Low-trust SERVICE
+    // ways (most of the profile interpolated) are vetoed too; arterial classes
+    // keep carving on low trust because the route itself may be poorly
+    // covered under trees. Vetoed roads stay in the result for the wireframe
+    // and the stats, but neither carve nor join junction clusters.
+    const trustedPctRoad = Math.round((trustedCount / pts.length) * 100);
+    let carveVeto = null;
+    if (resolved && !throughStructure) {
+      if (roadMaxGrade > vetoGradePct) carveVeto = `grade ${roadMaxGrade.toFixed(0)}% > ${vetoGradePct}%`;
+      else if (t.highway === 'service' && trustedPctRoad < vetoTrustPct) carveVeto = `service trust ${trustedPctRoad}% < ${vetoTrustPct}%`;
+    }
     roads.push({
       highway: t.highway || 'unknown',
-      halfWidthM: HALF_WIDTH_M[t.highway] ?? HALF_WIDTH_M.default,
+      halfWidthM: roadHalfWidthM(t),
       throughStructure,
       resolved,
+      carveVeto,
       lengthM: Math.round(lengthM * 10) / 10,
       trustedPct: Math.round((trustedCount / pts.length) * 100),
       maxGradePct: Math.round(roadMaxGrade * 10) / 10,
@@ -468,7 +492,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
     const samples = [];
     for (let ri = 0; ri < roads.length; ri++) {
       const r = roads[ri];
-      if (!r.resolved || r.throughStructure) continue;
+      if (!r.resolved || r.throughStructure || r.carveVeto) continue;
       let firstT = -1, lastT = -1;
       for (let i = 0; i < r.pts.length; i++) {
         if (r.pts[i].trusted) { if (firstT < 0) firstT = i; lastT = i; }
@@ -614,7 +638,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
   const anchorAt = (x, z) => {
     let best = null, bestD = joinScene;
     for (const r of roads) {
-      if (!r.resolved || r.throughStructure) continue;
+      if (!r.resolved || r.throughStructure || r.carveVeto) continue;
       for (const p of r.pts) {
         const d = Math.hypot(p.x - x, p.z - z);
         if (d < bestD) { bestD = d; best = p.h; }
@@ -646,7 +670,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
   const buckets = new Map();
   for (let ri = 0; ri < roads.length; ri++) {
     const r = roads[ri];
-    if (!r.resolved || r.throughStructure) continue;
+    if (!r.resolved || r.throughStructure || r.carveVeto) continue;
     let firstT = -1, lastT = -1;
     for (let i = 0; i < r.pts.length; i++) {
       if (r.pts[i].trusted) { if (firstT < 0) firstT = i; lastT = i; }
@@ -703,6 +727,13 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       roads: roads.length,
       resolved: resolvedCount,
       stitched: roads.filter((r) => r.stitched).length,
+      // Profile hygiene: resolved surface roads that neither carve nor join
+      // junctions (non-physical grade / low-trust service way), with where.
+      vetoed: roads.filter((r) => r.carveVeto).length,
+      vetoedRoads: roads.filter((r) => r.carveVeto).slice(0, 8).map((r) => {
+        const mid = r.pts[r.pts.length >> 1];
+        return { highway: r.highway, reason: r.carveVeto, x: Math.round(mid.x * 10) / 10, z: Math.round(mid.z * 10) / 10 };
+      }),
       totalKm: Math.round(roads.reduce((acc, r) => acc + r.lengthM, 0) / 100) / 10,
       trustedPct: totalSamples ? Math.round((totalTrusted / totalSamples) * 100) : 0,
       maxUntrustedGapM: Math.round(maxUntrustedGapM),
@@ -803,7 +834,7 @@ export const carveRoadProfiles = (profiles, data, ground, {
   const toCol = (x) => ((x + HALF) / SCENE_SIZE) * (W - 1);
   const toRow = (z) => ((z + HALF) / SCENE_SIZE) * (H - 1);
 
-  const keep = roadFilter ?? ((r) => r.resolved && !r.throughStructure);
+  const keep = roadFilter ?? ((r) => r.resolved && !r.throughStructure && !r.carveVeto);
   const keptRoads = []; // for the post-carve fidelity resample below
   for (const r of profiles.roads) {
     if (!keep(r)) continue;

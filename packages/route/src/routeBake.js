@@ -238,7 +238,10 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       corridorHalfWidthM: tier.halfWidthM,
       ...(anchorAtBake != null ? { sharedGroundOffsetM: anchorAtBake } : {}),
       ...(preferTiles ? { extractGround: true, groundStrategy } : {}),
-    }).catch(() => {});
+      // keepFiles: free the worker but leave its container (job.json + out.bin)
+      // on disk — tools/chunk_frame_invariants.mjs reads exactly these, and a
+      // preview bake is only ~60 MB per chunk (no DAE/atlas export).
+    }, { keepFiles: true }).catch(() => {});
 
     // Roads for the preview's live profile carve — kept OUT of the manifest
     // (osmRoads would bloat the archived manifest.json), carried separately.

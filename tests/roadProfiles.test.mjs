@@ -496,6 +496,39 @@ test('junction solve leaves parallel roads alone (no flattening of real grade)',
   }
 });
 
+test('carve veto: a profile steeper than any road neither carves nor joins junctions', () => {
+  // A "service" way that dives 1 m per metre from col 100 on — a garage ramp
+  // read through the building above it. 100 % grade >> the 35 % veto.
+  const ramp = groundStub((col) => (col < 100 ? 40 : 40 + (col - 100) * 1.0));
+  const prof = buildRoadProfiles([roadFeature({ highway: 'service' })], DATA, ramp);
+  const r = prof.roads[0];
+  assert.ok(r.resolved, 'still resolved (kept for display/stats)');
+  assert.ok(r.carveVeto && /grade/.test(r.carveVeto), `vetoed for grade, got ${r.carveVeto}`);
+  assert.equal(prof.stats.vetoed, 1);
+  assert.equal(prof.stats.vetoedRoads[0].highway, 'service');
+  const cs = carveRoadProfiles(prof, DATA, ramp);
+  assert.equal(cs.carvedCells, 0, 'a vetoed profile stamps nothing');
+  // The same ground under a residential road is vetoed by grade as well — no
+  // real road climbs 100 %.
+  const res = buildRoadProfiles([roadFeature({ highway: 'residential' })], DATA, ramp).roads[0];
+  assert.ok(res.carveVeto, 'residential at 100 % grade is vetoed too');
+  // A gentle 5 % slope is a road and carves.
+  const gentle = groundStub((col) => 40 + col * 0.05);
+  const ok = buildRoadProfiles([roadFeature({ highway: 'service' })], DATA, gentle);
+  assert.equal(ok.roads[0].carveVeto, null);
+  assert.ok(carveRoadProfiles(ok, DATA, gentle).carvedCells > 0);
+});
+
+test('carve veto: a mostly-interpolated service way is vetoed, an arterial road is not', () => {
+  // Coverage punched out over 85 % of the road → trust ≈ 15 %.
+  const sparse = groundStub(() => 42, [20, 180]);
+  const svc = buildRoadProfiles([roadFeature({ highway: 'service' })], DATA, sparse).roads[0];
+  assert.ok(svc.trustedPct < 25, `low trust, got ${svc.trustedPct}%`);
+  assert.ok(svc.carveVeto && /trust/.test(svc.carveVeto), `service vetoed for trust, got ${svc.carveVeto}`);
+  const res = buildRoadProfiles([roadFeature({ highway: 'residential' })], DATA, sparse).roads[0];
+  assert.equal(res.carveVeto, null, 'residential keeps carving on low trust (the route may run under trees)');
+});
+
 test('carve reports .ter-vs-profile residual over full-strength spans', () => {
   const g = groundStub(() => 42);
   const prof = buildRoadProfiles([roadFeature({ highway: 'residential' })], DATA, g);

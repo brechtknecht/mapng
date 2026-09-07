@@ -475,6 +475,16 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           });
       }
 
+      // Ground-seat invariant measured by the worker after the terSnap: the
+      // visible tile road vs the shipped .ter floor along the route corridor.
+      // A median off zero is a chunk whose floor left the road — the defect
+      // the chunk-frame investigation found; keep it visible on every export.
+      const gs = exported?.groundSeatStats;
+      if (gs) {
+        const off = Math.abs(gs.medianM ?? 0) > 0.3;
+        devLog('ground-overlap', `chunk ${i} ground seat: tile − .ter on the ${gs.corridorOnly ? 'route corridor' : 'carriageways'} median ${gs.medianM}m (p05 ${gs.p05M} / p95 ${gs.p95M}, n=${gs.n})${off ? ' — FLOOR OFF THE ROAD' : ''}`, { chunk: i, ...gs, level: off ? 'warn' : 'info' });
+      }
+
       // Pair the chunk's ground with its bounds (terrains[i] alive here). Absent
       // ⇒ this corridor falls back to the DEM in the composite.
       if (preferTiles && exported?.ground) {

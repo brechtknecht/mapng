@@ -76,3 +76,26 @@ Tile MIN − ground on the road 0.00–0.02 m for every chunk; ground A − B on
 0.01 / −0.01 / 0.00 m for the four pairs; tiles continuous (0.00 m where both meshes exist).
 Off-corridor DEM-fallback cells in an overlap band may still differ between chunks (0.7 m at
 1↔2) — the `.ter` takes the owner's floor there with a 6 m feather.
+
+## Follow-up (tsnap16, 2026-09-07)
+
+BeamNG drive confirmed the export matches the preview and drives smoother. Remaining
+work moved to the side roads and the process:
+
+- Profile hygiene (`roadProfiles.js` `carveVeto`): a resolved surface profile steeper
+  than 35 % anywhere (garage ramps, driveways under buildings; measured 84–169 % on
+  `service` ways) or a `service` way with < 25 % trusted samples keeps its profile for
+  display and stats but neither carves the `.ter` nor joins junction clusters. Stats carry
+  `vetoed` / `vetoedRoads`; the worker log lists them.
+- Wider road footprint (`groundMask.roadHalfWidthM`): class half-width widened by OSM
+  `width` / `lanes` tags, plus a 1 m kerb margin (`ROAD_KERB_MARGIN_M`). Shared by the
+  snap mask, the profile taps and the carve.
+- Ground-seat audit in the worker (`applyGroundSeatAudit`): tile − `.ter` on the route
+  corridor after the terSnap, shipped as `groundSeatStats` and logged per chunk on the
+  turbolog `ground-overlap` stream ("FLOOR OFF THE ROAD" above 0.3 m). The offline tool
+  stays for the pairwise and placement checks.
+- Preview bakes keep their containers (`routeBake` ends sessions with `keepFiles`), so
+  `tools/chunk_frame_invariants.mjs` always finds a complete set.
+- Open: z-fighting between the coarser `.ter` and the tile road at ground level (the
+  render bias is `TILE_RENDER_BIAS_M` = 0.15 m plus the live z-offset control); a
+  route-wide DEM offset field to remove the 0.7 m off-road steps between chunk fields.
