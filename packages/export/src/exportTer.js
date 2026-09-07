@@ -9,10 +9,21 @@
  * @param {string[]}  [options.materialNames]   — ordered material name list.
  *                                                Index 0 = fallback (must match .terrain.json).
  *                                                Defaults to ['DefaultMaterial'].
+ * @param {number}   [options.quantRangeM]      — the height range (metres) that
+ *   the 16-bit heightmap 0→65535 maps onto. MUST equal the TerrainBlock's
+ *   `maxHeight`, because BeamNG decodes worldZ = val/65535 × maxHeight. The
+ *   caller ceil()s the float range to an integer for the TerrainBlock; if this
+ *   pass instead quantised against the raw float range, the two scales would
+ *   disagree and BeamNG would reconstruct the terrain stretched UPWARD by
+ *   ceil(range)/range — the .ter then rises through the coplanar tiles (a
+ *   height-proportional lift, worst at altitude, zero at the datum). Defaults
+ *   to the raw float range for standalone callers, but the BeamNG export path
+ *   passes the exact ceil'd maxHeight.
  */
 export async function exportTer(terrainData, {
   layerMap: customLayerMap = null,
   materialNames: customMaterialNames = null,
+  quantRangeM = null,
 } = {}) {
   const { width, height, heightMap, minHeight, maxHeight } = terrainData;
 
@@ -50,7 +61,10 @@ export async function exportTer(terrainData, {
   // ── Heightmap ──────────────────────────────────────────────────────────
   // Row-major, first row = bottom of terrain (south edge) — Y is flipped
   // relative to the heightMap array (which has row 0 at the top/north).
-  const range = maxHeight - minHeight;
+  // Quantise against the SAME range BeamNG decodes with (the TerrainBlock's
+  // maxHeight). See quantRangeM: a float/ceil mismatch here stretches the
+  // terrain up through the tiles.
+  const range = quantRangeM ?? (maxHeight - minHeight);
   for (let y = size - 1; y >= 0; y--) {
     for (let x = 0; x < size; x++) {
       const srcIdx = y * width + x;

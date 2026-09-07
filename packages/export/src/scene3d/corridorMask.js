@@ -6,6 +6,7 @@
 // latLngToScene — the frame the Google group's geometry is already in.
 import * as THREE from "three";
 import { ensureCache, getCachedUnitsPerMeter, latLngToScene } from "./sceneProjection.js";
+import { nearestCenterIndex } from "@mapng/bake/tiles/chunkOwnership";
 
 const _distSqPointToSeg2D = (px, pz, ax, az, bx, bz) => {
   const dx = bx - ax;
@@ -71,7 +72,10 @@ const _compactGeometryByTriangles = (geo, keepTri) => {
 };
 
 // Clip every mesh in `group` (scene XZ frame) to within halfWidthM of the route.
-export const clipGroupToCorridorXZ = (group, data, segment, halfWidthM, onProgress) => {
+// `ownership` (optional, route mode): { centers:[{lat,lng}], self } — additionally
+// drop triangles whose centroid is nearer another chunk's centre (Voronoi
+// ownership), the browser-side mirror of the worker's applyOwnershipClip.
+export const clipGroupToCorridorXZ = (group, data, segment, halfWidthM, onProgress, ownership = null) => {
   if (!segment?.length || !(halfWidthM > 0)) {
     const stats = { ran: false, reason: !segment?.length ? 'empty-segment' : 'bad-halfWidth', segmentLen: segment?.length ?? 0 };
     console.warn('[corridorMask] skipped', JSON.stringify(stats));
@@ -84,6 +88,10 @@ export const clipGroupToCorridorXZ = (group, data, segment, halfWidthM, onProgre
   });
   const halfScene = halfWidthM * getCachedUnitsPerMeter();
   const half2 = halfScene * halfScene;
+  const ownCenters = ownership && Array.isArray(ownership.centers) && ownership.centers.length > 1
+    ? ownership.centers.map((c) => { const s = latLngToScene(data, c.lat, c.lng); return { x: s.x, z: s.z }; })
+    : null;
+  const ownSelf = ownCenters ? ownership.self : -1;
 
   // route XZ bbox — to confirm the route lands in the [-50,50] tile frame
   const rb = { xmin: Infinity, xmax: -Infinity, zmin: Infinity, zmax: -Infinity };
@@ -114,7 +122,8 @@ export const clipGroupToCorridorXZ = (group, data, segment, halfWidthM, onProgre
         if (x < gb.xmin) gb.xmin = x; if (x > gb.xmax) gb.xmax = x;
         if (z < gb.zmin) gb.zmin = z; if (z > gb.zmax) gb.zmax = z;
       }
-      return _distSqPointToPolyline2D(cx / 3, cz / 3, route) <= half2;
+      if (_distSqPointToPolyline2D(cx / 3, cz / 3, route) > half2) return false;
+      return !ownCenters || nearestCenterIndex(ownCenters, cx / 3, cz / 3) === ownSelf;
     };
     const compact = _compactGeometryByTriangles(geo, keep);
     if (compact) {

@@ -18,8 +18,68 @@
 # below writes Z_UP, which BeamNG reads as-is.
 
 import bpy
+import bmesh
+import os
 import re
 import sys
+
+# --- Mesh reduction (photogrammetry is vertex-heavy). The assembly emits a "tile
+# soup": every tile-boundary vertex is DUPLICATED (adjacent tiles carry their own
+# copy, with their own atlas UVs). Both passes below are OPT-IN — default off, so
+# a plain export is unchanged.
+#
+# WELD (MAPNG_MESH_WELD=1): Merge-by-Distance at 0.1mm welds coincident positions.
+# Geometrically lossless, ~-50% Blender verts and ~-20% DAE size / faster load —
+# BUT it does NOT cut BeamNG's render-vertex buffer (the coincident verts carry
+# different atlas UVs, so a renderer re-splits them; measured -0.4% render verts).
+# A disk/load win, not a RAM win.
+#
+# DECIMATE (MAPNG_DECIMATE_RATIO in (0,1)): a boundary-locked COLLAPSE decimate is
+# the only pass that actually removes triangles → cuts render verts (~-40% at 0.5)
+# and DAE size (~-57%). Lossy: it collapses across tile-boundary UV seams, which
+# warps the atlas texture slightly at tile edges — verify in-game before trusting.
+# The chunk's outer rim is locked so it never opens gaps between route chunks.
+# Implies WELD (decimating the raw soup is ineffective — only -2.4%).
+WELD = os.environ.get('MAPNG_MESH_WELD', '0') == '1'
+WELD_DIST = float(os.environ.get('MAPNG_MESH_WELD_DIST', '0.0001') or '0.0001')
+try:
+    DECIMATE_RATIO = float(os.environ.get('MAPNG_DECIMATE_RATIO', '0') or '0')
+except ValueError:
+    DECIMATE_RATIO = 0.0
+
+
+def weld_mesh(ob, dist):
+    me = ob.data
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bmesh.ops.remove_doubles(bm, verts=bm.verts, dist=dist)
+    bm.to_mesh(me)
+    bm.free()
+
+
+def decimate_mesh(ob, ratio):
+    me = ob.data
+    # Protect open-boundary (non-manifold) vertices — the chunk's outer rim after
+    # welding — so collapse never opens gaps between adjacent route chunks.
+    bm = bmesh.new()
+    bm.from_mesh(me)
+    bset = set()
+    for e in bm.edges:
+        if len(e.link_faces) < 2:
+            bset.add(e.verts[0].index)
+            bset.add(e.verts[1].index)
+    bm.free()
+    vg = ob.vertex_groups.new(name='mapng_seam')
+    if bset:
+        vg.add(list(bset), 1.0, 'REPLACE')
+    m = ob.modifiers.new('mapng_decimate', 'DECIMATE')
+    m.decimate_type = 'COLLAPSE'
+    m.ratio = ratio
+    m.vertex_group = 'mapng_seam'
+    m.invert_vertex_group = True  # seam verts (weight 1) -> 0 -> protected
+    m.use_collapse_triangulate = True
+    bpy.context.view_layer.objects.active = ob
+    bpy.ops.object.modifier_apply(modifier=m.name)
 
 
 def main():
@@ -39,6 +99,23 @@ def main():
     if not meshes:
         print(f'ERROR: no meshes found in {src}')
         sys.exit(1)
+
+    # --- Mesh reduction (weld coincident tile verts, optionally decimate) ----
+    do_decimate = 0 < DECIMATE_RATIO < 1
+    do_weld = WELD or do_decimate  # decimating the raw soup is ineffective (-2.4%)
+    if do_weld:
+        v_before = sum(len(ob.data.vertices) for ob in meshes)
+        for ob in meshes:
+            try:
+                weld_mesh(ob, WELD_DIST)
+                if do_decimate:
+                    decimate_mesh(ob, DECIMATE_RATIO)
+            except Exception as exc:  # never let reduction abort the conversion
+                print(f'WARN: mesh reduction failed on {ob.name}: {exc}')
+        v_after = sum(len(ob.data.vertices) for ob in meshes)
+        pct = 100 * (1 - v_after / v_before) if v_before else 0
+        print(f'reduce: weld=on decimate={DECIMATE_RATIO if do_decimate else "off"} '
+              f'verts {v_before} -> {v_after} (-{pct:.1f}%)')
 
     # --- Sanitize names -----------------------------------------------------
     # Torque parses TRAILING DIGITS in a node name as the LOD detail size

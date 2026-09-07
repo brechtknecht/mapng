@@ -52,7 +52,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
   const {
     apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
     cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
-    corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
+    corridorSegment, corridorHalfWidthM, sharedGroundOffsetM, corridorOwnership,
     // Per-bake assembly-pass overrides (sandbox / debug). undefined → worker env default.
     weld, conform, roadmask, stiffness,
     // Route mode: extract the bare-earth tile ground for the chunk's .ter, with
@@ -101,7 +101,7 @@ const buildJobBody = (data, options, key, force, ensureSession = false) => {
     options: {
       apiKey, errorTarget, stripGround, groundNormalThreshold, groundDistanceM,
       cameraSweep, quality, sensorSize, maxWaitMs, stabilityMs,
-      corridorSegment, corridorHalfWidthM, sharedGroundOffsetM,
+      corridorSegment, corridorHalfWidthM, sharedGroundOffsetM, corridorOwnership,
       weld, conform, roadmask, stiffness,
       extractGround, groundStrategy,
       prefetchOnly,
@@ -203,12 +203,30 @@ const fetchAndDecodeResult = async (jobId) => {
     wrapT: m.wrapT,
     colorSpace: m.colorSpace,
   }));
-  return { meshes, stations: header.bakeStations ?? null, stats: header.stats ?? {} };
+  // Route mode: the worker's extracted + carved ground (the floor the road
+  // mesh was seated on), absolute metres on the chunk's terrain grid.
+  const ground = header.ground?.heightMap
+    ? {
+      heightMap: f32(header.ground.heightMap),
+      coveredMask: header.ground.coverage
+        ? new Uint8Array(buf.slice(payload + header.ground.coverage.offset, payload + header.ground.coverage.offset + header.ground.coverage.byteLength))
+        : null,
+      width: header.ground.width,
+      height: header.ground.height,
+      minHeight: header.ground.minHeight,
+      maxHeight: header.ground.maxHeight,
+    }
+    : null;
+  return { meshes, stations: header.bakeStations ?? null, stats: header.stats ?? {}, ground };
 };
 
-const buildGroup = async (key, { meshes, stations, stats }) => {
+const buildGroup = async (key, { meshes, stations, stats, ground = null }) => {
   const group = await deserializeGroup(meshes);
   if (stations) group.userData.bakeStations = stations;
+  // The worker's own .ter floor for this bake (route mode only; absent on
+  // IndexedDB-restored bakes, which persist meshes only). RoutePreview shows
+  // it in place of a live re-extraction so preview floor == worker floor.
+  if (ground) group.userData.extractedGround = ground;
   // Surface the worker's bake telemetry for the route manifest (§6).
   group.userData.bakeStats = {
     stations: stats.stations,
@@ -216,6 +234,11 @@ const buildGroup = async (key, { meshes, stations, stats }) => {
     kept: stats.kept,
     timedOut: stats.timedOut,
     elapsedMs: stats.elapsedMs,
+    // Wall diagnostics surfaced for the /tiles-wall route (may be absent on
+    // bakes from an older worker / restored IndexedDB record).
+    cacheFull: stats.cacheFull ?? null,
+    missingScenes: stats.missingScenes ?? null,
+    rssMB: stats.rssMB ?? null,
   };
   console.info(
     `[google-bake] sidecar bake restored: ${meshes.length} meshes ` +

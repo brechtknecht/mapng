@@ -106,6 +106,20 @@ export const DEFAULT_GROUND_STRATEGY = {
   // embankments (roadProfiles.carveRoadProfiles). Bridges/tunnels never carve —
   // the lower road wins the .ter at crossings.
   carveRoads: true,
+  // Profile solver (roadProfiles.buildRoadProfiles): 'whittaker' = asymmetric
+  // Whittaker baseline (the road is the smooth curve UNDER the tile surface;
+  // every sample gets a height → the carve stamps the corridor without
+  // trust tapers or clamps), 'legacy' = median + gaussian + grade limiter.
+  profileSolver: 'whittaker',
+  profileCutoffM: 40,      // shortest real vertical road feature to keep (m)
+  profileCoreM: 0.4,       // symmetric photogrammetry noise band (± m)
+  profileObjectM: 1.0,     // above this an observation is an object ON the road
+  profileAboveWeight: 0.02, // weight of such an object sample
+  profilePriorWeight: 0.05, // ease of an unobserved road END into the extracted ground (~13 m)
+  // Corridor authority in the terSnap (tileGroundConform.corridorClearanceM):
+  // masked tile geometry lower than this above the carved floor is seated on
+  // it unconditionally. 0 restores the legacy snap gates.
+  corridorClearanceM: 2.5,
 };
 
 /**

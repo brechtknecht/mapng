@@ -23,6 +23,7 @@ import { getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/ext
 import { pickProfileRoads } from '@mapng/bake/roadProfiles';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
+import { registerChunkGrounds } from './routeTerrainComposite.js';
 import { createRouteProgress } from './routeProgress.js';
 import { zipSidecarAvailable, compressZipViaSidecar } from '@mapng/bake/zipExportSidecar';
 
@@ -139,6 +140,7 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   // the manifest/zip/preview must stay ordered regardless of completion order.
   const results = new Array(total);
   const chunkRoads = new Array(total); // per-chunk OSM roads for the preview carve
+  const chunkGrounds = new Array(total); // per-chunk worker floor (extracted + carved) for the preview
   // One route-wide Google vertical anchor, captured from chunk 0 (baked first)
   // and reused by every later chunk so the stitched chunks don't float apart.
   let sharedGroundOffsetM = null;
@@ -187,7 +189,14 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       // Bake ONLY the corridor (stations follow the route) and clip the result
       // to the buffer as a final safety trim — most of each box is outside
       // ±halfWidth, but the corridor stations mean little is baked there now.
-      corridorMask: { segment: chunk.segment, halfWidthM: tier.halfWidthM },
+      corridorMask: {
+        segment: chunk.segment,
+        halfWidthM: tier.halfWidthM,
+        // Chunk ownership: this chunk keeps only the mesh nearer its own centre
+        // than any neighbour's (Voronoi) — the route .ter switches floor on
+        // the same line (compositeRouteGround ownershipFeatherM).
+        ownership: { centers: chunks.map((c) => c.center), self: i },
+      },
       // One route-wide vertical anchor for the Google tiles, taken from chunk 0
       // (baked first) and shared by all others — otherwise each chunk re-seats
       // Google's ground on its own centre's DEM and neighbours float at seams.
@@ -198,6 +207,9 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
       },
       onMaskStats: (s) => { maskStats = s; },
       onBakeStats: (s) => { if (s) bakeStats = s; },
+      // The worker's extracted + carved floor for the in-app preview (null on
+      // IndexedDB-restored bakes → RoutePreview falls back to live extraction).
+      onExtractedGround: (g) => { chunkGrounds[i] = g ?? null; },
       // Structured sweep progress → per-chunk map fill (station/stations).
       onBakeProgress: (p) => {
         if (p?.phase === 'anchor') {
@@ -331,6 +343,18 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
   };
   manifest.chunks.forEach((c, i) => { c.placement = frame.placements[i]; });
 
+  // Floor disagreement between neighbouring chunks — DIAGNOSTIC ONLY (see
+  // exportRouteLevel for the reasoning): the shared anchor makes the tile
+  // meshes continuous; a floor step at an overlap is one chunk's extraction
+  // error, and moving the placement by it put that error into the tiles.
+  if (chunkGrounds.some(Boolean)) {
+    const reg = registerChunkGrounds(chunkGrounds.map((g, i) => (g ? { ...g, bounds: manifest.chunks[i].bounds, coverage: g.coveredMask } : null)));
+    for (const p of reg.pairs) {
+      const say = Math.abs(p.medianDhM) > 0.5 ? console.warn : console.info;
+      say(`[routeBake] floor disagreement ${p.a}→${p.b}: median Δh ${p.medianDhM.toFixed(2)}m over ${p.n} samples (not applied)`);
+    }
+  }
+
   onProgress?.({ ...progress.snapshot(), phase: 'zip', detail: 'Packaging archive' });
   zipEntries.set('manifest.json', JSON.stringify(manifest, null, 2));
 
@@ -349,6 +373,9 @@ export async function bakeAndExportRoute(chunks, opts = {}) {
     bounds: c.bounds,
     minHeight: c.minHeight,
     osmRoads: chunkRoads[i] ?? [],
+    // The worker's own floor (extracted + carved) — the preview shows THIS
+    // when present, so what you see is what the road mesh was seated on.
+    ground: chunkGrounds[i] ?? null,
   }));
 
   // Stream the archive to disk via the dev sidecar when available — never

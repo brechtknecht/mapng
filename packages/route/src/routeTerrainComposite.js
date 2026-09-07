@@ -159,10 +159,18 @@ function sampleField(field, bounds, w, h, lat, lng) {
  * @param {object[]} grounds   per-chunk { bounds, width, height, heightMap (abs m),
  *                             coverage?: Uint8Array|Float32Array (w*h, 0/1, 0..1 or 0/255) }
  * @param {object}   combined  buildCombinedRouteTerrain() result (the DEM fallback)
- * @param {object}   [opts]    { featherM } corridor-edge feather width in metres
+ * @param {object}   [opts]    { featherM } corridor-edge feather width in metres;
+ *   { ownershipFeatherM } > 0 switches the overlap blend to CHUNK OWNERSHIP:
+ *   every cell takes the floor of the chunk whose centre is nearest (Voronoi),
+ *   crossing over to the neighbour within ±ownershipFeatherM of the bisector.
+ *   The mesh is clipped on the same line (tiles/chunkOwnership.js), so the
+ *   drive surface and the visible road switch chunk together instead of the
+ *   .ter sitting between two independently baked floors across the whole
+ *   overlap band. Where the owner has no coverage the coverage blend is the
+ *   fallback, so holes in the owner are still filled by the neighbour.
  * @returns {{ heightMap: Float32Array, groundMin: number, groundMax: number, coverage: number }}
  */
-export function compositeRouteGround(grounds, combined, { featherM = 12 } = {}) {
+export function compositeRouteGround(grounds, combined, { featherM = 12, ownershipFeatherM = 0 } = {}) {
   const N = combined.width;
   const { bounds, metersPerPixel } = combined;
   const dem = combined.heightMap;
@@ -171,10 +179,30 @@ export function compositeRouteGround(grounds, combined, { featherM = 12 } = {}) 
 
   const gAcc = new Float32Array(N * N); // Σ coverage·height
   const wAcc = new Float32Array(N * N); // Σ coverage  (overlap blend weight)
+  const gOwn = new Float32Array(N * N); // Σ coverage·ownership·height
+  const wOwn = new Float32Array(N * N); // Σ coverage·ownership
   let alpha = new Float32Array(N * N);  // peak coverage per cell, 0..1 (corridor mask)
 
-  for (const g of grounds || []) {
-    if (!g || !g.heightMap) continue;
+  // Chunk centres (box centres) in metres for the ownership rule.
+  const list = (grounds || []).filter((g) => g && g.heightMap);
+  const centers = list.map((g) => ({ lat: (g.bounds.north + g.bounds.south) / 2, lng: (g.bounds.east + g.bounds.west) / 2 }));
+  const mLng = mPerDegLng((bounds.north + bounds.south) / 2);
+  const ownershipAt = (gi, lat, lng) => {
+    if (!(ownershipFeatherM > 0) || centers.length < 2) return 1;
+    const c = centers[gi];
+    const dSelf = Math.hypot((lng - c.lng) * mLng, (lat - c.lat) * M_PER_DEG_LAT);
+    let dOther = Infinity;
+    for (let k = 0; k < centers.length; k++) {
+      if (k === gi) continue;
+      const d = Math.hypot((lng - centers[k].lng) * mLng, (lat - centers[k].lat) * M_PER_DEG_LAT);
+      if (d < dOther) dOther = d;
+    }
+    const t = (dOther - dSelf) / (2 * ownershipFeatherM) + 0.5;
+    return t <= 0 ? 0 : t >= 1 ? 1 : t * t * (3 - 2 * t);
+  };
+
+  for (let gi = 0; gi < list.length; gi++) {
+    const g = list[gi];
     const cb = g.bounds, gw = g.width, gh = g.height;
     // Coverage → 0..1. Accept 0/1, 0..1 floats, or 0/255 masks; absent ⇒ fully covered.
     const cov = g.coverage || null;
@@ -194,16 +222,23 @@ export function compositeRouteGround(grounds, combined, { featherM = 12 } = {}) 
         const cv = cov ? Math.max(0, Math.min(1, sampleField(cov, cb, gw, gh, lat, lng) * covScale)) : 1;
         if (cv <= 0) continue;
         const idx = gy * N + gx;
-        gAcc[idx] += cv * sampleHeightAt(g, lat, lng);
+        const h = sampleHeightAt(g, lat, lng);
+        gAcc[idx] += cv * h;
         wAcc[idx] += cv;
+        const ow = cv * ownershipAt(gi, lat, lng);
+        if (ow > 0) { gOwn[idx] += ow * h; wOwn[idx] += ow; }
         if (cv > alpha[idx]) alpha[idx] = cv;
       }
     }
   }
 
-  // Coverage-weighted blended ground value where covered (NaN elsewhere).
+  // Ground value where covered (NaN elsewhere): the OWNER's floor when
+  // ownership is on (coverage blend as the fallback where the owner has none),
+  // else the coverage-weighted blend.
   let gVal = new Float32Array(N * N);
-  for (let i = 0; i < N * N; i++) gVal[i] = wAcc[i] > 0 ? gAcc[i] / wAcc[i] : NaN;
+  for (let i = 0; i < N * N; i++) {
+    gVal[i] = wOwn[i] > 0 ? gOwn[i] / wOwn[i] : wAcc[i] > 0 ? gAcc[i] / wAcc[i] : NaN;
+  }
 
   // Corridor-edge feather: grassfire-grow alpha + ground value outward into DEM
   // cells over featherCells passes, ramping alpha linearly 1→0 (no cliff).
@@ -253,4 +288,67 @@ export function compositeRouteGround(grounds, combined, { featherM = 12 } = {}) 
   }
   if (groundMin === Infinity) { groundMin = combined.minHeight; groundMax = combined.maxHeight; }
   return { heightMap: out, groundMin, groundMax, coverage: +(covered / (N * N)).toFixed(3) };
+}
+
+/** Coverage (0..1) of a chunk ground at lat/lng; 1 when the ground has no mask. */
+const coverageAt = (g, lat, lng) => {
+  const cov = g.coverage;
+  if (!cov) return 1;
+  let mx = g._covMax;
+  if (mx == null) { mx = 0; for (let i = 0; i < cov.length; i++) if (cov[i] > mx) mx = cov[i]; g._covMax = mx; }
+  const scale = mx > 1 ? 1 / 255 : 1;
+  return Math.max(0, Math.min(1, sampleField(cov, g.bounds, g.width, g.height, lat, lng) * scale));
+};
+
+/**
+ * Vertical registration of neighbouring chunk grounds. Two chunks bake the
+ * same ground independently and can disagree by a near-constant offset in
+ * their overlap (anchor / LOD / coverage differences). For each chunk (route
+ * order) the previous overlapping chunk with the largest overlap is the
+ * reference; the offset is the MEDIAN signed difference (reference − chunk)
+ * over overlap samples both chunks cover, chained along the route so every
+ * chunk lands in chunk 0's frame. Apply the offset to the chunk's ground AND
+ * to its mesh placement — they were seated on each other in the bake.
+ *
+ * @param {Array<object|null>} grounds  per-chunk { bounds, width, height, heightMap, coverage? } (null = missing)
+ * @param {object} [opts] { sampleN = 48 (grid per axis), minSamples = 40, maxOffsetM = 15 }
+ * @returns {{ offsets: number[], pairs: Array<{a:number,b:number,n:number,medianDhM:number,offsetM:number,applied:boolean}> }}
+ */
+export function registerChunkGrounds(grounds, { sampleN = 48, minSamples = 40, maxOffsetM = 15 } = {}) {
+  const n = grounds?.length ?? 0;
+  const offsets = new Array(n).fill(0);
+  const pairs = [];
+  for (let i = 1; i < n; i++) {
+    const B = grounds[i];
+    if (!B?.heightMap || !B.bounds) continue;
+    let best = null;
+    for (let j = i - 1; j >= 0; j--) {
+      const A = grounds[j];
+      if (!A?.heightMap || !A.bounds) continue;
+      const west = Math.max(A.bounds.west, B.bounds.west), east = Math.min(A.bounds.east, B.bounds.east);
+      const south = Math.max(A.bounds.south, B.bounds.south), north = Math.min(A.bounds.north, B.bounds.north);
+      if (east <= west || north <= south) continue;
+      const area = (east - west) * (north - south);
+      if (!best || area > best.area) best = { j, area, west, east, south, north };
+    }
+    if (!best) continue;
+    const A = grounds[best.j];
+    const ds = [];
+    for (let r = 0; r < sampleN; r++) {
+      const lat = best.north - ((r + 0.5) / sampleN) * (best.north - best.south);
+      for (let c = 0; c < sampleN; c++) {
+        const lng = best.west + ((c + 0.5) / sampleN) * (best.east - best.west);
+        if (coverageAt(A, lat, lng) < 0.99 || coverageAt(B, lat, lng) < 0.99) continue;
+        const hA = sampleHeightAt(A, lat, lng) + offsets[best.j];
+        const hB = sampleHeightAt(B, lat, lng);
+        if (Number.isFinite(hA) && Number.isFinite(hB)) ds.push(hA - hB);
+      }
+    }
+    ds.sort((x, y) => x - y);
+    const median = ds.length ? ds[ds.length >> 1] : 0;
+    const applied = ds.length >= minSamples && Math.abs(median) <= maxOffsetM;
+    offsets[i] = applied ? median : offsets[best.j];
+    pairs.push({ a: best.j, b: i, n: ds.length, medianDhM: median, offsetM: offsets[i], applied });
+  }
+  return { offsets, pairs };
 }

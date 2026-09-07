@@ -29,6 +29,7 @@ export const meta = {
     { key: 'maxWindowM', label: 'Max window (m)', min: 10, max: 200, step: 5, default: 70 },
     { key: 'baseThreshM', label: 'Base threshold (m)', min: 0.1, max: 5, step: 0.1, default: 0.5 },
     { key: 'slope', label: 'Slope tolerance (m/m)', min: 0, max: 1, step: 0.02, default: 0.3 },
+    { key: 'dhMaxM', label: 'Max threshold (m)', min: 0.5, max: 30, step: 0.5, default: 3 },
     { key: 'smoothIters', label: 'Smooth passes', min: 0, max: 6, step: 1, default: 2 },
   ],
 };
@@ -135,6 +136,7 @@ export function apply(field, params) {
   const maxWindowM = param(params, 'maxWindowM');
   const baseThreshM = param(params, 'baseThreshM');
   const slope = param(params, 'slope');
+  const dhMaxM = param(params, 'dhMaxM');
   const smoothIters = param(params, 'smoothIters');
 
   // Despike FIRST: the seed (per-cell min) carries salt-and-pepper needles.
@@ -148,12 +150,23 @@ export function apply(field, params) {
 
   // Progressive loop: window half-width grows 1, 2, 4, 8, … until the window
   // diameter in metres would exceed the largest object footprint we want to cut.
+  let wPrev = 0;
   for (let w = 1; (2 * w) * cellSizeM <= maxWindowM; w *= 2) {
     const opened = dilate(erode(surface, nx, nz, w), nx, nz, w);
 
-    // Zhang elevation-difference threshold for this window, in metres → scene.
-    const windowDiameterM = 2 * w * cellSizeM; // (2w+1 - 1) cells span
-    const dhT = (baseThreshM + slope * windowDiameterM) * unitsPerMeter;
+    // Zhang eq.(7) elevation-difference threshold, metres → scene units. Two
+    // fixes over the earlier form (which used slope × FULL window diameter,
+    // uncapped): (a) terrain can only rise slope × the window INCREMENT between
+    // consecutive openings — each iteration classifies against the previous
+    // filtered surface, not the raw seed; (b) dhMaxM caps the threshold so the
+    // LARGE windows still cut large buildings. Uncapped, the 70 m window
+    // tolerated ~21 m of drop — an entire Berlin block read as "terrain", was
+    // baked into the .ter, and peeked through the street mesh as towers/jumps.
+    // On steep mountainous AOIs raise dhMaxM (paper: set it to the largest
+    // elevation difference to effectively disable the cap).
+    const windowIncM = 2 * (w - wPrev) * cellSizeM;
+    const dhT = Math.min(baseThreshM + slope * windowIncM, dhMaxM) * unitsPerMeter;
+    wPrev = w;
 
     // Flag objects: nodes that sit far above the opened (object-free) surface.
     for (let i = 0; i < surface.length; i++) {

@@ -226,6 +226,34 @@ test('mask does not snap non-horizontal verts over a road (walls / curb risers)'
   assert.ok(Math.abs(out[16] - 5) < 0.3, `wall top vert stays up, got ${out[16]}`);
 });
 
+test('corridor authority: everything below the clearance is seated on the floor, above it is kept', () => {
+  // Road surface fills the cells; a 2 m floater (a car-sized blob, over the
+  // worker's 2 m ceiling), a 4 m floater (a canopy) and a tall steep face
+  // (legacy: wall-protected) share the masked strip.
+  const verts = [
+    ...horizTri(-6, 0, 0.1), ...horizTri(0, 0, 0.1), ...horizTri(6, 0, 0.1), // road surface
+    ...horizTri(-6, 0, 2.0), // 2 m floater
+    ...horizTri(6, 0, 4.0),  // 4 m floater
+    0, 0, 0, 0, 5, 0, 1, 5, 0, // steep face 0..5 m
+  ];
+  const index = new Uint32Array([...Array(18).keys()]);
+  const mk = () => [{ positions: new Float32Array(verts), index }];
+  const legacy = conformTilesToFloor(mk(), DATA, { groundMask: stripMask(3), maxSnapM: 2, snapTaperM: 1 });
+  // Legacy moves them only by the smooth delta field (in-band samples pull D
+  // toward ~1 m here) — never onto the floor.
+  const lo = legacy.positions[0] ?? verts;
+  assert.ok(lo[9 * 3 + 1] > 0.5, `legacy: 2 m floater over the ceiling is not seated, got ${lo[9 * 3 + 1]}`);
+  assert.ok(Math.abs(lo[15 * 3 + 1] - 0.02) > 0.1, `legacy: wall bottom is not seated, got ${lo[15 * 3 + 1]}`);
+
+  const r = conformTilesToFloor(mk(), DATA, { groundMask: stripMask(3), maxSnapM: 2, snapTaperM: 1, corridorClearanceM: 2.5 });
+  const out = r.positions[0];
+  for (const vi of [9, 10, 11]) assert.ok(Math.abs(out[vi * 3 + 1] - 0.02) < 0.05, `2 m floater seated, got ${out[vi * 3 + 1]}`);
+  for (const vi of [12, 13, 14]) assert.ok(out[vi * 3 + 1] > 3.5, `4 m floater kept (above clearance), got ${out[vi * 3 + 1]}`);
+  assert.ok(Math.abs(out[15 * 3 + 1] - 0.02) < 0.05, `wall bottom seated on the floor, got ${out[15 * 3 + 1]}`);
+  assert.ok(out[16 * 3 + 1] > 4.5 && out[17 * 3 + 1] > 4.5, 'wall top stays up');
+  assert.equal(r.roadWallExcluded, 0, 'no wall exemptions inside the corridor');
+});
+
 // ── Field bend diagnostics (the "buildings morph" instrumentation) ─────────
 // fieldGrad quantifies the cell-to-cell variation of D — the amount by which the
 // per-vertex delta pass BENDS any rigid structure spanning those cells.

@@ -25,6 +25,7 @@ import { SCENE_SIZE, computeUnitsPerMeter } from './googleBakeCore.js';
 import { sampleHeightAtScene } from './scene/sceneSample.js';
 import { createMetricProjector } from '@mapng/geo';
 import { EXCLUDE_HIGHWAY, HALF_WIDTH_M } from './groundMask.js';
+import { fitAsymmetricProfile } from './ground/asymmetricWhittaker.js';
 
 const HALF = SCENE_SIZE / 2;
 
@@ -111,6 +112,19 @@ const gauss1d = (h, radius) => {
  */
 export const buildRoadProfiles = (osmFeatures, data, ground, {
   stepM = 5, smoothM = 15, outlierM = 2.5, maxGradePct = 25, junctionBlendM = 25,
+  // Profile solver. 'whittaker' (default): asymmetric Whittaker baseline —
+  // the road is the smooth curve UNDER the tile surface; observations above
+  // it (cars, canopies, decks) weigh `aboveWeight`, observations below it are
+  // Huber-bounded, and the curvature penalty is set by `cutoffM`, the shortest
+  // real vertical road feature to keep. Untrusted samples carry no data; where
+  // a road has no observation at all the curve relaxes toward the extracted
+  // ground at `priorWeight` instead of holding the last value flat. Every
+  // sample gets a height, so the carve can stamp the whole corridor
+  // unconditionally (corridor authority — see carveRoadProfiles).
+  // 'legacy': median3 + gaussian + grade limiter on gap-interpolated samples.
+  // priorWeight sets the ease length of an unobserved road END into the
+  // extracted ground: ≈ cutoffM / (2π) · priorWeight^(−¼) → 0.05 ≙ ~13 m.
+  solver = 'whittaker', cutoffM = 40, coreM = 0.4, objectM = 1.0, aboveWeight = 0.02, priorWeight = 0.05,
 } = {}) => {
   if (!Array.isArray(osmFeatures) || osmFeatures.length === 0) return null;
   if (!data?.bounds || !data.width || !data.height) return null;
@@ -133,6 +147,10 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
   // still descends into the underpass; its noise is tamed by the 1D smoothing
   // along the road below (which is exactly what per-cell filters can't do).
   const floor = { ...data, heightMap: ground.rawMinHeightMap ?? ground.heightMap };
+  // Prior for unobserved spans (whittaker solver): the FILTERED extracted
+  // ground — tile-derived where covered, DEM fallback elsewhere — i.e. what
+  // the .ter would hold anyway if the road did not carve there.
+  const priorFloor = { ...data, heightMap: ground.heightMap };
   const cm = ground.coveredMask ?? null;
   const trustedAt = (x, z) => {
     // Outside the AOI footprint the sampler edge-clamps — never trust that.
@@ -295,15 +313,57 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
       for (let j = prev + 1; j < pts.length; j++) filled[j] = raw[prev]; // trailing hold
     }
 
-    // Despike + smooth along the arc length. Only meaningful when we have some
-    // trust; unresolved roads keep the raw (reference-only) heights.
-    const radius = Math.max(1, Math.round(smoothM / stepM));
-    const smooth = resolved ? gauss1d(median3(Array.from(filled)), radius) : filled;
+    // Solve the profile. Unresolved roads keep the raw (reference-only) heights.
+    let smooth;
+    if (!resolved) {
+      smooth = filled;
+    } else if (solver === 'whittaker') {
+      // Asymmetric Whittaker baseline on the trusted cross-median readings;
+      // untrusted samples are gaps, filled by the curvature prior and a weak
+      // pull toward the extracted (filtered) ground, never a flat hold.
+      const weight = Float64Array.from(trusted, (v) => (v ? 1 : 0));
+      // Prior only on the UNBRACKETED spans: an interior gap (underpass, hole
+      // under a deck) is bracketed by observations and the curvature prior
+      // interpolates it — the filtered ground there is exactly the wrong
+      // surface. Leading/trailing spans have observations on one side only,
+      // so instead of extrapolating the trend for hundreds of metres they
+      // ease into the extracted ground over ~(λ/w)^¼ samples.
+      let firstT = -1, lastT = -1;
+      for (let i = 0; i < pts.length; i++) if (trusted[i]) { if (firstT < 0) firstT = i; lastT = i; }
+      const prior = new Float64Array(pts.length);
+      const priorWeights = new Float64Array(pts.length);
+      for (let i = 0; i < pts.length; i++) {
+        prior[i] = sampleHeightAtScene(priorFloor, pts[i].x, pts[i].z);
+        if (i < firstT || i > lastT) priorWeights[i] = priorWeight;
+      }
+      // The resampler may append the true endpoint a sub-step (even sub-mm)
+      // after the last regular sample; the uniform-spacing solver must not
+      // treat it as a full step. Solve without it, then extend the last
+      // segment's slope over the true remaining arc length.
+      const n = pts.length;
+      const tailDs = pts[n - 1].s - pts[n - 2].s;
+      const shortTail = n >= 3 && tailDs < 0.5 * stepM;
+      const m = shortTail ? n - 1 : n;
+      const fit = fitAsymmetricProfile(raw.subarray(0, m), weight.subarray(0, m), {
+        stepM, cutoffM, coreM, objectM, aboveWeight, prior: prior.subarray(0, m), priorWeight: priorWeights.subarray(0, m),
+      }).h;
+      smooth = new Float64Array(n);
+      smooth.set(fit);
+      if (shortTail) {
+        const slope = (fit[m - 1] - fit[m - 2]) / Math.max(1e-6, pts[m - 1].s - pts[m - 2].s);
+        smooth[n - 1] = fit[m - 1] + slope * tailDs;
+      }
+    } else {
+      const radius = Math.max(1, Math.round(smoothM / stepM));
+      smooth = gauss1d(median3(Array.from(filled)), radius);
+    }
 
-    // Physical grade ceiling — whatever junk survives median + gaussian cannot
-    // exceed what a road can actually do. Symmetric forward/backward slope
-    // limiting (averaged, so neither direction biases the result).
-    if (resolved && pts.length >= 2) {
+    // Physical grade ceiling (legacy solver only) — whatever junk survives
+    // median + gaussian cannot exceed what a road can actually do. Symmetric
+    // forward/backward slope limiting (averaged, so neither direction biases
+    // the result). The Whittaker solver gets its smoothness from the curvature
+    // penalty; a hard clamp on top would reintroduce the flat-then-kink shape.
+    if (resolved && solver !== 'whittaker' && pts.length >= 2) {
       const maxG = maxGradePct / 100;
       const fwd = Float64Array.from(smooth), bwd = Float64Array.from(smooth);
       for (let i = 1; i < pts.length; i++) {
@@ -638,6 +698,7 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
   const resolvedCount = roads.filter((r) => r.resolved).length;
   return {
     roads,
+    solver,
     stats: {
       roads: roads.length,
       resolved: resolvedCount,
@@ -690,11 +751,16 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
  *   MUST match groundMask's featherM: the terSnap releases the tile mesh over
  *   the mask feather, so if the floor keeps transitioning further out, the two
  *   disagree in the overhang band and the street edges read as bent lips.
- * @param {number} [opts.maxCarveM=10]  per-cell shift clamp (safety)
+ * @param {number} [opts.maxCarveM]  per-cell shift clamp. Default: 10 m for
+ *   legacy profiles, NONE for whittaker profiles (corridor authority — a clamp
+ *   leaves the extracted ground standing exactly where the profile disagrees
+ *   with it most, which is the hole in the road). Shifts beyond 10 m are
+ *   counted in `largeShiftCells` for diagnostics instead.
  * @param {number} [opts.endTaperM=10]  arc length over which a road's carve
  *   strength fades to zero across leading/trailing untrusted HELD spans (flat
- *   extrapolation, see buildRoadProfiles). Interior bridged spans (underpasses)
- *   are never tapered.
+ *   extrapolation, legacy solver only). Whittaker profiles have no held ends
+ *   (unobserved spans relax to the extracted ground), so they stamp at full
+ *   strength end to end. Interior bridged spans (underpasses) are never tapered.
  * @param {(r:object)=>boolean} [opts.roadFilter]  which roads stamp. Default:
  *   resolved non-structure roads (the .ter carve). The deck snap passes
  *   `r.throughStructure && r.resolved` to stamp stitched bridge profiles into
@@ -704,10 +770,15 @@ export const buildRoadProfiles = (osmFeatures, data, ground, {
  *            residualSamples:number }}
  */
 export const carveRoadProfiles = (profiles, data, ground, {
-  featherM = 3, maxCarveM = 10, endTaperM = 10, roadFilter = null,
+  featherM = 3, maxCarveM = null, endTaperM = 10, roadFilter = null,
 } = {}) => {
-  const empty = { carvedCells: 0, maxShiftM: 0, minH: Infinity, maxH: -Infinity };
+  const empty = { carvedCells: 0, maxShiftM: 0, minH: Infinity, maxH: -Infinity, largeShiftCells: 0 };
   if (!profiles?.roads?.length || !ground?.heightMap) return empty;
+  // Corridor authority: a whittaker profile has a height for every sample, so
+  // the corridor is stamped unconditionally — no held-end taper, no clamp.
+  const authority = profiles.solver === 'whittaker';
+  const clampM = maxCarveM ?? (authority ? Infinity : 10);
+  const LARGE_SHIFT_M = 10;
   const upm = computeUnitsPerMeter(data);
   const W = data.width, H = data.height;
   const hm = ground.heightMap, cm = ground.coveredMask ?? null;
@@ -721,6 +792,13 @@ export const carveRoadProfiles = (profiles, data, ground, {
   const wSum = new Float32Array(W * H);
   const whSum = new Float32Array(W * H);
   const wMax = new Float32Array(W * H);
+  // Peak weight from OBSERVED arc (between a road's first and last trusted
+  // sample). Authority profiles also stamp their leading/trailing unobserved
+  // spans (eased into the extracted ground), but those cells must not be
+  // reported as tile-covered: at a chunk's corridor tail that span eases
+  // toward the DEM, and a "covered" vote there would out-blend the neighbour
+  // chunk's genuinely observed road in the route composite.
+  const wObs = new Float32Array(W * H);
   const featherScene = featherM * upm;
   const toCol = (x) => ((x + HALF) / SCENE_SIZE) * (W - 1);
   const toRow = (z) => ((z + HALF) / SCENE_SIZE) * (H - 1);
@@ -740,11 +818,17 @@ export const carveRoadProfiles = (profiles, data, ground, {
     // full strength (underpasses depend on them), as do structure decks and
     // profiles without trust flags (deck snap, hand-built).
     let conf = null;
+    let firstT = -1, lastT = -1;
     if (!r.throughStructure) {
-      let firstT = -1, lastT = -1;
       for (let i = 0; i < pts.length; i++) {
         if (pts[i].trusted) { if (firstT < 0) firstT = i; lastT = i; }
       }
+    }
+    // Observed arc-length window (Infinity-open for structure decks / profiles
+    // without trust flags, which never carry unobserved ends).
+    const obsS0 = firstT >= 0 ? pts[firstT].s : -Infinity;
+    const obsS1 = lastT >= 0 ? pts[lastT].s : Infinity;
+    if (!r.throughStructure && !authority) {
       if (firstT > 0 || (firstT >= 0 && lastT < pts.length - 1)) {
         conf = new Float64Array(pts.length).fill(1);
         for (let i = 0; i < firstT; i++) {
@@ -783,29 +867,35 @@ export const carveRoadProfiles = (profiles, data, ground, {
           wSum[idx] += w;
           whSum[idx] += w * h;
           if (w > wMax[idx]) wMax[idx] = w;
+          const sArc = a.s + (b.s - a.s) * t;
+          if (sArc >= obsS0 && sArc <= obsS1 && w > wObs[idx]) wObs[idx] = w;
         }
       }
     }
   }
 
-  let carvedCells = 0, maxShiftM = 0, minH = Infinity, maxH = -Infinity;
+  let carvedCells = 0, maxShiftM = 0, minH = Infinity, maxH = -Infinity, largeShiftCells = 0;
   for (let idx = 0; idx < wMax.length; idx++) {
     const w = wMax[idx];
     if (w <= 0) continue;
     let delta = (whSum[idx] / wSum[idx] - hm[idx]) * w;
-    if (delta > maxCarveM) delta = maxCarveM;
-    else if (delta < -maxCarveM) delta = -maxCarveM;
+    if (delta > clampM) delta = clampM;
+    else if (delta < -clampM) delta = -clampM;
     if (delta !== 0) {
       hm[idx] += delta;
       const a = Math.abs(delta);
       if (a > maxShiftM) maxShiftM = a;
+      if (a > LARGE_SHIFT_M) largeShiftCells++;
     }
     if (hm[idx] < minH) minH = hm[idx];
     if (hm[idx] > maxH) maxH = hm[idx];
     carvedCells++;
-    // Fully inside the carriageway ⇒ the profile IS the floor here — trusted,
-    // so the terSnap pass may pull the road mesh onto it (underpass included).
-    if (cm && w >= 0.9) cm[idx] = 1;
+    // The profile IS the floor here — trusted, so the terSnap pass may pull the
+    // road mesh onto it (underpass included). Legacy: carriageway core only;
+    // authority: the feather too, so floor and mesh transition together at the
+    // street edge instead of the mesh releasing where the floor still blends.
+    // Only over the OBSERVED arc (wObs): unobserved eased ends stay uncovered.
+    if (cm && (authority ? wObs[idx] > 0 : wObs[idx] >= 0.9)) cm[idx] = 1;
   }
 
   // Post-carve fidelity: resample the carved grid along every full-strength
@@ -824,7 +914,7 @@ export const carveRoadProfiles = (profiles, data, ground, {
     }
   }
   return {
-    carvedCells, maxShiftM: +maxShiftM.toFixed(2), minH, maxH,
+    carvedCells, maxShiftM: +maxShiftM.toFixed(2), minH, maxH, largeShiftCells,
     profileResidualRmsM: resN ? Math.round(Math.sqrt(resSq / resN) * 1000) / 1000 : 0,
     profileResidualMaxM: Math.round(resMax * 100) / 100,
     profileResidualMaxAt: resMaxAt,

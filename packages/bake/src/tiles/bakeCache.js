@@ -46,7 +46,13 @@
 //      past the maxSnapM ceiling and wall guards. Legit overhangs (surface
 //      underneath, mapped structures) keep their protection. Geometry changes
 //      wherever tiles glitched over roads.
-export const BAKE_FORMAT_VERSION = 20;
+// v21: PMF gets Zhang eq.(7) semantics — threshold grows with the window
+//      INCREMENT (not full diameter) and is capped at dhMaxM (default 3 m).
+//      Previously the 70 m window tolerated ~21 m of relief, so whole city
+//      blocks survived the filter and were baked into the .ter as terrain
+//      (towers peeking through the street mesh). Extracted ground changes for
+//      every pmf-filtered bake.
+export const BAKE_FORMAT_VERSION = 21;
 
 // FNV-1a 32-bit over a string — the cache key's compact fingerprint primitive.
 const fnv1a = (s, h = 2166136261) => {
@@ -78,6 +84,10 @@ export const bakeCacheKey = (
     corridorSegment = null,
     corridorHalfWidthM = 0,
     sharedGroundOffsetM = null,
+    // Route mode: chunk ownership clip ({ centers:[{lat,lng}], self }) — the
+    // baked mesh is trimmed to this chunk's Voronoi cell, so the key must
+    // carry the centre set and which one is "self".
+    corridorOwnership = null,
     // Per-bake assembly-pass overrides (sandbox / debug). Left undefined in
     // production, so the key below is byte-for-byte unchanged there.
     weld,
@@ -108,6 +118,10 @@ export const bakeCacheKey = (
   const anchor = Number.isFinite(sharedGroundOffsetM)
     ? `|gz=${Number(sharedGroundOffsetM).toFixed(2)}`
     : '';
+  // Ownership clip: geometry differs per (centre set, self). Empty when absent.
+  const ownership = corridorOwnership && Array.isArray(corridorOwnership.centers) && corridorOwnership.centers.length > 1
+    ? `|own=${corridorOwnership.self}:${(fnv1a(corridorOwnership.centers.map((c) => `${r(c.lat)},${r(c.lng)}`).join(';')) >>> 0).toString(36)}`
+    : '';
   // Only an explicitly-disabled pass appends to the key — undefined (production)
   // leaves the key unchanged, so existing caches/sessions still match.
   const passes =
@@ -137,12 +151,39 @@ export const bakeCacheKey = (
   //         terSnap conforms — OSM footprints freeze the delta field per
   //         structure (rigid re-seat, planar roofs) and veto the road snap
   //         underneath. Disable via stiffness=false / MAPNG_CONFORM_STIFFNESS=0.
+  // tsnap10: corridor authority — asymmetric-Whittaker road profiles (a height
+  //          for every sample), unconditional corridor carve (no held-end
+  //          taper, no clamp, feather cells trusted) and a clearance-gated
+  //          terSnap (no ceiling/taper/wall exemption below corridorClearanceM).
+  // tsnap11: the bake container ships the extracted + carved ground (header
+  //          `ground`), so the route preview shows the worker's floor instead
+  //          of a live re-extraction. Same geometry as tsnap10.
+  // tsnap12: unobserved (eased) road ends are stamped but no longer marked
+  //          covered — chunk tails stop out-voting the neighbour chunk in the
+  //          route composite, and the terSnap leaves the mesh alone there.
+  // tsnap13: shared-anchor chunks re-seat their DEM into the tile frame
+  //          (worker: heightMap += sharedOffset − naturalOffset) before conform,
+  //          extraction, profiles and snap — the chunk floor no longer lands
+  //          metres above the street where the chunk's own DEM disagreed with
+  //          chunk 0's anchor.
+  // tsnap14: DEM re-seat estimated over the corridor (median of tile−DEM on
+  //          carriageway cells, tiles/demReseat.js) instead of the single
+  //          centre-probe delta, and applied to every extraction bake (chunk 0
+  //          included). Extracted grounds change wherever the probe was off.
+  // tsnap15: the re-seat is a running median ALONG the route line (the DEM
+  //          error moved by 7 m inside one chunk), applied per pixel.
   const terSnap = extractGround && (groundStrategy?.snapRoads ?? true)
-    ? `|tsnap9=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
+    ? `|tsnap15=${(fnv1a(JSON.stringify(groundStrategy ?? {})) >>> 0).toString(36)}`
     : '';
+  // Datum fingerprint. Every baked Y is METRES ABOVE data.minHeight, and the
+  // placement lifts the mesh by that same datum — so a bake is only valid for
+  // the DEM it was baked against. The same bounds fetched from another
+  // elevation source came back with a datum 12.5 m apart on one day; a cached
+  // bake reused across that switch lands 12.5 m off. Rounded to cm.
+  const datum = Number.isFinite(data.minHeight) ? `|dz=${Number(data.minHeight).toFixed(2)}` : '';
   return (
     `v${BAKE_FORMAT_VERSION}|${r(b.north)},${r(b.south)},${r(b.east)},${r(b.west)}` +
-    `|${data.width}x${data.height}|et=${errorTarget}|sg=${stripGround}` +
-    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}${corridor}${anchor}${passes}${terSnap}`
+    `|${data.width}x${data.height}${datum}|et=${errorTarget}|sg=${stripGround}` +
+    `|gd=${groundDistanceM}|sweep=${cameraSweep}|q=${quality}|px=${sensorSize}${corridor}${anchor}${ownership}${passes}${terSnap}`
   );
 };

@@ -187,10 +187,23 @@ import GroundStrategyControls from './GroundStrategyControls.vue';
 import AreaInspector from './AreaInspector.vue';
 import { TILE_RENDER_BIAS_M } from '@mapng/bake/google3dTiles';
 import { extractTileGround } from '@mapng/bake/ground/extractTileGround';
-import { buildMeshFromHeights } from '@mapng/bake/ground/heightField';
+import { buildMeshFromHeights, buildTileHeightField } from '@mapng/bake/ground/heightField';
 import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
 import { conformTilesToFloor } from '@mapng/bake/tileGroundConform';
+import { buildGroundMask } from '@mapng/bake/groundMask';
 import { computeUnitsPerMeter, sampleHeightAtScene, SCENE_SIZE } from '@mapng/bake/googleBakeCore';
+
+// Fire-and-forget structured log to the turbolog dev bridge (viteTurbologPlugin);
+// no-op in prod. Lets the gap heatmap be READ, not only looked at.
+const devLog = (stream, message, meta) => {
+  try {
+    fetch('/api/log', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ stream, message, meta }),
+    }).catch(() => { /* dev-only, best effort */ });
+  } catch { /* no fetch / prod */ }
+};
 import { useGoogleTilesStore } from '../../stores/googleTilesStore.js';
 
 const { t } = useI18n({ useScope: 'global' });
@@ -298,6 +311,55 @@ const applyTileZOffset = () => {
 const GROUND_NAME = '__ter_ground';
 const GROUND_MAXSEG = 128; // coarse live grid for snappy re-extraction
 
+// Rebuild the chunk DEM (absolute metres, N×M, north-origin) from the GLB's
+// `center_terrain` grid mesh (terrainMesh.js: Y = (h − minHeight) × upm, X/Z in
+// the ±SCENE_SIZE/2 scene frame). Nearest-vertex splat + hole fill from the
+// nearest filled cell; returns a flat plane at the datum only when the chunk
+// has no terrain mesh at all (logged).
+const demFromTerrainNode = (c, N, M) => {
+  const out = new Float32Array(N * M).fill(NaN);
+  const pos = c.terrainNode?.geometry?.attributes?.position;
+  const upm = computeUnitsPerMeter({ bounds: c.bounds, width: N, height: M }) || 1;
+  const half = SCENE_SIZE / 2;
+  if (pos && pos.count >= 4) {
+    const acc = new Float32Array(N * M), cnt = new Uint16Array(N * M);
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+      const col = Math.round(((x + half) / SCENE_SIZE) * (N - 1));
+      const row = Math.round(((z + half) / SCENE_SIZE) * (M - 1));
+      if (col < 0 || col >= N || row < 0 || row >= M) continue;
+      const k = row * N + col;
+      acc[k] += y / upm + c.minHeight; cnt[k]++;
+    }
+    for (let k = 0; k < out.length; k++) if (cnt[k]) out[k] = acc[k] / cnt[k];
+    // Fill holes (coarser mesh than the stub grid) by grassfire dilation.
+    let holes = 0;
+    for (let k = 0; k < out.length; k++) if (Number.isNaN(out[k])) holes++;
+    let guard = 0;
+    while (holes > 0 && guard++ < Math.max(N, M)) {
+      const next = Float32Array.from(out);
+      for (let row = 0; row < M; row++) {
+        for (let col = 0; col < N; col++) {
+          const k = row * N + col;
+          if (!Number.isNaN(out[k])) continue;
+          let s = 0, n = 0;
+          for (let dr = -1; dr <= 1; dr++) for (let dc = -1; dc <= 1; dc++) {
+            const r2 = row + dr, c2 = col + dc;
+            if (r2 < 0 || r2 >= M || c2 < 0 || c2 >= N) continue;
+            const v = out[r2 * N + c2];
+            if (!Number.isNaN(v)) { s += v; n++; }
+          }
+          if (n) { next[k] = s / n; holes--; }
+        }
+      }
+      out.set(next);
+    }
+    if (holes === 0) return out;
+  }
+  console.warn(`[RoutePreview] chunk ${c.index}: no usable terrain mesh in the GLB — DEM stub is a flat plane at the datum (${c.minHeight} m)`);
+  return new Float32Array(N * M).fill(c.minHeight);
+};
+
 const disposeMesh = (m) => {
   if (!m) return;
   m.geometry?.dispose?.();
@@ -355,6 +417,132 @@ const applyProfileLines = (c, prof) => {
 // patch sits under a bent roof, the delta pass is what bent it, by ~|ΔD| × cells
 // spanned. The tiles themselves are untouched — conformTilesToFloor runs
 // measureOnly, no positions are allocated or applied.
+// Gap heatmap: per-cell vertical difference between the RENDERED tile surface
+// (per-cell minimum of the tiles, plus the z-offset + render bias they are
+// displayed with) and the floor the car drives on (the shipped/extracted
+// ground). Diverging scale over ±store.gapRangeM: red = tiles float ABOVE the
+// floor (the car drives inside the mesh), blue = the floor pokes THROUGH the
+// tiles, green = coincident. Only tile-covered cells are drawn. Display-only.
+const GAP_MAXSEG = 256; // 2 m cells on a 512 m chunk — enough to see a road
+const applyGapField = (c, g) => {
+  if (c.gapField) { c.object.remove(c.gapField); disposeMesh(c.gapField); c.gapField = null; }
+  if (!store.gapFieldShow || !g || !c.tilesNode || !c.bounds || !c._stub) return;
+  const upm = computeUnitsPerMeter(c._stub) || 1;
+  // Tile surface raster in the chunk frame (scene units above the datum). No
+  // normal/band gates: we want what is RENDERED, walls and cars included.
+  const field = buildTileHeightField(c.tilesNode, c._stub, upm, { maxSeg: GAP_MAXSEG, minNormalY: 0, belowBandM: 1e6, aboveBandM: 1e6 });
+  const floor = { bounds: c.bounds, width: g.width, height: g.height, minHeight: c.minHeight, heightMap: g.heightMap };
+  const liftM = (props.zOffsetM || 0) + TILE_RENDER_BIAS_M;
+  const range = Math.max(0.1, Number(store.gapRangeM) || 1);
+  const { nx, nz } = field;
+  const cellU = SCENE_SIZE / (nx - 1);
+  const half = SCENE_SIZE / 2;
+  const liftU = 0.3 * upm;
+  // Road mask (OSM, fixed class widths): the gap ON THE ROAD is what the car
+  // feels; off-road cells are context. Reported separately below.
+  const roadMask = Array.isArray(c.osmRoads) && c.osmRoads.length ? buildGroundMask(c.osmRoads, c._stub) : null;
+  const positions = [], colors = [], indices = [];
+  const gaps = [], roadGaps = [];
+  // Machine-readable report: a 32×32 grid of mean ROAD gap (NaN where no road
+  // cell), the worst road cells with positions, and percentiles.
+  const RG = 32;
+  const gridSum = new Float64Array(RG * RG), gridN = new Uint32Array(RG * RG);
+  const worst = [];
+  let vi = 0;
+  for (let zi = 0; zi < nz - 1; zi++) {
+    for (let xi = 0; xi < nx - 1; xi++) {
+      const ni = zi * nx + xi;
+      if (!field.covered[ni]) continue;
+      const x = (xi / (nx - 1)) * SCENE_SIZE - half;
+      const z = (zi / (nz - 1)) * SCENE_SIZE - half;
+      const tileM = field.minH[ni] / upm + c.minHeight + liftM;
+      const floorM = sampleHeightAtScene(floor, x + cellU / 2, z + cellU / 2);
+      const gap = tileM - floorM;
+      gaps.push(gap);
+      const onRoad = roadMask ? roadMask.sample(x + cellU / 2, z + cellU / 2) >= 0.9 : false;
+      if (onRoad) {
+        roadGaps.push(gap);
+        const gx = Math.min(RG - 1, Math.floor(((x + half) / SCENE_SIZE) * RG));
+        const gz = Math.min(RG - 1, Math.floor(((z + half) / SCENE_SIZE) * RG));
+        gridSum[gz * RG + gx] += gap; gridN[gz * RG + gx]++;
+        if (Math.abs(gap) >= 0.3) worst.push({ x: x + cellU / 2, z: z + cellU / 2, gap });
+      }
+      // diverging ramp: blue (−range) → green (0) → red (+range)
+      const t = Math.max(-1, Math.min(1, gap / range));
+      let cr, cg, cb;
+      if (t >= 0) { cr = 0.13 + (0.94 - 0.13) * t; cg = 0.77 - (0.77 - 0.2) * t; cb = 0.37 - 0.37 * t; }
+      else { const s = -t; cr = 0.13 - 0.13 * s; cg = 0.77 - (0.77 - 0.45) * s; cb = 0.37 + (0.95 - 0.37) * s; }
+      const y = (floorM - c.minHeight) * upm + liftU;
+      positions.push(x, y, z, x + cellU, y, z, x, y, z + cellU, x + cellU, y, z + cellU);
+      for (let k = 0; k < 4; k++) colors.push(cr, cg, cb);
+      indices.push(vi, vi + 2, vi + 1, vi + 1, vi + 2, vi + 3);
+      vi += 4;
+    }
+  }
+  if (!positions.length) return;
+  const pct = (arr) => {
+    const s = Array.from(arr).sort((a, b) => a - b);
+    const q = (p) => (s.length ? s[Math.min(s.length - 1, Math.floor(p * s.length))] : NaN);
+    return {
+      n: s.length, p05: q(0.05), p50: q(0.5), p95: q(0.95), min: s[0] ?? NaN, max: s[s.length - 1] ?? NaN,
+      aboveP: s.length ? s.filter((v) => v > 0.3).length / s.length : 0,
+      belowP: s.length ? s.filter((v) => v < -0.3).length / s.length : 0,
+    };
+  };
+  const all = pct(gaps), road = pct(roadGaps);
+  const f2 = (v) => (Number.isFinite(v) ? v.toFixed(2) : '—');
+  console.info(
+    `[RoutePreview] chunk ${c.index}: tile↔floor gap — road cells ${road.n}: p05 ${f2(road.p05)} / p50 ${f2(road.p50)} / p95 ${f2(road.p95)} m, ` +
+    `${(road.aboveP * 100).toFixed(1)}% >0.3 m above, ${(road.belowP * 100).toFixed(1)}% >0.3 m below; all covered cells ${all.n}: p50 ${f2(all.p50)} / p95 ${f2(all.p95)} m`,
+  );
+  // Turbolog `tile-gap`: the same field as numbers. grid = 32×32 mean road gap
+  // (rows north→south, cols west→east, null = no road), ascii = the grid as a
+  // glyph map (' ' no road, '.' |gap|<0.15, '+'/'#' tiles 0.15–0.5/>0.5 m above
+  // the floor, '-'/'=' floor 0.15–0.5/>0.5 m through the tiles), worst = up to
+  // 40 road cells with the largest |gap| (scene x/z + lat/lng).
+  const grid = [], ascii = [];
+  const b = c.bounds;
+  for (let gz = 0; gz < RG; gz++) {
+    const row = []; let line = '';
+    for (let gx = 0; gx < RG; gx++) {
+      const k = gz * RG + gx, n = gridN[k];
+      const v = n ? gridSum[k] / n : null;
+      row.push(v == null ? null : Math.round(v * 100) / 100);
+      line += v == null ? ' ' : Math.abs(v) < 0.15 ? '.' : v > 0.5 ? '#' : v > 0 ? '+' : v < -0.5 ? '=' : '-';
+    }
+    grid.push(row); ascii.push(line);
+  }
+  worst.sort((p, q2) => Math.abs(q2.gap) - Math.abs(p.gap));
+  const toLatLng = (x, z) => ({
+    lat: b.north - ((z + half) / SCENE_SIZE) * (b.north - b.south),
+    lng: b.west + ((x + half) / SCENE_SIZE) * (b.east - b.west),
+  });
+  const worstOut = worst.slice(0, 40).map((w) => ({ x: +w.x.toFixed(1), z: +w.z.toFixed(1), ...toLatLng(w.x, w.z), gapM: +w.gap.toFixed(2) }));
+  devLog('tile-gap',
+    `chunk ${c.index}: road gap p50 ${f2(road.p50)} / p95 ${f2(road.p95)} m, ${(road.aboveP * 100).toFixed(1)}% >0.3 m above, ${(road.belowP * 100).toFixed(1)}% >0.3 m below (${road.n} road cells, floor=${c._groundSource})`,
+    {
+      chunk: c.index, floorSource: c._groundSource, liftM: +liftM.toFixed(2), cellM: +(SCENE_SIZE / (nx - 1) / upm).toFixed(2),
+      road: { ...road, p05: +f2(road.p05), p50: +f2(road.p50), p95: +f2(road.p95), min: +f2(road.min), max: +f2(road.max) },
+      all: { ...all, p05: +f2(all.p05), p50: +f2(all.p50), p95: +f2(all.p95), min: +f2(all.min), max: +f2(all.max) },
+      gridCellM: +(SCENE_SIZE / RG / upm).toFixed(1), grid, ascii, worst: worstOut,
+      legend: "gap = rendered tile surface − drive floor; + tiles above floor (car inside mesh), − floor through tiles. ascii: ' ' no road, '.' |gap|<0.15, '+' 0.15–0.5 above, '#' >0.5 above, '-' 0.15–0.5 below, '=' >0.5 below; rows north→south, cols west→east",
+    });
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setIndex(indices);
+  const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85, depthWrite: false, side: THREE.DoubleSide }));
+  mesh.name = '__gap_field';
+  mesh.renderOrder = 5;
+  c.object.add(mesh);
+  c.gapField = mesh;
+};
+const refreshGapFields = () => {
+  for (const c of loaded.value) {
+    try { applyGapField(c, c._g); } catch (e) { console.warn(`[RoutePreview] gap field failed for chunk ${c.index}:`, e); }
+  }
+};
+
 const BEND_MIN_M = 0.05; // draw threshold — below this the field can't visibly bend anything
 const BEND_MAX_M = 0.5;  // full-red saturation, metres per 6 m cell
 const applyConformField = (c, g) => {
@@ -437,33 +625,66 @@ const applyConformField = (c, g) => {
 const extractChunkGround = (c) => {
   if (c.groundMesh) { c.object.remove(c.groundMesh); disposeMesh(c.groundMesh); c.groundMesh = null; }
   if (c.conformField) { c.object.remove(c.conformField); disposeMesh(c.conformField); c.conformField = null; }
+  if (c.gapField) { c.object.remove(c.gapField); disposeMesh(c.gapField); c.gapField = null; }
   if (store.ground.source !== 'tiles') { if (c.terrainNode) c.terrainNode.visible = true; return; }
   if (!c.tilesNode || !c.bounds) return;
-  if (!c._stub) {
-    // Flat DEM stub at the chunk datum: the live extraction only needs bounds
-    // (→ unitsPerMeter) + a datum; the filters work on the tile min-surface. The
-    // EXPORT uses the real per-chunk DEM (worker-side) for band gating.
-    const N = GROUND_MAXSEG + 1;
-    c._stub = { bounds: c.bounds, width: N, height: N, minHeight: c.minHeight, heightMap: new Float32Array(N * N).fill(c.minHeight) };
+  // Preferred: the WORKER's floor — extracted + carved on the real DEM at full
+  // .ter resolution, i.e. exactly the surface the terSnap seated the road mesh
+  // on. Showing anything else here (a live re-extraction on a coarse grid with
+  // a flat DEM stub) puts a floor under the tiles that the mesh was never
+  // fitted to, and the mismatch reads as "the ground does not map at all".
+  const workerGround = c.ground?.heightMap && c.ground.width && c.ground.height ? c.ground : null;
+  if (!c._stub || (workerGround && c._stub.width !== workerGround.width)) {
+    // Terrain stub for the chunk: bounds (→ unitsPerMeter), datum, and a DEM.
+    // With a worker ground the stub takes ITS grid so the profile/area tools
+    // line up. Otherwise the DEM is rebuilt from the chunk's own terrain mesh
+    // in the GLB — NEVER a flat plane at the datum: the live extraction falls
+    // back to the stub wherever tiles do not cover, and a flat stub put those
+    // cells at the chunk's minHeight, so neighbouring chunks with different
+    // datums (32.7 m vs 51.6 m on one Berlin route) showed a 19 m step that
+    // existed nowhere but in this preview.
+    const N = workerGround ? workerGround.width : GROUND_MAXSEG + 1;
+    const M = workerGround ? workerGround.height : GROUND_MAXSEG + 1;
+    c._stub = { bounds: c.bounds, width: N, height: M, minHeight: c.minHeight, heightMap: demFromTerrainNode(c, N, M) };
   }
   const mat = Array.isArray(c.terrainNode?.material) ? c.terrainNode.material[0] : c.terrainNode?.material;
-  // Full extraction (not just the mesh): the heightMap + rawMin + coveredMask
-  // feed the SAME profile carve the export worker runs, so the preview floor —
-  // and everything the AreaInspector measures — includes carved underpasses.
-  const g = extractTileGround(c.tilesNode, c._stub, groundStrategyOpts());
+  let g;
   let prof = null;
-  if (Array.isArray(c.osmRoads) && c.osmRoads.length
-      && (store.ground.carveRoads !== false || store.groundProfilesShow)) {
-    prof = buildRoadProfiles(c.osmRoads, c._stub, g);
-  }
-  if (prof && store.ground.carveRoads !== false) {
-    const cs = carveRoadProfiles(prof, c._stub, g);
-    if (cs.carvedCells > 0) {
-      console.info(`[RoutePreview] chunk ${c.index}: carved ${cs.carvedCells} cells (max shift ${cs.maxShiftM}m)`);
+  if (workerGround) {
+    g = {
+      heightMap: workerGround.heightMap,
+      coveredMask: workerGround.coveredMask ?? null,
+      width: workerGround.width,
+      height: workerGround.height,
+    };
+    if (c._groundSource !== 'worker') console.info(`[RoutePreview] chunk ${c.index}: floor = worker ground (${g.width}×${g.height}, carved in the bake)`);
+    c._groundSource = 'worker';
+    // Debug profile lines only — the carve already happened in the worker.
+    if (store.groundProfilesShow && Array.isArray(c.osmRoads) && c.osmRoads.length) {
+      prof = buildRoadProfiles(c.osmRoads, c._stub, g);
+    }
+  } else {
+    // Fallback (restored/cached bake without a shipped ground): full live
+    // extraction — heightMap + rawMin + coveredMask feed the SAME profile carve
+    // the export worker runs, so the preview floor includes carved underpasses.
+    g = extractTileGround(c.tilesNode, c._stub, groundStrategyOpts());
+    if (c._groundSource !== 'live') console.info(`[RoutePreview] chunk ${c.index}: floor = live re-extraction (no worker ground shipped)`);
+    c._groundSource = 'live';
+    if (Array.isArray(c.osmRoads) && c.osmRoads.length
+        && (store.ground.carveRoads !== false || store.groundProfilesShow)) {
+      prof = buildRoadProfiles(c.osmRoads, c._stub, g);
+    }
+    if (prof && store.ground.carveRoads !== false) {
+      const cs = carveRoadProfiles(prof, c._stub, g);
+      if (cs.carvedCells > 0) {
+        console.info(`[RoutePreview] chunk ${c.index}: carved ${cs.carvedCells} cells (max shift ${cs.maxShiftM}m)`);
+      }
     }
   }
   applyProfileLines(c, prof);
   applyConformField(c, g);
+  c._g = g; // kept for overlay-only refreshes (gap heatmap range / z-offset)
+  applyGapField(c, g);
   const upm = computeUnitsPerMeter(c._stub) || 1;
   const heights = new Float32Array(g.heightMap.length);
   for (let i = 0; i < heights.length; i++) heights[i] = (g.heightMap[i] - c.minHeight) * upm;
@@ -487,6 +708,7 @@ const scheduleGround = () => { clearTimeout(_groundTimer); _groundTimer = setTim
 watch(() => store.ground, scheduleGround, { deep: true });
 watch(() => store.groundProfilesShow, scheduleGround);
 watch(() => store.conformFieldShow, scheduleGround);
+watch(() => [store.gapFieldShow, store.gapRangeM, props.zOffsetM], refreshGapFields);
 
 const loadAll = async () => {
   loading.value = true;
@@ -502,7 +724,7 @@ const loadAll = async () => {
       out.push({
         index: c.index, object, placement: c.placement, tilesNode, terrainNode,
         bounds: c.bounds || null, minHeight: Number(c.minHeight) || 0,
-        osmRoads: c.osmRoads || [], groundMesh: null, conformField: null, _stub: null,
+        osmRoads: c.osmRoads || [], ground: c.ground || null, groundMesh: null, conformField: null, gapField: null, _stub: null,
       });
       loaded.value = [...out]; // progressive reveal
     }

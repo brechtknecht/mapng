@@ -165,13 +165,28 @@ test('structure-bottom junk in the raw min is rejected, not followed (bridge abu
   }
 });
 
-test('profile grades are clamped to a physical ceiling', () => {
+test('legacy solver: profile grades are clamped to a physical ceiling', () => {
   // A 12m raw step (two structure levels misread as one road) — after the
-  // limiter no grade may exceed ~maxGradePct.
+  // limiter no grade may exceed ~maxGradePct. (The whittaker solver has no
+  // clamp: its curvature penalty spreads the step over the cutoff length.)
+  const step = (col) => (col < 100 ? 40 : 52);
+  const g = groundStub(() => 40, null, step);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g, { solver: 'legacy' });
+  assert.ok(prof.stats.maxGradePct <= 26, `grade capped at ~25%, got ${prof.stats.maxGradePct}%`);
+});
+
+test('whittaker solver: a step in the raw min becomes a smooth ramp, not a kink', () => {
   const step = (col) => (col < 100 ? 40 : 52);
   const g = groundStub(() => 40, null, step);
   const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
-  assert.ok(prof.stats.maxGradePct <= 26, `grade capped at ~25%, got ${prof.stats.maxGradePct}%`);
+  const r = prof.roads[0];
+  assert.ok(prof.stats.maxGradePct < 45, `12 m step spread over the cutoff length, got ${prof.stats.maxGradePct}%`);
+  // A curvature penalty rings slightly around a hard step; the ring must stay
+  // far below anything a wheel feels (no dip deeper than 15 cm per sample).
+  for (let i = 1; i < r.pts.length; i++) {
+    assert.ok(r.pts[i].h >= r.pts[i - 1].h - 0.15, `no dip at ${r.pts[i].s}: ${r.pts[i - 1].h} → ${r.pts[i].h}`);
+  }
+  assert.ok(Math.abs(r.pts[0].h - 40) < 0.5 && Math.abs(r.pts[r.pts.length - 1].h - 52) < 0.5, 'levels reached at both ends');
 });
 
 test('a near-duplicate endpoint sample cannot report an absurd grade', () => {
@@ -312,10 +327,12 @@ test('crossing roads with disagreeing profiles blend at the junction — no step
   assert.ok(Math.abs(prev - 44) < 0.1, `clear of the junction B owns its height, got ${prev.toFixed(2)}`);
 });
 
-test('a held (untrusted) road end tapers out of the carve instead of stamping a shelf', () => {
+test('an unobserved road end eases into the extracted ground instead of stamping a shelf', () => {
   // Coverage ends at col 150; beyond it the floor is DEM fallback 5m higher.
-  // The profile HOLDS the last trusted height (40) through the uncovered end —
-  // pure extrapolation, which must fade out instead of carving a 5m shelf.
+  // Legacy: the profile HOLDS the last trusted height and the carve tapers
+  // out. Whittaker: the unobserved end relaxes to the extracted ground over
+  // ~13 m and stamps at full strength — same outcome 30 m past coverage, no
+  // 5 m shelf either way.
   const g = groundStub((col) => (col >= 150 ? 45 : 40), [150, 199]);
   const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
   assert.ok(prof.roads[0].resolved);
@@ -324,6 +341,19 @@ test('a held (untrusted) road end tapers out of the carve instead of stamping a 
   assert.ok(heldEnd > 44.5, `held end left untouched, got ${heldEnd.toFixed(2)}`);
   const body = g.heightMap[cellIdx(0, 0)];
   assert.ok(Math.abs(body - 40) < 0.3, `trusted body still carves, got ${body.toFixed(2)}`);
+});
+
+test('an unobserved road end is stamped but never reported as tile-covered', () => {
+  // A chunk's corridor tail: the road runs on past coverage. The eased span
+  // shapes the floor, but coveredMask must stay 0 there — a "covered" vote at
+  // the tail would out-blend the neighbour chunk's observed road in the route
+  // composite, and the terSnap must not seat the mesh on an eased floor.
+  const g = groundStub((col) => (col >= 150 ? 45 : 40), [150, 199]);
+  const prof = buildRoadProfiles([roadFeature({ highway: 'primary' })], DATA, g);
+  assert.equal(prof.solver, 'whittaker');
+  carveRoadProfiles(prof, DATA, g);
+  assert.equal(g.coveredMask[cellIdx(0, 0)], 1, 'observed body is covered');
+  assert.equal(g.coveredMask[cellIdx(38, 0)], 0, 'eased tail (col ~175, 25 m past coverage) stays uncovered');
 });
 
 test('interior bridged spans (underpasses) keep full carve strength despite the end taper', () => {

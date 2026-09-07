@@ -76,6 +76,8 @@ import { extractTileGroundFromSoup } from '@mapng/bake/ground/extractTileGround'
 import { buildGroundMask } from '@mapng/bake/groundMask';
 import { collectStructureRings } from '@mapng/bake/deform/structureStiffness';
 import { buildRoadProfiles, carveRoadProfiles } from '@mapng/bake/roadProfiles';
+import { clipSoupToOwnership } from '@mapng/bake/tiles/chunkOwnership';
+import { estimateTileDemOffset, estimateTileDemOffsetField, sceneRouteLine, shiftHeightMap, shiftHeightMapByField } from '@mapng/bake/tiles/demReseat';
 import { createMetricProjector } from '@mapng/geo';
 import { TileDiskCache } from './googleTileDiskCache.mjs';
 
@@ -258,6 +260,84 @@ const applyWeld = (session) => {
 };
 
 /**
+ * DEM re-seat onto the tile road (route .ter mode / shared anchor).
+ *
+ * The chunk's DEM and the transformed tiles disagree vertically by an amount
+ * that varies along the route (global-DEM error, geoid, the shared anchor's own
+ * probe error): +0.2 / +0.3 / −4.4 / −2.6 m on four consecutive chunks of a
+ * flat Berlin route. Every DEM-relative pass downstream (conform band,
+ * extraction belowBand gate, DEM fallback, road profiles) then rejects the real
+ * street wherever the DEM sits more than the band above it and the chunk floor
+ * lands on the DEM, metres above the visible road — while the neighbour chunk,
+ * whose DEM happened to agree, sits on the road. That per-chunk floor error was
+ * the disagreement the route registration then pushed into the MESH placement.
+ *
+ * Estimate the offset robustly over the whole corridor (median of per-cell tile
+ * minimum − DEM on OSM carriageway cells; tiles/demReseat.js) and shift the
+ * heightMap by it (datum unchanged). NOT the single-point (shared − natural
+ * anchor) delta: the 5th-percentile probe at one chunk's centre read a railway
+ * cut 6.4 m below the street and re-seated that DEM 6.7 m too low.
+ */
+const applyDemReseat = (session, { enabled }) => {
+  if (!enabled) return;
+  const soup = [];
+  for (const entry of session.outputs.values()) {
+    for (const r of entry.records) soup.push({ positions: r.positions, index: r.index });
+  }
+  if (soup.length === 0) return;
+  const t0 = performance.now();
+  const roadMask = buildGroundMask(session.data.osmFeatures, session.data, { featherM: 0 });
+  // Route mode: vote only inside the driven corridor (≤ 12 m of the route
+  // line). Measured on the real containers: all OSM roads of the box gave
+  // −1.53 m for a chunk whose route road sits +0.17 m off the DEM — the box
+  // holds a stadium pit and a railway cut that the DEM does not resolve.
+  const seg = session.options?.corridorSegment;
+  const halfW = Math.min(12, Number(session.options?.corridorHalfWidthM) || 12);
+  const probeDelta = Number.isFinite(session.options?.sharedGroundOffsetM)
+    ? session.options.sharedGroundOffsetM - session.naturalOffsetM
+    : 0;
+  const route = sceneRouteLine(seg, session.data, session.fp.projector);
+  const sec = () => `${((performance.now() - t0) / 1000).toFixed(1)}s`;
+  if (route) {
+    // Route mode: the DEM error varies ALONG the route inside one chunk (the
+    // measured route went from +1.0 to −6.0 m within 512 m — a railway cut the
+    // 30 m DEM does not resolve). A running median along the route line seats
+    // the DEM under the road everywhere the tiles show it.
+    const field = estimateTileDemOffsetField(soup, session.data, { route, roadMask, corridorHalfWidthM: halfW });
+    if (!field) {
+      console.warn(`[bakeWorker] DEM re-seat: too few corridor cells${roadMask ? '' : ' (no OSM road mask)'} — DEM left as is (single-point probe delta would have been ${probeDelta.toFixed(2)}m)`);
+      return;
+    }
+    session.demShiftM = field.constantM;
+    session.demShiftRangeM = [field.minM, field.maxM];
+    session.data = shiftHeightMapByField(session.data, field.offsetAt);
+    console.info(
+      `[bakeWorker] DEM re-seated onto the tile road along the route: ${field.minM >= 0 ? '+' : ''}${field.minM.toFixed(2)} … ` +
+      `${field.maxM >= 0 ? '+' : ''}${field.maxM.toFixed(2)}m (running median over ${field.n} corridor(≤${halfW}m) carriageway cells, ` +
+      `${field.windowsValid}/${field.windows} windows observed; chunk median ${field.constantM.toFixed(2)}m; ` +
+      `single-point probe delta was ${probeDelta.toFixed(2)}m) in ${sec()}`,
+    );
+    return;
+  }
+  const est = estimateTileDemOffset(soup, session.data, { roadMask });
+  if (est.offsetM === null) {
+    console.warn(
+      `[bakeWorker] DEM re-seat: only ${est.n} carriageway cells${roadMask ? '' : ' (no OSM road mask)'} — ` +
+      `DEM left as is (single-point probe delta would have been ${probeDelta.toFixed(2)}m)`,
+    );
+    return;
+  }
+  session.demShiftM = est.offsetM;
+  if (Math.abs(est.offsetM) > 1e-3) session.data = shiftHeightMap(session.data, est.offsetM);
+  console.info(
+    `[bakeWorker] DEM re-seated onto the tile road by ${est.offsetM >= 0 ? '+' : ''}${est.offsetM.toFixed(2)}m ` +
+    `(median of tile−DEM over ${est.n} carriageway cells, ` +
+    `p05 ${est.p05.toFixed(2)} / p25 ${est.p25.toFixed(2)} / p75 ${est.p75.toFixed(2)} / p95 ${est.p95.toFixed(2)}; ` +
+    `single-point probe delta was ${probeDelta.toFixed(2)}m) in ${sec()}`,
+  );
+};
+
+/**
  * Delta-field conform (googleBakeCore → conformTilesToFloor): seat the tiles onto
  * the .ter floor. Runs AFTER applyWeld (so it reads the welded, ground-consistent
  * positions) and BEFORE applyGroundStrip (which needs the ground tris to survive
@@ -356,7 +436,14 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
   session.carveStats = null;
   if (session.extractedGround) {
     try {
-      const prof = buildRoadProfiles(session.data.osmFeatures, session.data, session.extractedGround);
+      const prof = buildRoadProfiles(session.data.osmFeatures, session.data, session.extractedGround, {
+        solver: groundStrategy?.profileSolver ?? 'whittaker',
+        cutoffM: groundStrategy?.profileCutoffM ?? 40,
+        coreM: groundStrategy?.profileCoreM ?? 0.4,
+        objectM: groundStrategy?.profileObjectM ?? 1.0,
+        aboveWeight: groundStrategy?.profileAboveWeight ?? 0.02,
+        priorWeight: groundStrategy?.profilePriorWeight ?? 0.05,
+      });
       session.roadProfiles = prof;
       if (prof) {
         const st = prof.stats;
@@ -386,7 +473,7 @@ const extractSessionGround = (session, extractGround, groundStrategy) => {
             g.maxHeight = Math.max(g.maxHeight, cs.maxH);
             console.info(
               `[bakeWorker] [roadProfiles] carved ${cs.carvedCells} cells into the .ter ` +
-              `(max shift ${cs.maxShiftM}m), .ter-vs-profile residual rms ` +
+              `(max shift ${cs.maxShiftM}m, ${cs.largeShiftCells ?? 0} cells shifted >10m), .ter-vs-profile residual rms ` +
               `${cs.profileResidualRmsM}m / max ${cs.profileResidualMaxM}m ` +
               `over ${cs.residualSamples} samples` +
               (cs.profileResidualMaxAt
@@ -450,6 +537,11 @@ const applyTerGroundSnap = (session, groundStrategy) => {
     // the DEM-target conform and pulled elevated roads down to the ground.
     maxSnapM: 2,
     snapTaperM: 1,
+    // Corridor authority: inside the road mask everything lower than this
+    // above the carved floor IS the road and is seated on it — no ceiling, no
+    // taper, no wall exemption. Guarantees the visible road never sits above
+    // the drive surface. null/0 restores the legacy gates (A/B).
+    corridorClearanceM: (groundStrategy?.corridorClearanceM ?? 2.5) || null,
   });
   for (let i = 0; i < recs.length; i++) {
     if (r.positions[i]) recs[i].positions = r.positions[i];
@@ -553,6 +645,37 @@ const applyGroundStrip = (session) => {
   console.info(
     `[bakeWorker] ground strip: removed ${removed}/${total} near-terrain tris in ` +
     `${((performance.now() - t0) / 1000).toFixed(1)}s`,
+  );
+};
+
+/**
+ * Chunk ownership clip (route mode) — LAST pass. Every point of the route
+ * belongs to the chunk whose centre is nearest; triangles whose centroid is
+ * owned by a neighbour chunk are dropped, so overlapping chunks never show
+ * two meshes in the same place and the mesh switches chunk on exactly the
+ * line where the route .ter switches floor (routeTerrainComposite ownership
+ * weights). Recomputed from the CURRENT index (after the ground strip, which
+ * itself restarts from the immutable base index) so it stays idempotent.
+ */
+const applyOwnershipClip = (session) => {
+  const own = session.ownership;
+  if (!own || !Array.isArray(own.centers) || own.centers.length < 2 || !Number.isInteger(own.self)) return;
+  const recs = [];
+  const soup = [];
+  for (const entry of session.outputs.values()) {
+    for (const r of entry.records) {
+      if (!r.index) continue;
+      recs.push(r);
+      soup.push({ positions: r.positions, index: r.index });
+    }
+  }
+  if (soup.length === 0) return;
+  const t0 = performance.now();
+  const { indices, removed, total } = clipSoupToOwnership(soup, session.data, own);
+  for (let i = 0; i < recs.length; i++) recs[i].index = indices[i];
+  console.info(
+    `[bakeWorker] ownership clip: chunk ${own.self}/${own.centers.length} keeps ${total - removed}/${total} tris ` +
+    `(${removed} owned by neighbour chunks) in ${((performance.now() - t0) / 1000).toFixed(1)}s`,
   );
 };
 
@@ -911,14 +1034,36 @@ const writeContainer = async (session, outPath) => {
     }
   }
 
+  // Route mode: ship the extracted + carved ground (the floor the terSnap seated
+  // the road mesh on) as binary payload, so the browser preview can show the
+  // SAME floor instead of re-extracting a coarser one of its own.
+  const eg = session.extractedGround;
+  const ground = eg?.heightMap
+    ? {
+      heightMap: pushPart(eg.heightMap),
+      coverage: eg.coveredMask ? pushPart(eg.coveredMask) : null,
+      width: eg.width,
+      height: eg.height,
+      minHeight: eg.minHeight,
+      maxHeight: eg.maxHeight,
+    }
+    : null;
+
   const header = Buffer.from(JSON.stringify({
     format: 1,
     revision: session.revision,
+    ...(ground ? { ground } : {}),
     bakeStations: session.stations.map((st) => st.viz).filter(Boolean),
     anchor: {
       googleGroundAlt: session.googleGroundAlt,
       mapngGroundY: session.transformMesh.mapngGroundY,
       minHeight: session.transformMesh.minH,
+      // Frame diagnostics (tools/chunk_frame_invariants.mjs): the anchor this
+      // bake USED, the chunk's natural one, and the DEM re-seat applied.
+      groundOffsetM: session.transformMesh.groundOffsetM,
+      naturalOffsetM: session.naturalOffsetM,
+      demShiftM: session.demShiftM ?? 0,
+      demShiftRangeM: session.demShiftRangeM ?? null,
     },
     stats: {
       selected: session.selectedTiles.size,
@@ -926,6 +1071,13 @@ const writeContainer = async (session, outPath) => {
       stations: session.stations.length,
       timedOut: session.lastTimedOut,
       elapsedMs: Math.round(session.lastElapsedMs),
+      // Wall diagnostics (/tiles-wall route): cacheFull = the LRU byte/count
+      // budget was saturated → later stations starved to a coarse LOD;
+      // missingScenes = selected tiles whose scene was gone at bake (holes);
+      // rssMB = worker peak heap, the sidecar's real memory ceiling.
+      cacheFull: session.lastCacheFull === true,
+      missingScenes: session.lastMissingScenes ?? 0,
+      rssMB: Math.round(process.memoryUsage().rss / 1024 ** 2),
     },
     meshes,
   }), 'utf8');
@@ -964,6 +1116,7 @@ async function startBake(data, options, outPath) {
     // the in-browser bake so the sidecar produces the identical corridor result.
     corridorSegment = null,
     corridorHalfWidthM = 0,
+    corridorOwnership = null, // route mode: { centers:[{lat,lng}], self } — see applyOwnershipClip
     // Route mode: one route-wide vertical anchor (metres) shared by every chunk
     // so adjacent chunks don't float at their shared seam. null → per-chunk.
     sharedGroundOffsetM = null,
@@ -1091,6 +1244,13 @@ async function startBake(data, options, outPath) {
     googleGroundAlt = 0;
   }
 
+  // The natural (per-chunk) anchor: DEM at the centre minus the tile probe.
+  // Logged and shipped in the container header for the frame diagnostics
+  // (tools/chunk_frame_invariants.mjs). The DEM itself is re-seated onto the
+  // tile road AFTER the transform (applyDemReseat) from the whole corridor, not
+  // from this single point — see that pass for why.
+  const naturalOffsetM = sampleHeightAtScene(data, 0, 0) - googleGroundAlt;
+
   // Keep the ground here — the strip now runs LAST (after the weld), so the
   // weld can flatten street risers onto a street surface that still exists.
   const transformMesh = createTileMeshTransformer(data, frame, WGS84_ELLIPSOID, googleGroundAlt, {
@@ -1111,8 +1271,11 @@ async function startBake(data, options, outPath) {
     data, options, tiles, cam, frame, stations, selectedTiles,
     quality, stabilityMs, tileCache,
     googleGroundAlt, transformMesh,
+    naturalOffsetM,
+    demShiftM: 0, // set by applyDemReseat
     // Ground strip runs as a final pass (applyGroundStrip), not in the transform.
     groundStrip: { enabled: stripGround, groundNormalThreshold, groundDistanceM },
+    ownership: corridorOwnership,
     outputs: new Map(),       // tile → { records, carveSig }
     zeroTiles: new Set(),     // kept tiles known to clip/strip to nothing
     footprints: new Map(),    // tile → scene-XZ rect | null (stable, cached)
@@ -1128,17 +1291,22 @@ async function startBake(data, options, outPath) {
     revision: 0,
     lastTimedOut: timedOut,
     lastElapsedMs: elapsedMs,
+    lastCacheFull: cacheFull,
+    lastMissingScenes: 0, // set from the rebuild diff below
     outBase: outPath,
     currentResultPath: outPath,
   };
 
   const diff = rebuildOutputs(session);
+  session.lastMissingScenes = diff.missingScenes ?? 0;
   if (session.texturesMissing > 0) {
     console.warn(`[bakeWorker] ${session.texturesMissing} meshes had a material map but no captured image bytes`);
   }
   if (session.outputs.size === 0) {
     throw new Error('bake worker: tiles loaded but none survived AOI clipping/ground stripping.');
   }
+  // Seat the DEM on the tile road BEFORE any DEM-relative pass reads it.
+  applyDemReseat(session, { enabled: extractGround || Number.isFinite(sharedGroundOffsetM) });
   applyWeld(session);        // close seams while the street ground still exists
   applyConform(session);     // seat the welded mesh onto the .ter floor (delta field)
 
@@ -1151,6 +1319,7 @@ async function startBake(data, options, outPath) {
 
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
+  applyOwnershipClip(session); // route mode: keep only this chunk's Voronoi cell
 
   const { meshes, bytes } = await writeContainer(session, outPath);
   console.info(
@@ -1286,6 +1455,7 @@ async function refine(session, revision, stationSpec) {
   applyTerGroundSnap(session, session.options?.groundStrategy);
   applyGroundStrip(session); // THEN drop the (now-flattened) street/ground
   applyRiserStrip(session);  // off by default — fallback behind MAPNG_STRIP_RISERS=1
+  applyOwnershipClip(session); // route mode: keep only this chunk's Voronoi cell
   const resultPath = `${session.outBase}.rev${revision}`;
   const { meshes, bytes } = await writeContainer(session, resultPath);
   const previous = session.currentResultPath;

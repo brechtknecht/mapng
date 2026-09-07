@@ -237,6 +237,13 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
   // red by bend intensity; blue-tinted cells had no measured ground (inpainted).
   // Display-only: NOT persisted, never re-bakes.
   const conformFieldShow = ref(false);
+  // Tile ↔ floor gap overlay (debug): per-cell vertical difference between the
+  // rendered tile surface and the drive surface, red = tiles above the floor,
+  // blue = floor through the tiles. gapRangeM = colour saturation (± metres).
+  // Each refresh also publishes a machine-readable report to the turbolog
+  // `tile-gap` stream. Display-only: NOT persisted, never re-bakes.
+  const gapFieldShow = ref(false);
+  const gapRangeM = ref(1);
   function persistGround() {
     try { localStorage.setItem(GROUND_LS, JSON.stringify(ground)); } catch (_) { /* private mode */ }
   }
@@ -267,7 +274,7 @@ export const useGoogleTilesStore = defineStore('googleTiles', () => {
     setQuality, setZOffset, setStripGround,
     bakeForPreview, rebake, reset, tryRestore, refineFromView,
     // drivable-ground strategy (Scene-settings menu)
-    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow, groundProfilesShow, conformFieldShow,
+    ground, groundFilters: GROUND_FILTERS, groundPost: GROUND_POST, groundPreviewShow, groundProfilesShow, conformFieldShow, gapFieldShow, gapRangeM,
     setGroundSource, setGroundFilter, setGroundFilterParam,
     setGroundPostOn, setGroundPostEffect, setGroundPostParam, setGroundMinNormalY, setGroundSnapRoads, setGroundCarveRoads,
   };

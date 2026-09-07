@@ -299,6 +299,10 @@ export async function buildLevelArtifacts(terrainData, center, options = {}, pro
   const { blob: terBlob } = await exportTer(exportTerrainData, {
     layerMap: pbrResult?.layerMap ?? null,
     materialNames: pbrResult?.materialNames ?? null,
+    // Quantise against the exact range the TerrainBlock decodes with (the
+    // ceil'd maxHeight below), NOT the raw float range — otherwise BeamNG
+    // reconstructs the terrain stretched up through the tiles.
+    quantRangeM: maxHeight,
   });
 
   beginStep(`Generating base texture (${baseTexture}, ${terrainBaseTexSize}px)…`, 35);

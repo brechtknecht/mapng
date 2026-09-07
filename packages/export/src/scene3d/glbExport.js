@@ -70,6 +70,9 @@ export const exportToGLB = async (data, options = {}) => {
           ...(corridorMask ? {
             corridorSegment: corridorMask.segment,
             corridorHalfWidthM: corridorMask.halfWidthM,
+            // Chunk ownership (Voronoi by chunk centre): the worker trims the
+            // mesh to this chunk's cell so overlapping chunks never double up.
+            ...(corridorMask.ownership ? { corridorOwnership: corridorMask.ownership } : {}),
             memoryCache: false,
           } : {}),
           // Route mode: seat this chunk on the shared route-wide vertical anchor
@@ -91,6 +94,9 @@ export const exportToGLB = async (data, options = {}) => {
         // Surface the effective vertical anchor so a route can capture chunk 0's
         // and share it with every other chunk (continuous seams).
         options.onGroundOffset?.(googleGroup.userData?.groundOffsetM);
+        // Surface the worker's extracted + carved ground (route mode) so the
+        // route preview can display the exact floor the road mesh sits on.
+        options.onExtractedGround?.(googleGroup.userData?.extractedGround ?? null);
         // Clone the mesh nodes (geometry/material stay shared) — the cached
         // group is owned by the bake cache and may be parented into the 3D
         // preview scene right now; scene.add() on it directly would steal it.
@@ -102,7 +108,7 @@ export const exportToGLB = async (data, options = {}) => {
         for (const child of googleGroup.children) googleWrapper.add(child.clone());
         if (corridorMask) {
           onProgress?.('Masking Google tiles to corridor...');
-          const maskStats = clipGroupToCorridorXZ(googleWrapper, data, corridorMask.segment, corridorMask.halfWidthM, onProgress);
+          const maskStats = clipGroupToCorridorXZ(googleWrapper, data, corridorMask.segment, corridorMask.halfWidthM, onProgress, corridorMask.ownership ?? null);
           options.onMaskStats?.(maskStats);
         }
         googleWrapper.scale.y = computeUnitsPerMeter(data);

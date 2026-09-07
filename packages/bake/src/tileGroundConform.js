@@ -136,6 +136,17 @@ export const conformTilesToFloor = (meshes, data, {
   structures = null,
   diagnostics = false,
   glitchSnap = true,
+  // Corridor authority (metres, null = legacy gates). When set, every masked
+  // vertex that sits LOWER than this above the floor is road surface and is
+  // seated on the floor at full mask weight — no snap ceiling, no taper, no
+  // wall/riser exemption. Photogrammetry noise, seam skirts, curb blobs and
+  // parked cars below the clearance become the road; anything higher (trees,
+  // decks, facades) is a real object above it and keeps its height above the
+  // conformed ground. The semantic structure veto and the floor-trust gate
+  // still apply: OSM knows buildings, and an uncovered DEM-fallback floor
+  // never saw the road. This is what guarantees the drive surface (.ter) and
+  // the visible road coincide inside the corridor.
+  corridorClearanceM = null,
 } = {}) => {
   const minH = Number.isFinite(data.minHeight) ? data.minHeight : 0;
   const upm = computeUnitsPerMeter(data); // metres-Y → scene units, to metricise normals
@@ -397,15 +408,18 @@ export const conformTilesToFloor = (meshes, data, {
         const glitch = glitchSnap && m >= 0.9
           && x >= -HALF_SCENE && x <= HALF_SCENE && z >= -HALF_SCENE && z <= HALF_SCENE
           && !field.filled[field.cellIndex(x, z)];
-        // Tapered ceiling instead of a hard cutoff: full snap up to
+        // Corridor authority: below the clearance the vertex IS road surface —
+        // signed, so sunken geometry counts too — and no other gate applies.
+        const authority = corridorClearanceM != null && (p[i + 1] - terr) < corridorClearanceM;
+        // Legacy: tapered ceiling instead of a hard cutoff — full snap up to
         // (maxSnapM − snapTaperM), fading to 0 at maxSnapM.
-        const snapGate = glitch ? 1
+        const snapGate = (glitch || authority) ? 1
           : floatBefore <= maxSnapM - snapTaperM
             ? 1
             : floatBefore >= maxSnapM
               ? 0
               : (maxSnapM - floatBefore) / snapTaperM;
-        if (glitch || !nh[vi]) {
+        if (glitch || authority || !nh[vi]) {
           const w = m * snapGate;
           if (w > 0) {
             const ySnap = terr + roadEpsM;
@@ -429,13 +443,13 @@ export const conformTilesToFloor = (meshes, data, {
         // whose XZ lands on a road pixel would otherwise dominate the mean with
         // multi-metre "deviations" that are not road surface at all.
         if (m >= 0.9) {
-          if (floatBefore < maxSnapM || glitch) {
+          if (floatBefore < (corridorClearanceM ?? maxSnapM) || glitch) {
             // Flattened glitches are road surface now — audit them as such.
             roadVertsCore++;
             const dev = Math.abs(newY - (terr + roadEpsM));
             roadDevSum += dev;
             if (dev > roadDevMax) roadDevMax = dev;
-            if (!glitch && nh[vi]) roadWallExcluded++;
+            if (!glitch && !authority && nh[vi]) roadWallExcluded++;
             else if (snapGate <= 0) roadGateExcluded++;
           } else {
             roadOverheadCount++;

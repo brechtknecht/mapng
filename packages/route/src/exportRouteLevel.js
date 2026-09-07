@@ -26,7 +26,7 @@ import { exportGoogleTilesViaSidecar, prefetchGoogleTilesSweep, getGoogleTilesZO
 import { computeUnitsPerMeter } from '@mapng/bake/googleBakeCore';
 import { getCorridorTier, resolveChunkSizeM } from './routeCorridor.js';
 import { computeRouteFrame } from './routeStitch.js';
-import { buildCombinedRouteTerrain, sampleCombinedHeightMap, compositeRouteGround, sampleHeightAt } from './routeTerrainComposite.js';
+import { buildCombinedRouteTerrain, sampleCombinedHeightMap, compositeRouteGround, registerChunkGrounds, sampleHeightAt } from './routeTerrainComposite.js';
 import { getPreferredTerGround, getGroundStrategy } from '@mapng/bake/ground/extractTileGround';
 import { pickProfileRoads } from '@mapng/bake/roadProfiles';
 import { createRouteProgress } from './routeProgress.js';
@@ -297,6 +297,10 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           quality: tier.googleQuality,
           corridorSegment: chunks[i].segment,
           corridorHalfWidthM: tier.halfWidthM,
+          // Chunk ownership (Voronoi by chunk centre): the worker trims the
+          // mesh to this chunk's cell — the .ter switches floor on the same
+          // line. Part of the bake key, so prefetch and bake must both carry it.
+          corridorOwnership: { centers: chunks.map((c) => c.center), self: i },
         }),
       });
       pumpPrefetch();
@@ -395,6 +399,10 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
           quality: tier.googleQuality,
           corridorSegment: chunks[i].segment,
           corridorHalfWidthM: tier.halfWidthM,
+          // Chunk ownership (Voronoi by chunk centre): the worker trims the
+          // mesh to this chunk's cell — the .ter switches floor on the same
+          // line. Part of the bake key, so prefetch and bake must both carry it.
+          corridorOwnership: { centers: chunks.map((c) => c.center), self: i },
           // Chunk 0 bakes with its natural anchor and reports it back; chunks
           // 1..N seat on that same value so the rail stays continuous.
           ...(assemblyAnchor != null ? { sharedGroundOffsetM: assemblyAnchor } : {}),
@@ -514,7 +522,11 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
         ...(sharedGroundOffsetM != null ? { googleGroundOffsetM: sharedGroundOffsetM } : {}),
         // Must match the .dae bake — part of the bake key (tsnap).
         ...(preferTiles ? { googleExtractGround: true, googleGroundStrategy: groundStrategy } : {}),
-        corridorMask: { segment: chunks[i].segment, halfWidthM: tier.halfWidthM },
+        corridorMask: {
+          segment: chunks[i].segment,
+          halfWidthM: tier.halfWidthM,
+          ownership: { centers: chunks.map((c) => c.center), self: i },
+        },
       });
       progress.setPhase(i, 'done', 'complete');
 
@@ -577,10 +589,29 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
     // Composite the per-chunk tile grounds into ONE route .ter (bare-earth along
     // the corridor, DEM off-corridor, feathered between). Cached on asm.
     let combinedGround = null;
+    let registration = null;
+    let rawChunkGrounds = chunkGrounds.slice();
     if (preferTiles) {
+      // Vertical registration — DIAGNOSTIC ONLY. Every chunk bakes with one
+      // shared vertical anchor, so the tile meshes of all chunks are already one
+      // continuous surface (measured 0.00 m in every overlap). A floor
+      // disagreement between two chunks is therefore an EXTRACTION error of one
+      // of them (its floor left the road), never a frame offset — and applying
+      // it to the mesh placement, as this code did, moved a correct mesh by the
+      // wrong floor's error: 5.4 m tile steps at the seams of a flat route.
+      // The floor is fixed where it is wrong (worker applyDemReseat); here we
+      // only measure and report the residual so it stays visible.
+      registration = registerChunkGrounds(chunkGrounds);
+      for (const p of registration.pairs) {
+        const level = Math.abs(p.medianDhM) > 0.5 ? 'warn' : 'info';
+        devLog('ground-overlap', `floor disagreement ${p.a}→${p.b}: median Δh ${p.medianDhM.toFixed(2)}m over ${p.n} samples (not applied — tiles are continuous by the shared anchor; a floor step here is an extraction error of one chunk)`, { ...p, level });
+      }
       const grounds = chunkGrounds.filter(Boolean);
       if (grounds.length) {
-        const cg = compositeRouteGround(grounds, combined, { featherM: 15 });
+        // ownershipFeatherM: the .ter takes the OWNER chunk's floor (Voronoi by
+        // chunk centre), crossing over within ±6 m of the bisector — the same
+        // line the worker clipped each chunk's mesh on.
+        const cg = compositeRouteGround(grounds, combined, { featherM: 15, ownershipFeatherM: 6 });
         combinedGround = { heightMap: cg.heightMap, groundMax: cg.groundMax };
         console.info(
           `[routeLevel] route .ter ground: ${(cg.coverage * 100).toFixed(0)}% of the grid from tiles, ` +
@@ -703,6 +734,14 @@ export async function exportRouteAsBeamNGLevel(chunks, opts = {}) {
       bounds: chunks[i].bounds,
       minHeight: frameInputs[i]?.minHeight ?? 0,
       osmRoads: frameInputs[i]?.osmRoads ?? [],
+      // The worker's own floor (extracted + carved, exactly as the .ter
+      // composite consumed it). Without it the preview falls back to a live
+      // re-extraction whose uncovered cells sat at the chunk DATUM: chunks with
+      // different datums then showed metre-scale steps that never existed in
+      // the exported .ter.
+      ground: rawChunkGrounds[i]
+        ? { heightMap: rawChunkGrounds[i].heightMap, coveredMask: rawChunkGrounds[i].coverage ?? null, width: rawChunkGrounds[i].width, height: rawChunkGrounds[i].height, minHeight: rawChunkGrounds[i].minHeight }
+        : null,
     }));
 
     asm = { key, combined, combinedGround, combinedCenter, frame, pieces, previewChunks };

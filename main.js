@@ -31,6 +31,22 @@ if (window.location.pathname.startsWith('/quality-sandbox')) {
 	import('./components/terrain-sandbox/TerrainSandboxApp.vue').then(({ default: Sandbox }) => {
 		createApp(Sandbox).mount('#root');
 	});
+} else if (window.location.pathname.startsWith('/tiles-wall')) {
+	// Standalone LOD-wall probe: bakes ONE tiny AOI up an escalating
+	// errorTarget/sensor/quality ladder and tabulates where fidelity plateaus
+	// (Google's LOD ceiling) vs where the bake walls (cacheFull / timeout /
+	// missing scenes). Pure measurement — no 3D render. Same isolation contract.
+	import('./components/tiles-wall/TilesWallApp.vue').then(({ default: Wall }) => {
+		createApp(Wall).mount('#root');
+	});
+} else if (window.location.pathname.startsWith('/road-profile-bench')) {
+	// Standalone road-profile bench: real baked tiles, a road drawn where the
+	// user believes it is, and the elevation profile fitted by the production
+	// chain and by the asymmetric Whittaker baseline — every observation shown
+	// on the mesh and in a profile chart. Same isolation contract.
+	import('./components/road-profile-bench/RoadProfileBenchApp.vue').then(({ default: Bench }) => {
+		createApp(Bench).mount('#root');
+	});
 } else {
 	const app = createApp(App);
 	const pinia = createPinia();

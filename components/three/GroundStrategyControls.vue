@@ -97,6 +97,23 @@
         <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Heatmap of the tile-conform delta field's cell-to-cell variation |ΔD|: where it's red, the conform's smooth field would BEND rigid structures (buildings) by that many metres per 6 m cell. Blue tint = cell had no measured ground (inpainted guess — typically building interiors). Display-only.">show conform bend heatmap (debug)</span>
       </label>
 
+      <!-- debug: tile ↔ floor gap heatmap (red = tiles above the drive surface,
+           blue = floor through the tiles, green = coincident). Display-only. -->
+      <label class="flex items-center gap-2 cursor-pointer pt-1">
+        <div class="relative">
+          <input type="checkbox" :checked="store.gapFieldShow" @change="store.gapFieldShow = $event.target.checked" class="peer sr-only" />
+          <div class="w-7 h-4 bg-gray-200 rounded-full peer peer-checked:bg-[#22c55e] after:content-[''] after:absolute after:top-[2px] after:start-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-3 after:w-3 after:transition-all peer-checked:after:translate-x-full"></div>
+        </div>
+        <span class="text-[10px] text-gray-700 dark:text-gray-300" title="Per-cell vertical difference between the rendered Google tile surface (with z-offset + render bias) and the drive surface (.ter floor). Red = tiles float above the floor (the car drives inside the mesh), blue = the floor pokes through the tiles, green = coincident. Only tile-covered cells. Display-only.">show tile ↔ ground gap heatmap (debug)</span>
+        <select v-if="store.gapFieldShow" :value="store.gapRangeM" @change="store.gapRangeM = Number($event.target.value)" class="ml-auto text-[10px] bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded px-1 py-0.5" title="Colour saturates at ± this many metres">
+          <option :value="0.25">±0.25 m</option>
+          <option :value="0.5">±0.5 m</option>
+          <option :value="1">±1 m</option>
+          <option :value="2">±2 m</option>
+          <option :value="5">±5 m</option>
+        </select>
+      </label>
+
       <!-- post-process smoothing -->
       <label class="flex items-center gap-2 cursor-pointer pt-1">
         <div class="relative">

@@ -305,6 +305,13 @@ export async function bakeGoogle3DTiles(data, options = {}) {
     kept: bakeTiles.length,
     timedOut,
     elapsedMs: Math.round(elapsedMs),
+    // Wall diagnostics (/tiles-wall route). cacheFull/cacheBytes come from the
+    // LRU after the sweep; missingScenes counts selected tiles whose scene was
+    // evicted before bake (holes). The browser path has no worker RSS.
+    cacheFull,
+    cacheBytesMB: Math.round(cacheBytes / 1024 ** 2),
+    missingScenes,
+    rssMB: null,
   };
   // The effective vertical anchor — route chunk 0 reports it so every later
   // chunk + the preview share one datum (no per-chunk seam float).
